@@ -10,7 +10,7 @@ const busy = ref(false), error = ref(""), fileInput = ref(null);
 // The color row and shape grid edit one `bot:<shape>:<color>` preset; start from the current bot (or the default one).
 const current = computed(() => parseBotAvatar(props.avatar));
 const draft = computed(() => current.value || defaultBotAvatar(props.employeeId || props.name || ""));
-const colorHex = computed(() => BOT_AVATAR_COLORS.find(color => color.id === draft.value.color)?.hex);
+const colorHex = computed(() => draft.value.hex);
 async function save(payload) {
   if (busy.value) return;
   busy.value = true; error.value = "";

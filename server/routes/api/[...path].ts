@@ -1,3 +1,5 @@
+import { clientChat, watchClientChat } from "../../core/client-chat";
+import { openStream, SseChannel } from "../../core/sse";
 import { updateEmployeeAvatar, updateUserAvatar } from "../../core/employee-avatar";
 import { chatHistory } from "../../core/chat-page";
 import { prepareDutyInput } from "../../core/duty-condition";
@@ -21,6 +23,7 @@ import {
   createError,
   setHeader,
   send,
+  sendStream,
 } from "h3";
 import { app, employeeLive } from "../../core/application";
 import { ATTACHMENT_BYTES, safeFileName, storeAttachments } from "../../core/attachments";
@@ -90,7 +93,28 @@ export default defineEventHandler(async (event) => {
     try { grant = await app().clientSockets.authorize(request); }
     catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
     const body = await bodyJSON(event, 1 << 20);
-    try { return await clientChat(path[2], body, grant.userId); }
+    try {
+      if (path[2] === "stream") {
+        const { sink, body: stream } = openStream(event);
+        let detach: (() => void) | undefined, timer: ReturnType<typeof setInterval> | undefined;
+        const channel = new SseChannel({ ongone: () => { detach?.(); clearInterval(timer); } });
+        detach = await watchClientChat(app(), grant.userId, body.thread, (value) => {
+          if (channel.buffered > 512 * 1024) channel.close(1013, "Resync required");
+          else channel.control(value);
+        });
+        channel.attach(0, sink);
+        channel.control({ type: "ready" });
+        timer = setInterval(() => {
+          void app().clientSockets.authorize(request).then(async () => {
+            const user = await app().auth.user(grant.userId), employee = await engine.employee.for(String(body.thread).slice(9));
+            if (!user || user.disabled || !await employee.accessible(user)) throw Error("Access revoked");
+          }).catch(() => channel.close(1008, "Access revoked"));
+        }, 15000);
+        timer.unref?.();
+        return sendStream(event, stream);
+      }
+      return await clientChat(app(), path[2], body, grant.userId);
+    }
     catch (e: any) { throw createError({ statusCode: e.statusCode || 400, statusMessage: String(e.message || e).slice(0, 500) }); }
   }
   if (path[0] === "local-agent" && path[1] === "extension" && method === "POST") {
@@ -730,101 +754,6 @@ export default defineEventHandler(async (event) => {
     });
   }
 });
-
-/**
- * 蝴蝶面板（原生客户端凭据）的聊天接口：thread = "employee:<id>" | "group:<id>"。
- * 只做三件事：列会话、读历史（after/limit）、发一条用户消息。
- */
-async function clientChat(op: string, a: Obj, userId: string) {
-  const { engine, store } = app(), user = await app().auth.user(userId);
-  assert(user, "User not found");
-  if (op === "file") {
-    assert(typeof a.blobId === "string" && /^blob-[a-f\d]{32}$/.test(a.blobId) && await app().auth.canBlob(user, a.blobId), "File not found");
-    const blob = await store.blobData(a.blobId);
-    assert(blob && blob.data.length <= ATTACHMENT_BYTES, "File unavailable");
-    return { data: Buffer.from(blob.data).toString("base64") };
-  }
-  if (op === "threads") {
-    const employees = await Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
-      const s = await employee.state(), last = s.chatSession ? await store.lastMessage(s.chatSession) : undefined;
-      return {
-        thread: "employee:" + s.id, kind: "employee", id: s.id, name: s.name, avatar: s.avatar || "", mine: s.ownerId === user.id,
-        unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0,
-        running: !!s.chatSession && engine.active.has(s.chatSession),
-        runningTasks: s.tasks.filter((task) => task.status === "running").length,
-        attention: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length,
-        lastText: last ? String(last.text || "").slice(0, 60) : "", lastAt: last?.at || 0,
-      };
-    }));
-    const groups = (await engine.groups.list(user)).map((g) => ({
-      thread: "group:" + g.id, kind: "group", id: g.id, name: g.name,
-      users: g.users?.length || 0, employees: g.employees?.length || 0,
-      unread: g.unread, running: Array.isArray(g.running) && g.running.length > 0,
-      lastText: g.lastText || "", lastAt: g.lastAt || 0,
-    }));
-    return { employees, groups };
-  }
-  const thread = String(a.thread || ""), colon = thread.indexOf(":"), kind = thread.slice(0, colon), id = thread.slice(colon + 1);
-  assert(colon > 0 && id, "Invalid thread");
-  if (op === "messages") {
-    const query = new URLSearchParams();
-    if (typeof a.after === "number") query.set("after", String(Math.max(0, Math.floor(a.after))));
-    else query.set("limit", String(Math.min(200, Math.max(1, Number(a.limit) || 100))));
-    if (kind === "employee") {
-      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
-      assert(employee && await employee.accessible(user), "Employee not found");
-      const session = await employee.chat(user.id);
-      const page = await chatHistory(store, session.id, query);
-      // 待确认气泡里的任务状态会随作答翻转：返回前把它刷成当前值，面板按它决定还能不能点。
-      const live = new Map((await employee.state()).tasks.map((task) => [task.id, task.status]));
-      for (const message of page.messages || [])
-        for (const task of message.tasks || [])
-          if (live.has(task.id)) task.status = live.get(task.id)!;
-      const state = await employee.state();
-      return { thread, title: state.name, avatar: state.avatar || "", running: engine.active.has(session.id), ...page };
-    }
-    const group = await engine.groups.mine(user, id);
-    // 群聊作者头像是预设字符串（bot:shape:color），给面板解析成 BotAvatar；key 为 kind:id。
-    const view = await engine.groups.view(group, user);
-    const authors = Object.fromEntries([
-      ...(view.employees || []).map((p) => ["employee:" + p.id, { avatar: p.avatar || "" }]),
-      ...(view.users || []).map((p) => ["user:" + p.id, { avatar: p.avatar || "" }]),
-    ]);
-    return { thread, title: group.name, authors, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), ...await chatHistory(store, group.session, query) };
-  }
-  if (op === "read") {
-    if (kind === "employee") {
-      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
-      assert(employee && await employee.accessible(user), "Employee not found");
-      const session = await employee.chat(user.id);
-      return { seq: await store.markRead(user.id, session.id) };
-    }
-    const group = await engine.groups.mine(user, id);
-    return { seq: await store.markRead(user.id, group.session) };
-  }
-  if (op === "control") {
-    // 面板上的待确认气泡：只允许对自己的牛马发 approve/answer（群聊任务不在这里控制）。
-    assert(kind === "employee", "Panel control only applies to an employee thread");
-    const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
-    assert(employee && await employee.accessible(user), "Employee not found");
-    assert(["approve", "answer", "stop"].includes(String(a.action || "")), "Unsupported control action");
-    return await employee.control({ id: a.id, action: a.action, approved: a.approved, text: a.text }, { token: "", name: user.username || "用户" });
-  }
-  if (op === "send") {
-    const text = String(a.text || "").trim();
-    assert(text && text.length <= 2 << 20, "Message required");
-    if (kind === "employee") {
-      const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
-      assert(employee && await employee.accessible(user), "Employee not found");
-      const session = await employee.chat(user.id);
-      await engine.submitChat(session.id, { role: "user", text, actorId: user.id });
-      return { ok: true };
-    }
-    await engine.groups.send(user, id, { text });
-    return { ok: true };
-  }
-  throw createError({ statusCode: 404, statusMessage: "Chat route not found" });
-}
 
 /** 群聊 (groups.ts). Reading is open to every user in the group; changing anything needs a non-viewer account. */
 async function groupRoute(path: string[], method: string, a: Obj, user: { id: string; role: string }, query: URLSearchParams) {

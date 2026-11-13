@@ -16,12 +16,11 @@
 !docker/**
 !local/
 !local/*.go
-!local/*.html
-!local/*.js
 !local/*.syso
 !local/go.mod
 !local/go.sum
-!local/icon.ico
+!local/resources/
+!local/resources/**
 !local/VERSION
 !local/extension/
 !local/extension/**

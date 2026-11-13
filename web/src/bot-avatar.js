@@ -1,3 +1,5 @@
+import { BOT_AVATAR_SHAPE_ALIASES } from "../../shared/employee-avatars";
+
 // Original bot avatar geometry: soft silhouettes drawn procedurally in a 100×100 box,
 // with two white oval eyes whose pose (look direction, blink, squint…) can be animated or frozen.
 const TAU = Math.PI * 2;
@@ -78,6 +80,8 @@ export const BOT_SHAPE_GEOMETRY = {
   blob: { d: polar(t => 36 + 4 * Math.sin(2 * t + 1) + 3 * Math.cos(3 * t) + 2 * Math.sin(5 * t + 2), 50, 51, 120), eyes: { x: 50, y: 50 } },
   ghost: { d: ghost(), eyes: { x: 50, y: 48 } },
 };
+// shortcut: native-only presets use the closest web geometry; add exact silhouettes when both pickers need visual parity.
+for (const [alias, shape] of Object.entries(BOT_AVATAR_SHAPE_ALIASES)) BOT_SHAPE_GEOMETRY[alias] = BOT_SHAPE_GEOMETRY[shape];
 export const DEFAULT_EYES = { gap: 9.5, rx: 5.2, ry: 7.8 };
 
 /**

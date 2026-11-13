@@ -1,0 +1,4 @@
+# Keep release asset bytes stable across Windows and Unix checkouts.
+assets/** -text whitespace=cr-at-eol
+src/** -text whitespace=cr-at-eol
+index.html -text whitespace=cr-at-eol

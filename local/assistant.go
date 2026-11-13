@@ -1,60 +1,46 @@
 package main
 
 // 蝴蝶面板的界面与数据通道：面板里不登录网站、也不加载站点前端。
-// 页面（assistant_page.html）由本进程直接发给 WebView2，数据由这段代码带设备凭据
+// 界面资源由本进程直接发给 WebView2，数据由这段代码带设备凭据
 // 转发给本站点的 /api/local-agent/chat/*（原生客户端通道）。
 // 地址带 configToken：本机别的程序不知道令牌就打不开，接口也只认这个令牌。
 
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"strings"
 	"time"
 )
 
-//go:embed assistant_page.html
-var assistantPage []byte
-
-//go:embed assistant_marked.js
-var assistantMarked []byte
+//go:embed all:resources/grok
+var assistantResources embed.FS
 
 // assistantMount 把面板页面和它的几个接口挂到本地服务器上。
 func (a *Agent) assistantMount(mux *http.ServeMux) {
 	base := a.assistantPath()
+	resources, _ := fs.Sub(assistantResources, "resources/grok")
+	static := http.StripPrefix(base, http.FileServer(http.FS(resources)))
+
 	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/api/threads"):
-			a.assistantProxy(w, r, "threads")
-		case strings.HasSuffix(r.URL.Path, "/api/messages"):
-			a.assistantProxy(w, r, "messages")
-		case strings.HasSuffix(r.URL.Path, "/api/send"):
-			a.assistantProxy(w, r, "send")
-		case strings.HasSuffix(r.URL.Path, "/api/read"):
-			a.assistantProxy(w, r, "read")
-		case strings.HasSuffix(r.URL.Path, "/api/control"):
-			// 待确认气泡上的「允许 / 拒绝 / 回答」：透传给牛马的 employee.control。
-			a.assistantProxy(w, r, "control")
-		case strings.HasSuffix(r.URL.Path, "/api/file"):
-			a.assistantProxy(w, r, "file")
-		case strings.HasSuffix(r.URL.Path, "/api/close"):
-			// 页面上的 × 只是把面板收回屏幕外（WebView2 留在内存里，下次点蝴蝶秒开）。
-			butterflyPanelPark()
-			assistantReply(w, http.StatusOK, map[string]any{"ok": true})
-		case strings.HasSuffix(r.URL.Path, "/marked.js"):
-			// markdown 渲染用 marked（MIT），面板里不带构建步骤，直接内嵌发出去。
-			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write(assistantMarked)
-		case r.Method == http.MethodGet:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write(assistantPage)
+		case strings.HasPrefix(r.URL.Path, base+"api/"):
+			op := strings.TrimPrefix(r.URL.Path, base+"api/")
+			switch op {
+			case "close":
+				butterflyPanelPark()
+				assistantReply(w, http.StatusOK, map[string]any{"ok": true})
+			case "metadata", "threads", "messages", "send", "acceptance", "read", "control", "file", "create", "update", "cancel", "stream":
+				a.assistantProxy(w, r, op)
+			default:
+				http.NotFound(w, r)
+			}
 		default:
-			http.NotFound(w, r)
+			static.ServeHTTP(w, r)
 		}
 	})
 }
@@ -81,8 +67,8 @@ func (a *Agent) assistantProxy(w http.ResponseWriter, r *http.Request, op string
 		http.Error(w, "cross-origin request denied", http.StatusForbidden)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
-	if err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+	if err != nil || len(body) > 1<<20 {
 		http.Error(w, "unreadable body", http.StatusBadRequest)
 		return
 	}
@@ -91,8 +77,15 @@ func (a *Agent) assistantProxy(w http.ResponseWriter, r *http.Request, op string
 		assistantReply(w, http.StatusConflict, map[string]any{"error": "还没有配对站点，请先在托盘打开配置页完成配对"})
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-	defer cancel()
+	ctx := r.Context()
+	timeout := 30 * time.Second
+	if op == "stream" {
+		timeout = 0 // The request context closes the downstream stream with the window.
+	} else {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, origin+"/api/local-agent/chat/"+op, bytes.NewReader(body))
 	if err != nil {
 		assistantReply(w, http.StatusBadGateway, map[string]any{"error": err.Error()})
@@ -100,12 +93,36 @@ func (a *Agent) assistantProxy(w http.ResponseWriter, r *http.Request, op string
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-	response, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	response, err := (&http.Client{Timeout: timeout}).Do(req)
 	if err != nil {
 		assistantReply(w, http.StatusBadGateway, map[string]any{"error": "连不上站点：" + err.Error()})
 		return
 	}
 	defer response.Body.Close()
+	if op == "stream" && response.StatusCode == http.StatusOK {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Accel-Buffering", "no")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming unavailable", http.StatusInternalServerError)
+			return
+		}
+		flusher.Flush()
+		buffer := make([]byte, 16<<10)
+		for {
+			n, readErr := response.Body.Read(buffer)
+			if n > 0 {
+				if _, writeErr := w.Write(buffer[:n]); writeErr != nil {
+					return
+				}
+				flusher.Flush()
+			}
+			if readErr != nil {
+				return
+			}
+		}
+	}
 	limit := int64(8 << 20)
 	if op == "file" || op == "messages" {
 		limit = 48 << 20 // 25MiB binary plus base64, or a page of full step outputs

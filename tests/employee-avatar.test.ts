@@ -51,7 +51,15 @@ test("bot avatars encode shape and color in the preset string and every shape ha
       assert.equal(employeeAvatarURL("employee", value), "", "bot avatars render inline, never as a URL");
     }
   }
-  for (const value of ["bot:", "bot:round", "bot:round:", "bot:unknown:red", "bot:round:unknown", "bot:round:red:extra", "bot:round:#ff0000", "bot:../x:red", "BOT:round:red"]) assert.equal(isAvatarPreset(value), false, value);
+  const nativeShapes = ["blob", "pebble", "bean", "egg", "squircle", "tablet", "capsule", "cylinder", "hex", "gem", "crystal", "wedge", "shield", "dome", "arch", "cloud", "teardrop", "leaf", "square", "sparkle", "clover", "flower", "heart", "house", "star", "pumpkin"];
+  for (const shape of nativeShapes) for (const color of ["black", "brown", "red", "orange", "yellow", "green", "cyan", "blue", "violet", "magenta", "gray"]) {
+    const value = `bot:${shape}:${color}`, parsed = parseBotAvatar(value);
+    assert(isAvatarPreset(value), value);
+    assert.equal(parsed?.shape, shape);
+    assert.equal(parsed?.color, color);
+    assert((BOT_SHAPE_GEOMETRY as any)[shape], shape);
+  }
+  for (const value of ["bot:", "bot:round", "bot:round:", "bot:unknown:red", "bot:round:unknown", "bot:constructor:red", "bot:round:constructor", "bot:round:red:extra", "bot:round:#ff0000", "bot:../x:red", "BOT:round:red"]) assert.equal(isAvatarPreset(value), false, value);
   assert.deepEqual(defaultBotAvatar("employee-a"), defaultBotAvatar("employee-a"), "the default bot is stable per employee");
   assert(new Set(["a", "b", "c", "d", "e", "f", "g", "h"].map(seed => JSON.stringify(defaultBotAvatar(seed)))).size > 4, "default bots vary across employees");
   assert(LOOK_POSES.length >= 15 && !LOOK_POSES.some((id) => /blink|wink|cross|daze|skeptic|squint|sleepy/.test(id)), "variety comes from head turns, not 2D expressions");

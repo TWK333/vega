@@ -3,7 +3,7 @@
 package main
 
 // 蝴蝶面板：点任务栏蝴蝶后出现的对话窗，里面是本地内置的助理界面（数据走本站点的客户端通道）。
-// 对齐 Nova 的气泡：无边框圆角、置顶、不占任务栏、贴在蝴蝶上方、失焦自动收起，再点蝴蝶唤回。
+// 对话窗保留原生缩放能力，由新版前端提供标题栏和窗口按钮，不置顶、不自动收起。
 // 进程在客户端启动时就拉起来预热：窗口建在屏幕外、页面先加载好，点开只是把它挪出来（没有白框闪现）。
 // 单独开进程：WebView2 是第三方 COM 组件，初始化失败也只关掉这一个小窗，不带走托盘和正在跑的任务。
 
@@ -27,8 +27,8 @@ import (
 const (
 	butterflyPanelTitle = "Vega 蝴蝶助理"
 	// 现在是普通窗口，不是气泡：默认给够面积放得下对话和设置，用户拖过就按上次的大小打开。
-	butterflyPanelWidth        = 900
-	butterflyPanelHeight       = 720
+	butterflyPanelWidth        = 1080
+	butterflyPanelHeight       = 780
 	butterflyPanelMinWidth     = 560
 	butterflyPanelMinHeight    = 420
 	butterflyPanelMargin       = 8
@@ -245,8 +245,8 @@ func panelNavigate(hwnd windows.Handle) {
 	panelHost.Unlock()
 }
 
-// butterflyPanelChrome 现在它是一个普通窗口：标题栏、可缩放、不置顶、不自动收起；
-// 仍不进任务栏（入口是任务栏蝴蝶和图盘），免得屏幕外预热时多出一个按钮。
+// butterflyPanelChrome 保留原生缩放、最小/最大化能力，标题栏由新版前端绘制。
+// 仍不进任务栏（入口是任务栏蝴蝶和托盘），免得屏幕外预热时多出一个按钮。
 func butterflyPanelChrome(hwnd windows.Handle) {
 	gwlStyle, gwlExStyle := ^uintptr(15), ^uintptr(19) // GWL_STYLE = -16, GWL_EXSTYLE = -20
 	const (

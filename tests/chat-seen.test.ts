@@ -58,8 +58,6 @@ test("客户端和网页都画出「新」分界，并在这之后收起", async
   const app = await text("web/src/App.vue");
   assert.match(app, /newFrom\.value = seenSeq\(user\.value\.id, session\.id\)/, "进来时取上次看到的位置");
   assert.match(app, /next === "chat" && user\.value && current\.value\) newFrom\.value = seenSeq/, "切出再回来也能重新取");
-  const panel = await text("local/assistant_page.html");
-  assert.match(panel, /markGone \? " gone" : ""/);
-  assert.match(panel, /\.ta-new\.gone \{ visibility: hidden; \}/);
-  assert.match(panel, /state\.markGone = true;/, "面板来了新消息就收起");
+  const bridge = await text("local/resources/grok/grok_bridge.js");
+  assert.match(bridge, /method === "setAgentUnread"/, "客户端将已读状态交给同一套 Vega 接口");
 });

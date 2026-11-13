@@ -27,15 +27,26 @@ export const BOT_AVATAR_COLORS = [
   { id: "gray", name: "灰色", hex: "#7c7c84" }, { id: "sky", name: "天蓝", hex: "#30b4f0" },
 ] as const;
 
+// Native renderer presets keep their own ids without changing existing defaults or the web picker.
+export const BOT_AVATAR_SHAPE_ALIASES: Record<string, string> = {
+  pebble: "round", egg: "round", squircle: "tile", tablet: "chonk", capsule: "bean", cylinder: "chonk",
+  hex: "hexagon", crystal: "gem", wedge: "triangle", shield: "gem", dome: "ghost", arch: "ghost",
+  teardrop: "drop", leaf: "drop", square: "tile", house: "gem", pumpkin: "apple",
+};
+const BOT_AVATAR_COLOR_ALIASES: Record<string, string> = { yellow: "amber", cyan: "teal", violet: "purple", magenta: "pink" };
+
 export type BotAvatar = { shape: string; color: string; hex: string };
 
 /** `bot:<shape>:<color>` → parts, or undefined for anything else. */
 export function parseBotAvatar(value: unknown): BotAvatar | undefined {
   if (typeof value !== "string") return undefined;
   const match = /^bot:([a-z]+):([a-z]+)$/.exec(value);
-  if (!match || !BOT_AVATAR_SHAPES.some(shape => shape.id === match[1])) return undefined;
-  const color = BOT_AVATAR_COLORS.find(color => color.id === match[2]);
-  return color && { shape: match[1], color: color.id, hex: color.hex };
+  if (!match) return undefined;
+  const shapeId = Object.hasOwn(BOT_AVATAR_SHAPE_ALIASES, match[1]) ? BOT_AVATAR_SHAPE_ALIASES[match[1]] : match[1];
+  const colorId = Object.hasOwn(BOT_AVATAR_COLOR_ALIASES, match[2]) ? BOT_AVATAR_COLOR_ALIASES[match[2]] : match[2];
+  if (!BOT_AVATAR_SHAPES.some(shape => shape.id === shapeId)) return undefined;
+  const color = BOT_AVATAR_COLORS.find(color => color.id === colorId);
+  return color && { shape: match[1], color: match[2], hex: color.hex };
 }
 
 export function botAvatarPreset(shape: string, color: string) {

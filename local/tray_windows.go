@@ -11,10 +11,10 @@ import (
 	"github.com/getlantern/systray"
 )
 
-//go:embed icon.ico
+//go:embed resources/tray/icon.ico
 var iconData []byte
 
-//go:embed icon-connected.ico
+//go:embed resources/tray/icon-connected.ico
 var iconConnectedData []byte
 
 func systrayRun(configure, onQuit func()) {
