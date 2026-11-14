@@ -18,6 +18,17 @@ import { requireSceneModel, schedulerLimits, type Config } from "./config";
 import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
+import {
+  explicitScheduleEvent,
+  nextDue,
+  parseExplicitSchedule,
+  planIntake,
+  wakeFrom,
+  workKey,
+  type ExplicitSchedule,
+  type WakeEvent,
+  type WorkEvent,
+} from "./work-intake";
 
 export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "browserClientId" | "localPlatform" | "ownerId"> & { browserClientName?: string };
 export type Owner = { token: string; name: string };
@@ -33,6 +44,16 @@ export type Task = Obj & {
   group?: TaskGroup;
   /** Images and files of the messages that started or supplemented the task; each run passes on the new ones. */
   attachments?: { images: NonNullable<Message["images"]>; files: NonNullable<Message["files"]> };
+  /** 用户点名的定时。没有它，调度器不会为了找活而醒来。 */
+  schedule?: ExplicitSchedule;
+  /** 当前这一步还在跑时送到的事件，等这一步结束再吸收。 */
+  inbox?: WorkEvent[];
+  /** 启动或唤醒这一轮的事件，供事后核对。 */
+  wake?: WakeEvent;
+  /** 不是用户当下交代的，调度时让位于用户任务。 */
+  proactive?: boolean;
+  seenEvents?: string[];
+  seenEvidence?: string[];
 };
 /** Who said something in a group chat: a user or an employee. */
 export type GroupAuthor = { kind: "user" | "employee"; id: string; name: string };
@@ -422,6 +443,7 @@ export type EmployeeRuntime = {
     checkName: (employeeId: string, name: string) => Promise<void>;
   };
 };
+const evidenceOf = (event: WorkEvent) => String(event.evidence || "").trim();
 export class Employee {
   busy = new Map<string, { computer: boolean; session: string }>();
   writers = new Map<string, { taskId: string; hold: boolean }>();
@@ -1050,6 +1072,11 @@ export class Employee {
                 !a.key || (typeof a.key === "string" && [...a.key].length <= 200),
                 "key exceeds 200",
               );
+              // 用户话里已经点了时刻或周期：并进同一条定时，不另开，也不写成职责。
+              if (parseExplicitSchedule(content, now)) {
+                const outcome = this.applyEvent(s, explicitScheduleEvent(content, now)!, now);
+                return { id: outcome.taskId, exists: outcome.action !== "start", scheduled: true, status: outcome.status, next: outcome.reason };
+              }
               const old = a.key ? s.tasks.find((t) => t.key === a.key) : undefined;
               if (old) return { id: old.id, exists: true, status: old.status, next: "这是已有任务，本次创建没有自动续做；先核对原目标和用户意图，需要继续时按状态使用 employee_task_manage 的 resume，不要绕过审批或用户停止。" };
               assert(
@@ -1823,6 +1850,145 @@ export class Employee {
     }
     return value;
   }
+  /** 用户在对话里说清了时刻或周期时记下，到点由现有调度器续做同一条。认不出就什么都不建。 */
+  async acceptUserSchedule(text: string, now = Date.now()) {
+    const event = explicitScheduleEvent(text, now);
+    if (!event) return;
+    return this.intake(event, now);
+  }
+  /** 外部事件（点名、CI、评论、到点）接入已有任务。不新建执行器，也不轮询找活。 */
+  async intake(event: WorkEvent, now = event.at || Date.now()) {
+    return this.update((s) => this.applyEvent(s, event, now));
+  }
+  private applyEvent(s: EmployeeState, event: WorkEvent, now: number) {
+    const views = s.tasks.map((task) => ({
+      id: task.id,
+      key: task.key || "",
+      status: task.status,
+      busy: this.busy.has(task.id) || task.status === "running",
+      seenEvidence: task.seenEvidence,
+      seenEvents: task.seenEvents,
+    }));
+    const plan = planIntake(views, event, now);
+    const found = (id?: string) => s.tasks.find((task) => task.id === id);
+    if (plan.action === "ignore") {
+      const existing = s.tasks.find((task) => task.key === workKey(event.item));
+      return { action: plan.action, taskId: existing?.id, reason: plan.reason, status: existing?.status };
+    }
+    if (plan.action === "leave") {
+      const task = found(plan.taskId);
+      if (task) this.rememberEvent(task, event, false);
+      return { action: plan.action, taskId: plan.taskId, reason: plan.reason, status: task?.status };
+    }
+    if (plan.action === "attach" || plan.action === "queue-fire") {
+      const task = found(plan.taskId)!;
+      this.rememberEvent(task, event, true);
+      if (plan.action === "queue-fire") {
+        const schedule = task.schedule || event.schedule;
+        if (schedule) {
+          task.schedule = schedule;
+          schedule.queuedFire = { at: now, eventId: event.id };
+        }
+      } else {
+        task.inbox = [...(task.inbox || []), event].slice(-20);
+      }
+      return { action: plan.action, taskId: task.id, reason: plan.reason, status: task.status };
+    }
+    if (plan.action === "resume") {
+      const task = found(plan.taskId)!;
+      this.rememberEvent(task, event, true);
+      this.writeEvent(task, event, plan.status, plan.nextCheckAt, plan.reason);
+      return { action: plan.action, taskId: task.id, reason: plan.reason, status: task.status };
+    }
+    assert(s.tasks.filter((task) => !ended(task.status)).length < 100, "Active task capacity reached");
+    const bound = this.bindExecution(s);
+    const task: Task = {
+      id: id("t"),
+      text: event.text,
+      status: plan.status,
+      createdAt: now,
+      profile: "lightweight",
+      cwd: bound.cwd || s.cwd,
+      owner: { token: s.ownerId || "", name: "" },
+      employeeId: this.employeeId,
+      execution: bound.execution,
+      key: workKey(event.item),
+      nextCheckAt: plan.nextCheckAt,
+      plan: [],
+      progress: [],
+      schedule: event.schedule ? { dueAt: event.schedule.dueAt, repeat: event.schedule.repeat, request: event.schedule.request } : undefined,
+      wake: wakeFrom(event),
+      proactive: !event.userInitiated,
+      seenEvents: [event.id],
+      seenEvidence: evidenceOf(event) ? [evidenceOf(event)] : [],
+      inbox: [],
+      waiting: plan.status === "waiting" ? plan.reason : "",
+    };
+    s.tasks.push(task);
+    return { action: "start" as const, taskId: task.id, reason: plan.reason, status: task.status };
+  }
+  private rememberEvent(task: Task, event: WorkEvent, keepEvidence: boolean) {
+    task.seenEvents = [...new Set([...(task.seenEvents || []), event.id])].slice(-50);
+    const evidence = evidenceOf(event);
+    if (keepEvidence && evidence)
+      task.seenEvidence = [...new Set([...(task.seenEvidence || []), evidence])].slice(-50);
+  }
+  private writeEvent(task: Task, event: WorkEvent, status: string, nextCheckAt: number, reason: string) {
+    if (event.schedule) {
+      task.schedule = { dueAt: event.schedule.dueAt, repeat: event.schedule.repeat, request: event.schedule.request };
+      if (event.text) task.text = event.text;
+    }
+    const note = [event.text, event.evidence].filter(Boolean).join("\n");
+    if (note) task.answer = `${task.answer || ""}\n${note}`.trim();
+    task.wake = wakeFrom(event);
+    task.proactive = !event.userInitiated;
+    task.status = status;
+    task.nextCheckAt = nextCheckAt;
+    task.finishedAt = 0;
+    if (status === "waiting") task.waiting = reason;
+    else if (status === "queued" || status === "deferred") task.waiting = "";
+  }
+  /** 当前步骤结束后才吸收。返回 true 表示同一条任务要再走一轮，这一轮不能当成做完。 */
+  private absorbStep(task: Task) {
+    const inbox = task.inbox || [];
+    const queued = task.schedule?.queuedFire;
+    if (!inbox.length && !queued) return false;
+    const note = [
+      ...inbox.map((event) => [event.text, event.evidence].filter(Boolean).join("\n")),
+      queued ? "上一拍还在执行，这一拍没有另开任务，也没有打断当前步骤；这一步结束后继续同一条。" : "",
+    ].filter(Boolean).join("\n");
+    if (note) task.answer = `${task.answer || ""}\n${note}`.trim();
+    const last = inbox.at(-1);
+    if (last) task.wake = wakeFrom(last);
+    else if (queued && task.schedule)
+      task.wake = { id: queued.eventId, kind: "schedule", at: queued.at, text: [...task.schedule.request].slice(0, 200).join(""), item: String(task.key || task.id), userInitiated: false };
+    task.inbox = [];
+    if (task.schedule) delete task.schedule.queuedFire;
+    const hold = inbox.find((event) => event.hold);
+    task.finishedAt = 0;
+    task.completion = "";
+    if (hold) {
+      task.status = "waiting";
+      task.waiting = hold.text;
+      task.nextCheckAt = 0;
+      return true;
+    }
+    task.status = "queued";
+    task.nextCheckAt = 0;
+    return true;
+  }
+  /** 重复周期的一轮结束：还是这一条，下一拍再做用户点名的那一件，不补跑错过的每一拍。 */
+  private armSchedule(task: Task, now: number) {
+    const schedule = task.schedule;
+    if (!schedule?.repeat) return;
+    if (!schedule.dueAt || schedule.dueAt <= now) schedule.dueAt = nextDue(schedule.repeat, now);
+    delete schedule.queuedFire;
+    task.status = "deferred";
+    task.nextCheckAt = schedule.dueAt;
+    task.finishedAt = 0;
+    task.completion = "";
+    task.checkpoint = `用户要求按这个周期重复：${schedule.request}。下一拍 ${beijingDateTime(schedule.dueAt)}，只做这一件。`;
+  }
   fire(s: EmployeeState, d: Obj, now: number, event?: string) {
     const bound = this.bindExecution(s);
     const t: Task = {
@@ -1912,8 +2078,23 @@ export class Employee {
         let globalSlots = limits.global - root.busyTotal();
         let localSlots = limits.perEmployee - this.busy.size;
         const writers = root.writers;
+        // 只为已经记下的定时醒一次。正在跑的那一拍到点了就排队，不另开、不打断。
         for (const t of s.tasks) {
-          if (this.busy.has(t.id) || !["queued", "deferred", "recovering"].includes(t.status))
+          const due = t.schedule?.repeat ? t.schedule.dueAt || 0 : 0;
+          if (!due || ["stopped", "cancelled", "sealed", "done"].includes(t.status)) continue;
+          if (due > now) next = Math.min(next, due);
+          else if (this.busy.has(t.id) || t.status === "running") {
+            if (!t.schedule!.queuedFire) {
+              t.schedule!.queuedFire = { at: now, eventId: `schedule:${due}` };
+              changed = true;
+            }
+          }
+        }
+        const rank = (t: Task) => (t.schedule || t.proactive ? 1 : 0);
+        const ordered = [...s.tasks].sort((a, b) => rank(a) - rank(b));
+        for (const t of ordered) {
+          const canStart = ["queued", "deferred", "recovering"].includes(t.status) || (t.status === "failed" && !!t.schedule);
+          if (this.busy.has(t.id) || !canStart)
             continue;
           // 这台设备还没回连（或已待命）：不派发、不换设备、不改到服务端执行。
           const waitClient = t.status === "recovering" ? t.recovery?.waitClient : undefined;
@@ -1967,6 +2148,21 @@ export class Employee {
           t.queueReason = "";
           t.status = "running";
           t.nextCheckAt = 0;
+          if (t.schedule) {
+            t.wake = {
+              id: `schedule:${now}`,
+              kind: "schedule",
+              at: now,
+              text: [...String(t.schedule.request || t.text || "")].slice(0, 200).join(""),
+              item: String(t.key || t.id),
+              userInitiated: false,
+            };
+            if (t.schedule.repeat) {
+              t.schedule.dueAt = nextDue(t.schedule.repeat, now);
+              next = Math.min(next, t.schedule.dueAt);
+            }
+            delete t.schedule.queuedFire;
+          }
           jobs.push(clone(t));
           changed = true;
         }
@@ -2043,7 +2239,7 @@ export class Employee {
         for (const note of notes) task.checkpoint = (task.checkpoint || "") + "\n" + note;
         if (computer) task.computerSession = session;
         else task.workSession = session;
-        s.runs.push({ taskId: task.id, session, scene, at: Date.now(), status: "running", notes: [] });
+        s.runs.push({ taskId: task.id, session, scene, at: Date.now(), status: "running", notes: [], ...(task.wake ? { wake: task.wake } : {}) });
         s.runs = s.runs.slice(-200);
         task.completion = "";
         task.summary = "";
@@ -2087,7 +2283,10 @@ export class Employee {
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、适用职责与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。用户要求步骤产物时，在该步骤完成后用task_progress的stepOutput交出独立产物并继续，不把产物塞进对话正文，也不等最终收口；已保存的步骤产物不要重复发送。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统只会选用本次交付期内尚未作为步骤产物交出的最新较长正文；已交出的步骤产物留在独立产物卡中，不重复写进最终正文；仅当用户明确要求时可显式引用其文本；没有单独最终正文时可传deliverableRefs=[]，已写出未交出的正文时不要传[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
+      const scheduleNote = task.schedule
+        ? `\n[工作原则]\n${state.instruction || "（无）"}\n这是用户点名的定时，只做这一件已经记下的事，不要另找工作。缺少必要文件、遇到合并冲突、下一步会对外发送或提交、或授权范围会扩大时，停下来问用户，不要自行扩大授权。\n`
+        : "";
+      const prompt = scheduleNote + context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、适用职责与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。用户要求步骤产物时，在该步骤完成后用task_progress的stepOutput交出独立产物并继续，不把产物塞进对话正文，也不等最终收口；已保存的步骤产物不要重复发送。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统只会选用本次交付期内尚未作为步骤产物交出的最新较长正文；已交出的步骤产物留在独立产物卡中，不重复写进最终正文；仅当用户明确要求时可显式引用其文本；没有单独最终正文时可传deliverableRefs=[]，已写出未交出的正文时不要传[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       // Attachments the work session has not been given yet.
       const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));
@@ -2118,6 +2317,11 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                 if (t.status === "running") {
                   if (this.stopping || this.root?.stopping) {
                     t.status = "running";
+                  } else if (this.absorbStep(t)) {
+                    // 这一步已经结束，才吸收期间送到的事件或被错过的一拍。
+                  } else if (t.schedule?.repeat) {
+                    t.result = result;
+                    this.armSchedule(t, Date.now());
                   } else if (error) {
                     t.failures = (t.failures || 0) + 1;
                     this.recover(t, result);

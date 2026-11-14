@@ -30,6 +30,7 @@ import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE, sinceNewSession } from "./context";
 import { APPUSE_TOOLS } from "./appuse-tools";
 import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, followUpOpen, type EmployeeRuntime, type Task } from "./employee";
+import { scheduleDigest } from "./work-intake";
 import { EmployeeBrowsers } from "./employee-browsers";
 import { NetworkRelay } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
@@ -972,6 +973,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           await this.store.saveSession(session);
         }
       }
+      // 用户说清了时刻或周期就先记下同一条定时。模型随后不要再写成职责或第二条。
+      if (input?.text && session.employeeId && !session.taskId && !session.groupId)
+        await (await this.employeeFor(session)).acceptUserSchedule(input.text);
       tools = await Tools.create(this, session, config, control.signal, emit);
       tools.actorId = input?.actorId;
       this.active.get(key)!.context = tools.context;
@@ -1050,7 +1054,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         ? `[近期已交付、可在原任务续做] ${JSON.stringify(followUps)}\n这里只列最近5条，较早的任务也可能续做；按用户意图和完整目标判断，不以时间决定。resume 被拒时先核对原因，不要自动新建替代任务。\n`
         : "";
       const taskDigest = employee && !session.taskId
-        ? followUpDigest + (activeTasks.length
+        ? followUpDigest + scheduleDigest(employee.tasks || []) + (activeTasks.length
           ? `\n[当前活跃任务摘要] ${JSON.stringify(activeTasks)}\n先结合用户意图和任务候选判断是否续做原目标；只有新的独立需求才 employee_task_create（建议带 dedupeKey）。摘要不够时用 employee_status 查看完整字段、计划和结果。\n`
           : `\n[当前活跃任务摘要] 无活跃任务，但已交付的关联任务仍可能续做；先按用户意图及任务候选判断，只有新的独立需求才 employee_task_create。\n`)
         : "";
