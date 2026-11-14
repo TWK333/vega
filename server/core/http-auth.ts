@@ -78,6 +78,8 @@ export async function gate(event: H3Event, path: string) {
   if ((path === "/api/local-agent/result" || path === "/api/local-agent/extension") && event.method === "POST") return;
   // 蝴蝶面板的聊天接口：同样只认设备凭据（原生客户端不带 Origin、不带 cookie）。
   if (path.startsWith("/api/local-agent/chat/") && event.method === "POST") return;
+  // 对外 MCP：Cursor / Claude 等只带该配置自己的令牌。不走网站 cookie、CSRF 或同源限制，令牌也不能用于其它 API。
+  if (/^\/api\/mcp\/[^/]+$/.test(path)) return;
   sameOrigin(event);
   if (path === "/api/health") {
     check(
@@ -121,6 +123,8 @@ export async function gate(event: H3Event, path: string) {
   if (/^\/api\/groups(?:\/|$)/.test(path)) return;
   // 本人的密码本及其条目：密码本属于账号，不属于管理员。
   if (/^\/api\/me\/vault(?:\/|$)/.test(path)) return;
+  // 每人自己的对外 MCP：任何已登录账号都能管理自己的配置，管不了别人的，也不因此获得管理权限。
+  if (/^\/api\/me\/external-mcp(?:\/|$)/.test(path)) return;
   if (path === "/api/me/avatar" && event.method === "POST") return;
   if (/^\/api\/avatars\/users\/[^/]+$/.test(path) && event.method === "GET") return;
   if (/^\/api\/sessions\//.test(path) && event.method === "GET") return;

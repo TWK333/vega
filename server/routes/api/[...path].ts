@@ -7,6 +7,7 @@ import {
   browserScreenshot,
   browserControl,
 } from "../../core/browser-preview";
+import { externalMcpApi } from "../../core/external-mcp";
 import { publicOrigin, principal } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
 import { AuthError, check } from "../../core/auth";
@@ -344,6 +345,8 @@ export default defineEventHandler(async (event) => {
       }
       check(false, 404, "Employee route not found");
     }
+    if (path[0] === "me" && path[1] === "external-mcp")
+      return await externalMcpApi(engine, user, method, path.slice(2), a, publicOrigin(event));
     if (path[0] === "me" && path[1] === "vault") {
       // 本人的密码本：名下牛马在任务里按适用范围取用；什么角色都只碰自己这一本。
       const vault = engine.vault.book(user.id);

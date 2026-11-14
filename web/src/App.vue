@@ -1405,8 +1405,8 @@ async function applyRoute(route) {
   try {
     if (route.view === "group" && route.group && !groups.value.some((g) => g.id === route.group)) route = { view: "employee" };
     if (ADMIN_PAGES.includes(route.view) && !isAdmin.value) route = { view: "employee" };
-    // 非管理员只有「密码本」这一节：管理员的设置子页不冒充在地址里，回落设置首页。
-    if (route.view === "settings" && !isAdmin.value && route.sub) route = { view: "settings" };
+    // 非管理员只有自己的设置（密码本，以及「对外 MCP」）。管理员专属子页不留在地址里。
+    if (route.view === "settings" && !isAdmin.value && route.sub && route.sub !== "external-mcp") route = { view: "settings" };
     if (route.view === "group") openGroup(route.group);
     else if (route.view === "chat") {
       const session = route.session && sessions.value.find((s) => s.id === route.session);
