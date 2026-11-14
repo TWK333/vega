@@ -4,13 +4,15 @@
  *
  * 规则（与产品约定一致）：
  * - 文件系统与浏览器绑定到同一执行端，交接时同步工作区与浏览器登录态。
- * - 本地在线时必须现读工作区；客户端硬退出（连接已不在）不要把云端旧副本当成当前活工作区，一律按还原点续做，并说明「以还原点为准，离线期间的新文件不在其中」。
+ * - 本地在线时必须现读工作区。执行中的安全点只把相对已确认基线的增量推进到云端影子副本，不切换执行权。
+ * - 客户端硬退出（连接已不在）不要把云端旧副本当成当前活工作区。有已确认的文件检查点就按影子副本还原到新目录；从未确认过就仍是空目录加文本还原点，并说明本机文件没有带过来。
  * - 只有目标端真的拿到工作区，才切换执行权；否则保持原样并记失败原因。回合进行中（isRunning）拒绝切换。
- * - 回传只写文件、不抢执行权；冲突两边都留，不覆盖任何一方。
+ * - 回传只写文件、不抢执行权；冲突两边都留，不覆盖任何一方。没进已确认检查点的改动留在本机，回连后按最后那份基线三方合并。
  * - 登录态：交接时把授权站点的 Cookie 与 storage 从源端搬到目标端（补齐不删）。
  */
 import * as filesystem from "node:fs/promises";
-import { relativePath, allowed, manifest, merge, LIMITS } from "../../shared/workspace-sync.mjs";
+import { relativePath, allowed, hash, manifest, merge, checkpointPlan, LIMITS } from "../../shared/workspace-sync.mjs";
+import { beijingDateTime } from "../../shared/time";
 import { browserOrigins, captureBrowser, injectBrowser, restoreBrowser } from "./browser-handoff";
 import type { Chrome } from "./chrome";
 import { shell } from "./tools";
@@ -28,9 +30,25 @@ const RECORD = "task-handoff";
 const CONFLICT_SUFFIX = ".vega-conflict-";
 const SCAN_TIMEOUT_MS = 120_000;
 const CLOUD_ROOT = ".vega/handoffs";
+const CHECKPOINT_ROOT = ".vega/checkpoints";
+/** 没有已确认的文件检查点时，硬退出沿用这句话，不把云端旧副本当成工作区。 */
+const OFFLINE_NOTE = "本地客户端已离线，以还原点为准，离线期间的新文件不在其中；本机文件没有带过来，动手前先核对现场；缺少必要文件或无法核验时用 task_ask_user 问用户，不凭空补写";
 
 export type HandoffWhere = "local" | "cloud";
 export type HandoffFile = { path: string; size: number; hash: string };
+export type CheckpointSkip = { path: string; reason: string };
+/** 一次已确认的增量包：written 是本次新内容（按摘要寻址），removed 是相对上一份基线消失的路径。 */
+export type CheckpointPack = { written: HandoffFile[]; removed: string[] };
+export type FileCheckpoint = {
+  seq: number;
+  at: number;
+  /** 确认时的执行代次。检查点本身不递增代次。 */
+  epoch: number;
+  note?: string;
+  files: HandoffFile[];
+  pack: CheckpointPack;
+  skipped?: CheckpointSkip[];
+};
 export type HandoffPolicy = {
   /** Enabled by default once configured; `false` stops manual and automatic handoff. */
   enabled?: boolean;
@@ -58,6 +76,10 @@ export type HandoffRecord = {
   /** The cloud workspace the task continues in. */
   cloudCwd?: string;
   base: HandoffFile[];
+  /** 已确认文件的云端影子目录。不是执行工作区，硬退出时复制出去，不在这里接着改。 */
+  shadowCwd?: string;
+  /** 最近一次确认的文件检查点。没有它，硬退出仍是空目录。 */
+  checkpoint?: FileCheckpoint;
   /** 登录态密文（vault 加密）：不进入模型上下文、日志或经验库。 */
   browser?: string;
   browserNote?: string;
@@ -84,6 +106,16 @@ export type HandoffDeps = {
 
 const join = (cwd: string, path: string) => (cwd.endsWith("/") || cwd.endsWith("\\") ? cwd + path : cwd + "/" + path);
 const dirname = (path: string) => path.slice(0, Math.max(0, path.lastIndexOf("/")));
+const sameFiles = (left: HandoffFile[] = [], right: HandoffFile[] = []) => {
+  if (left.length !== right.length) return false;
+  const hashes = new Map(right.map((file) => [file.path, file.hash]));
+  return left.every((file) => hashes.get(file.path) === file.hash);
+};
+const sameSkipped = (left: CheckpointSkip[] = [], right: CheckpointSkip[] = []) => {
+  if (left.length !== right.length) return false;
+  const reasons = new Map(right.map((item) => [item.path, item.reason]));
+  return left.every((item) => reasons.get(item.path) === item.reason);
+};
 
 /** Handoff steps are serialised per task: two transfers must never interleave. */
 export class TaskHandoffs {
@@ -167,22 +199,36 @@ export class TaskHandoffs {
       let files: HandoffFile[] = [];
       const contents = new Map<string, Buffer>();
 
+      let shadowCwd = record.shadowCwd;
+      let checkpoint = record.checkpoint;
       if (agent) {
         const scanned = await this.scanLocal(agent, task.cwd);
         files = scanned.files;
         for (const [path, data] of scanned.contents) contents.set(path, data);
         notes.push("工作区按本地当前内容同步");
+        try {
+          const saved = await this.storeCheckpoint(cloud, taskId, record, files, contents, this.packOf(record.base, files), [], this.stepNote(task), record.epoch + 1);
+          shadowCwd = saved.shadowCwd;
+          checkpoint = saved.checkpoint;
+        } catch { /* 执行副本已经写到云端工作区；影子没写上时，硬退出不会拿对不上的旧检查点 */ }
       } else {
-        // 硬退出：连接已经不在，不要把云端旧副本当成当前活工作区，也不发明文件。
-        notes.push("本地客户端已离线，以还原点为准，离线期间的新文件不在其中；本机文件没有带过来，动手前先核对现场；缺少必要文件或无法核验时用 task_ask_user 问用户，不凭空补写");
-        files = [];
+        // 硬退出：连接已经不在。只还原最后一次确认的影子副本，不用云端旧的执行目录。
+        const restored = await this.restoreCheckpoint(cloud, record);
+        if (restored) {
+          files = restored.files;
+          for (const [path, data] of restored.contents) contents.set(path, data);
+          notes.push(this.confirmedNote(restored.checkpoint));
+        } else {
+          notes.push(OFFLINE_NOTE);
+          files = [];
+        }
       }
 
       const cloudCwd = agent
         ? (record.cloudCwd || (await this.cloudRoot(cloud, taskId)))
         : await this.cloudRoot(cloud, taskId + "-restore-" + Date.now());
-      if (agent) await this.writeCloud(cloud, cloudCwd, contents);
-      else await this.writeCloud(cloud, cloudCwd, new Map());
+      const previousShadow = record.shadowCwd;
+      await this.writeCloud(cloud, cloudCwd, contents);
       // 只在云端真的能继续时才交接：准备命令是一次性安装/构建，长驻服务由任务自己在云端启动。
       if (policy.prepare) {
         const prepared = await shell(cloudCwd, { command: policy.prepare, timeout: 600 }, AbortSignal.timeout(660_000), () => {}, cloud);
@@ -225,6 +271,8 @@ export class TaskHandoffs {
         localCwd: record.where === "local" ? task.cwd : record.localCwd,
         cloudCwd,
         base: files,
+        shadowCwd,
+        checkpoint,
         note: notes.join("；"),
         error: undefined,
         conflicts: record.conflicts || [],
@@ -252,6 +300,7 @@ export class TaskHandoffs {
       }
       next.note = [...notes, next.browserNote].filter(Boolean).join("；");
       await this.deps.store.save(RECORD, taskId, next);
+      if (shadowCwd && previousShadow && previousShadow !== shadowCwd) await this.dropShadow(cloud, previousShadow);
       return next;
     });
   }
@@ -282,6 +331,24 @@ export class TaskHandoffs {
         scanned = await this.scanCloud(cloud || { fs: filesystem }, task.cwd);
         applied = await this.applyLocal(agent, cwd, sameClient && sameCloud ? record?.base || [] : [], scanned, "cloud");
       }
+      let shadowCwd = record?.shadowCwd;
+      let checkpoint = record?.checkpoint;
+      const previousShadow = shadowCwd;
+      if (record?.cloudCwd || task.workSession || task.computerSession) {
+        const baseline = record || this.fresh(taskId, employeeId, ownerId, "manual");
+        if (cloud) {
+          try {
+            const saved = await this.storeCheckpoint(cloud, taskId, baseline, scanned.files, scanned.contents, this.packOf(baseline.base, scanned.files), [], this.stepNote(task), (record?.epoch || 0) + 1);
+            shadowCwd = saved.shadowCwd;
+            checkpoint = saved.checkpoint;
+          } catch {
+            if (!sameFiles(checkpoint?.files, scanned.files)) { shadowCwd = undefined; checkpoint = undefined; }
+          }
+        } else if (!sameFiles(checkpoint?.files, scanned.files)) {
+          shadowCwd = undefined;
+          checkpoint = undefined;
+        }
+      }
       const next: HandoffRecord = {
         ...(record || this.fresh(taskId, employeeId, ownerId, "manual")),
         where: "local",
@@ -293,6 +360,8 @@ export class TaskHandoffs {
         localCwd: cwd,
         cloudCwd: sameCloud ? record?.cloudCwd : undefined,
         base: scanned.files,
+        shadowCwd,
+        checkpoint,
         conflicts: applied.conflicts,
         note: [
           "执行权已交回本机",
@@ -306,6 +375,7 @@ export class TaskHandoffs {
         next.note = [next.note, next.browserNote].filter(Boolean).join("；");
       }
       await this.deps.store.save(RECORD, taskId, next);
+      if (cloud && shadowCwd && previousShadow && previousShadow !== shadowCwd) await this.dropShadow(cloud, previousShadow);
       return next;
     });
   }
@@ -536,9 +606,7 @@ export class TaskHandoffs {
     }
   }
   private async cloudRoot(cloud: CloudRuntime, taskId: string) {
-    const cwd = await cloud.cwd(CLOUD_ROOT + "/" + taskId);
-    await cloud.fs.mkdir(cwd, { recursive: true, mode: 0o700 });
-    return cwd;
+    return this.ensureCloudDir(cloud, CLOUD_ROOT + "/" + taskId);
   }
   /** Switch the execution right on the task and every session it owns, then let the scheduler continue. */
   private async switch(employee: Employee, taskId: string, record: HandoffRecord, target: Obj) {
@@ -607,10 +675,260 @@ export class TaskHandoffs {
     }
   }
 
+  /**
+   * 本机仍在执行时，把工作区相对已确认基线的增量推进到云端影子副本。
+   * 只更新文件基线，不切换执行权，也不增加执行代次。客户端不在线就什么都不确认。
+   */
+  async checkpoint(employeeId: string, taskId: string, opts: { note?: string } = {}) {
+    return this.exclusive(taskId, async () => {
+      const employee = await this.deps.employeeFor(employeeId);
+      const state = await employee.state({ runs: false });
+      const task = employee.task(state, taskId);
+      if (["done", "failed", "cancelled", "sealed"].includes(task.status)) return;
+      if (task.execution?.localAgent !== true) return;
+      const ownerId = state.ownerId || task.execution?.ownerId || task.owner?.token || "";
+      const clientId = task.execution?.clientId || "";
+      if (!ownerId || !clientId) return;
+      const cloud = this.deps.cloud(ownerId);
+      const agent = this.deps.agents.active(ownerId, clientId);
+      if (!cloud || !agent) return;
+      const record = (await this.record(taskId)) || this.fresh(taskId, employeeId, ownerId, "manual");
+      const scanned = await this.scanDelta(agent, task.cwd, record.base || [], cloud, taskId);
+      const note = opts.note !== undefined ? this.clipNote(opts.note) : this.stepNote(task);
+      const saved = await this.storeCheckpoint(cloud, taskId, record, scanned.files, scanned.contents, scanned.pack, scanned.skipped, note, record.epoch);
+      if (!saved.changed && record.checkpoint) return record;
+      const previousShadow = record.shadowCwd;
+      const next: HandoffRecord = {
+        ...record,
+        clientId: record.clientId || clientId,
+        localCwd: record.localCwd || task.cwd,
+        base: scanned.files,
+        shadowCwd: saved.shadowCwd,
+        checkpoint: saved.checkpoint,
+      };
+      await this.deps.store.save(RECORD, taskId, next);
+      if (previousShadow && previousShadow !== saved.shadowCwd) await this.dropShadow(cloud, previousShadow);
+      return next;
+    });
+  }
+
+  private clipNote(value: unknown) {
+    const text = String(value ?? "").replace(/\s+/g, " ").trim();
+    return text ? [...text].slice(0, 500).join("") : undefined;
+  }
+  private stepNote(task: Task) {
+    return this.clipNote(task.checkpoint || task.progress?.at(-1)?.text);
+  }
+  private confirmedNote(checkpoint: FileCheckpoint) {
+    const when = checkpoint.at ? beijingDateTime(checkpoint.at) : "";
+    return [
+      `已按最近确认的文件检查点还原（序号 ${checkpoint.seq}${when ? "，" + when : ""}）；检查点之后的本机改动没有带过来`,
+      checkpoint.note ? "文本还原点：" + checkpoint.note : "",
+      checkpoint.skipped?.length ? `另有 ${checkpoint.skipped.length} 个文件超出上限或没能纳入检查点，仍留在本机` : "",
+      "动手前先核对现场；缺少必要文件或无法核验时用 task_ask_user 问用户，不凭空补写",
+    ].filter(Boolean).join("；");
+  }
+  private safeTask(taskId: string) {
+    assert(/^[A-Za-z0-9_-]+$/.test(taskId), "任务编号无效");
+    return taskId;
+  }
+  private packOf(base: HandoffFile[] = [], files: HandoffFile[]): CheckpointPack {
+    const next = new Map(files.map((file) => [file.path, file.hash]));
+    const previous = new Map(base.map((file) => [file.path, file.hash]));
+    return {
+      written: files.filter((file) => previous.get(file.path) !== file.hash),
+      removed: base.filter((file) => !next.has(file.path)).map((file) => file.path),
+    };
+  }
+  private async cloudDir(cloud: CloudRuntime, rel: string) {
+    return this.ensureCloudDir(cloud, rel);
+  }
+  /** 目录还不存在时，从已确认的工作区根逐级创建，拒绝链接和上跳；已存在则沿用 cloud.cwd 的边界检查。 */
+  private async ensureCloudDir(cloud: CloudRuntime, rel: string) {
+    try {
+      const cwd = await cloud.cwd(rel);
+      await cloud.fs.mkdir(cwd, { recursive: true, mode: 0o700 });
+      return cwd;
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+    const root = await cloud.cwd();
+    let current = root;
+    for (const part of rel.split("/")) {
+      if (!part || part === "." || part === "..") throw Error("云端路径无效");
+      current = join(current, part);
+      let info: any;
+      try {
+        info = typeof cloud.fs.lstat === "function" ? await cloud.fs.lstat(current) : undefined;
+      } catch (error: any) {
+        if (error?.code !== "ENOENT") throw error;
+      }
+      if (!info) {
+        try { await cloud.fs.mkdir(current, { mode: 0o700 }); }
+        catch (error: any) { if (error?.code !== "EEXIST") throw error; }
+        if (typeof cloud.fs.lstat === "function") info = await cloud.fs.lstat(current);
+      }
+      if (info && (info.isSymbolicLink?.() || !info.isDirectory())) throw Error("云端路径含链接或不是目录");
+    }
+    return cloud.cwd(rel);
+  }
+  private async blobReady(cloud: CloudRuntime, dir: string, fileHash: string) {
+    if (!/^[0-9a-f]{64}$/.test(fileHash)) return false;
+    try {
+      const data = Buffer.from(await cloud.fs.readFile(join(dir, fileHash)));
+      return hash(data) === fileHash;
+    } catch {
+      return false;
+    }
+  }
+  private async dropShadow(cloud: CloudRuntime, cwd?: string) {
+    const remove = cloud.fs.rm;
+    if (!cwd || typeof remove !== "function") return;
+    await remove.call(cloud.fs, cwd, { recursive: true, force: true }).catch(() => {});
+  }
+  /** 把已确认清单写成新的影子目录；内容按摘要存一份，相同内容不重复写。失败则不改已保存的检查点。 */
+  private async materialize(cloud: CloudRuntime, taskId: string, seq: number, files: HandoffFile[], contents: Map<string, Buffer>) {
+    const id = this.safeTask(taskId);
+    const objects = await this.cloudDir(cloud, CHECKPOINT_ROOT + "/" + id + "/objects");
+    const shadow = await this.cloudDir(cloud, CHECKPOINT_ROOT + "/" + id + "/s" + seq);
+    const written = new Map<string, Buffer>();
+    for (const file of files) {
+      if (!allowed(file.path) || !/^[0-9a-f]{64}$/.test(file.hash)) throw Error("检查点清单无效");
+      let data = contents.get(file.path);
+      if (data && hash(data) !== file.hash) data = undefined;
+      if (!data) {
+        const stored = Buffer.from(await cloud.fs.readFile(join(objects, file.hash)));
+        if (hash(stored) !== file.hash || stored.length !== file.size) throw Error("检查点内容与摘要不一致");
+        data = stored;
+      } else if (!(await this.blobReady(cloud, objects, file.hash))) {
+        await cloud.fs.writeFile(join(objects, file.hash), data, { mode: 0o600 });
+      }
+      written.set(file.path, data);
+    }
+    await this.writeCloud(cloud, shadow, written);
+    return shadow;
+  }
+  private async storeCheckpoint(cloud: CloudRuntime, taskId: string, record: HandoffRecord, files: HandoffFile[], contents: Map<string, Buffer>, pack: CheckpointPack, skipped: CheckpointSkip[], note: string | undefined, epoch: number) {
+    const listed = [...skipped].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    const current = record.checkpoint;
+    const reusable = !!record.shadowCwd && !!current && !pack.written.length && !pack.removed.length && sameFiles(current.files, files);
+    if (reusable && current!.epoch === epoch && (current!.note || undefined) === note && sameSkipped(current!.skipped, listed))
+      return { shadowCwd: record.shadowCwd!, checkpoint: current!, changed: false as const };
+    if (reusable) {
+      const checkpoint: FileCheckpoint = { ...current!, at: Date.now(), epoch, note, files, skipped: listed.length ? listed : undefined };
+      return { shadowCwd: record.shadowCwd!, checkpoint, changed: true as const };
+    }
+    const seq = (current?.seq || 0) + 1;
+    const shadowCwd = await this.materialize(cloud, taskId, seq, files, contents);
+    const checkpoint: FileCheckpoint = { seq, at: Date.now(), epoch, note, files, pack, skipped: listed.length ? listed : undefined };
+    return { shadowCwd, checkpoint, changed: true as const };
+  }
+  private async restoreCheckpoint(cloud: CloudRuntime, record: HandoffRecord) {
+    const checkpoint = record.checkpoint;
+    if (!checkpoint?.seq || !record.shadowCwd || !sameFiles(checkpoint.files, record.base)) return;
+    try {
+      const contents = await this.readShadow(cloud, record.shadowCwd, checkpoint.files);
+      return { files: checkpoint.files, contents, checkpoint };
+    } catch {
+      return undefined;
+    }
+  }
+  private async readShadow(cloud: CloudRuntime, shadowCwd: string, files: HandoffFile[]) {
+    const contents = new Map<string, Buffer>();
+    for (const file of files) {
+      if (!allowed(file.path) || !/^[0-9a-f]{64}$/.test(file.hash)) throw Error("检查点清单无效");
+      const data = await this.readConfirmed(cloud, shadowCwd, file.path);
+      if (data.length !== file.size || hash(data) !== file.hash) throw Error("检查点内容与摘要不一致");
+      contents.set(file.path, data);
+    }
+    return contents;
+  }
+  /** 只读影子目录里的普通文件，拒绝跑出目录的路径和符号链接。 */
+  private async readConfirmed(cloud: CloudRuntime, root: string, rel: string) {
+    const lstat = typeof cloud.fs.lstat === "function" ? cloud.fs.lstat.bind(cloud.fs) : undefined;
+    let parent = root;
+    for (const part of rel.split("/").slice(0, -1)) {
+      parent = join(parent, part);
+      if (!lstat) continue;
+      const info = await lstat(parent);
+      if (info.isSymbolicLink?.()) throw Error("交接路径含链接或不是目录");
+    }
+    const full = join(root, rel);
+    if (lstat) {
+      const info = await lstat(full);
+      if (info.isSymbolicLink?.() || !info.isFile()) throw Error("交接路径不是普通文件");
+    }
+    return Buffer.from(await cloud.fs.readFile(full));
+  }
+  /** 相对已确认基线只读取变化的文件。超限文件跳过，不让整次检查点失败。 */
+  private async scanDelta(agent: Agent, cwd: string, base: HandoffFile[], cloud: CloudRuntime, taskId: string) {
+    const listed: Obj = await this.deps.agents.request(agent, "file", { op: "list", cwd, path: "." }, AbortSignal.timeout(SCAN_TIMEOUT_MS));
+    assert(!listed.error, String(listed.error || "无法读取本地工作区"));
+    assert(Array.isArray(listed.files), "本地工作区清单无效");
+    const objects = await this.cloudDir(cloud, CHECKPOINT_ROOT + "/" + this.safeTask(taskId) + "/objects");
+    const known = new Map(base.map((file) => [file.path, file]));
+    const seen = new Set<string>();
+    const skipped: CheckpointSkip[] = [];
+    const hold: string[] = [];
+    const consider = async (path: string, reason: string) => {
+      if (!path || !allowed(path) || seen.has(path)) return;
+      seen.add(path);
+      skipped.push({ path, reason });
+      const old = known.get(path);
+      if (old && !reason.includes("过大") && await this.blobReady(cloud, objects, old.hash)) hold.push(path);
+    };
+    if (Array.isArray(listed.skipped)) {
+      for (const item of listed.skipped) await consider(relativePath(item?.path), String(item?.reason || "未纳入检查点"));
+    }
+    const entries: { path: string; data?: Buffer; size?: number; hash?: string }[] = [];
+    const readData = new Map<string, Buffer>();
+    for (const item of listed.files) {
+      const path = relativePath(item?.path);
+      if (!path || !allowed(path) || seen.has(path)) continue;
+      const size = Number(item?.size);
+      if (Number.isFinite(size) && size > LIMITS.fileBytes) { await consider(path, "文件过大"); continue; }
+      const listedHash = typeof item?.hash === "string" && /^[0-9a-f]{64}$/.test(item.hash) ? item.hash : "";
+      const old = known.get(path);
+      if (old && listedHash && old.hash === listedHash && (!Number.isFinite(size) || old.size === size) && await this.blobReady(cloud, objects, old.hash)) {
+        seen.add(path);
+        entries.push({ path, size: old.size, hash: old.hash });
+        continue;
+      }
+      const read: Obj = await this.deps.agents.request(agent, "file", { op: "read", cwd, path }, AbortSignal.timeout(SCAN_TIMEOUT_MS));
+      if (read.error || typeof read.content !== "string") { await consider(path, "无法读取"); continue; }
+      const data = Buffer.from(read.content, "base64");
+      if (data.length > LIMITS.fileBytes) { await consider(path, "文件过大"); continue; }
+      seen.add(path);
+      readData.set(path, data);
+      entries.push({ path, data });
+    }
+    if (listed.truncated) {
+      for (const old of base) if (!seen.has(old.path) && await this.blobReady(cloud, objects, old.hash)) hold.push(old.path);
+    }
+    const plan = checkpointPlan(entries, base, LIMITS, hold);
+    const confirmed = new Map(plan.files.map((file) => [file.path, file]));
+    const contents = new Map<string, Buffer>();
+    for (const [path, data] of readData) {
+      const file = confirmed.get(path);
+      if (file && hash(data) === file.hash) contents.set(path, data);
+    }
+    const skipPaths = new Set(skipped.map((item) => item.path));
+    for (const item of plan.skipped) if (!skipPaths.has(item.path)) skipped.push(item);
+    return { files: plan.files, contents, pack: plan.pack, skipped };
+  }
+
   private async scanLocal(agent: Agent, cwd: string) {
     const listed: Obj = await this.deps.agents.request(agent, "file", { op: "list", cwd, path: "." }, AbortSignal.timeout(SCAN_TIMEOUT_MS));
     assert(!listed.error, String(listed.error || "无法读取本地工作区"));
     assert(Array.isArray(listed.files), "本地工作区清单无效");
+    if (Array.isArray(listed.skipped) && listed.skipped.length) {
+      const first = listed.skipped[0] || {};
+      const reason = String(first.reason || "");
+      throw Error(reason.includes("过大")
+        ? `文件过大，无法交接：${first.path}（上限 ${LIMITS.fileBytes} 字节）`
+        : `工作区超过交接上限（${LIMITS.files} 个文件 / ${LIMITS.bytes} 字节），请缩小范围后再交接`);
+    }
+    if (listed.truncated) throw Error(`工作区超过交接上限（${LIMITS.files} 个文件 / ${LIMITS.bytes} 字节），请缩小范围后再交接`);
     const contents = new Map<string, Buffer>();
     for (const item of listed.files) {
       const path = relativePath(item?.path);

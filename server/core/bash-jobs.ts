@@ -161,6 +161,13 @@ export function hasPendingBash(session: string) {
   return pendingBash(session) != null;
 }
 
+/** A yielded command is still running, so the workspace must not be checkpointed yet. */
+export function bashRunning(session: string) {
+  for (const job of jobs.values())
+    if (job.session === session && !job.dropped && !job.done && !job.cancelled && !job.expired) return true;
+  return false;
+}
+
 function formatOutput(job: BashJob) {
   let text = job.output || "";
   if (job.truncated && !/truncated/i.test(text)) text += (text && !text.endsWith("\n") ? "\n" : "") + "[truncated]";

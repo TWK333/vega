@@ -1,6 +1,7 @@
 /**
  * 任务工作区检查点：只搬业务文件，不搬依赖、构建产物和凭据。
- * 两边用同一份清单比较，交接时同步增量；回传时按共同基线三方合并，冲突双方都保留。
+ * 两边用同一份清单比较，交接时同步增量；执行中的安全点只确认文件基线，不切换执行权。
+ * 回传时按共同基线三方合并，冲突双方都保留。
  */
 import { createHash } from "node:crypto";
 
@@ -81,4 +82,61 @@ export function merge(base = [], local = [], remote = []) {
     conflicts.push(path);
   }
   return { changes, conflicts };
+}
+
+const hexHash = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+
+/**
+ * 增量检查点：相对上一份已确认基线，只列出要上传的文件。
+ * 单个超限文件记入 skipped，不让整次检查点失败；放不下的新增或修改留在原处，已确认的版本继续作为基线。
+ * hold 是这次清单没能带上、但仍应保留的已确认路径（例如总量超限时没再传送的旧文件）。
+ * entries: [{ path, data?: Buffer, size?, hash? }]
+ */
+export function checkpointPlan(entries, base = [], limits = LIMITS, hold = []) {
+  const skipped = [];
+  const present = new Map();
+  for (const entry of entries || []) {
+    const path = relativePath(entry?.path);
+    if (!allowed(path)) continue;
+    const size = entry?.data ? entry.data.length : Number(entry?.size || 0);
+    if (!Number.isFinite(size) || size < 0) continue;
+    if (size > limits.fileBytes) { skipped.push({ path, reason: "文件过大" }); continue; }
+    const fileHash = entry?.data ? hash(entry.data) : entry?.hash;
+    if (!hexHash(fileHash)) continue;
+    present.set(path, { path, size, hash: fileHash });
+  }
+  const holdSet = new Set((hold || []).map((path) => relativePath(path)).filter(Boolean));
+  const previous = byPath(base);
+  const kept = [];
+  let bytes = 0;
+  const removed = [];
+  for (const old of base || []) {
+    const path = relativePath(old?.path);
+    if (!path || !hexHash(old?.hash)) continue;
+    const next = present.get(path);
+    if (!next) {
+      if (holdSet.has(path)) { kept.push({ path, size: Number(old.size) || 0, hash: old.hash }); bytes += Number(old.size) || 0; }
+      else removed.push(path);
+      continue;
+    }
+    if (next.hash === old.hash) {
+      kept.push({ path, size: Number(old.size) || 0, hash: old.hash });
+      bytes += Number(old.size) || 0;
+      present.delete(path);
+    }
+  }
+  const written = [];
+  for (const file of [...present.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
+    const old = previous.get(file.path);
+    if (kept.length + written.length >= limits.files || bytes + file.size > limits.bytes) {
+      skipped.push({ path: file.path, reason: "超出交接总量上限" });
+      if (old && hexHash(old.hash)) { kept.push({ path: old.path, size: Number(old.size) || 0, hash: old.hash }); bytes += Number(old.size) || 0; }
+      continue;
+    }
+    bytes += file.size;
+    written.push({ path: file.path, size: file.size, hash: file.hash });
+  }
+  const files = [...kept, ...written].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  skipped.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  return { files, skipped, pack: { written, removed } };
 }

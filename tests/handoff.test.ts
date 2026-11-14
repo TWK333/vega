@@ -18,6 +18,9 @@ class Memory {
   put(path: string, text: string) { this.files.set(path, Buffer.from(text)); }
   text(path: string) { return this.files.get(path)?.toString() ?? ""; }
   async mkdir() {}
+  async rm(path: string) {
+    for (const key of [...this.files.keys()]) if (key === path || key.startsWith(path + "/")) this.files.delete(key);
+  }
   async writeFile(path: string, data: any) { this.files.set(path, Buffer.from(data)); }
   async readFile(path: string) {
     const data = this.files.get(path);
@@ -69,7 +72,7 @@ function world(options: { clientOnline?: boolean; running?: boolean; cloud?: boo
     async request(_agent: any, op: string, args: any) {
       assert.equal(op, "file");
       const root = args.cwd as string;
-      if (args.op === "list") return { root, files: under(local, root).map(([path, text]) => ({ path: path.slice(root.length + 1), size: text.length })) };
+      if (args.op === "list") return { root, files: under(local, root).map(([path, text]) => { const data = Buffer.from(text); return { path: path.slice(root.length + 1), size: data.length, hash: createHash("sha256").update(data).digest("hex") }; }) };
       const full = root + "/" + args.path;
       if (args.op === "read") return { path: full, content: local.files.get(full)!.toString("base64") };
       if (args.op === "sync_write") {
@@ -481,4 +484,211 @@ test("a task taken over automatically comes back to its device once that device 
   await byHand.toCloud("e1", "t1");
   await byHand.backHome("u1");
   assert.equal(manual.state.tasks[0].execution.localAgent, false);
+});
+
+test("mid-task checkpoint confirms the file baseline without taking the execution right", async () => {
+  const options: any = { running: true };
+  const w = world(options);
+  w.task.status = "running";
+  w.task.checkpoint = "接口已改完，下一步补测试";
+  w.local.put("/local/work/a.ts", "v1");
+  w.local.put("/local/work/b.ts", "same");
+  w.local.put("/local/work/c.ts", "same");
+  const handoffs = new TaskHandoffs(w.deps);
+  let reads = 0;
+  const blobs: string[] = [];
+  const request = w.deps.agents.request;
+  w.deps.agents.request = async (...args: any[]) => {
+    if (args[2].op === "read") reads++;
+    if (args[2].path === "../secret.txt") throw Error("checkpoint followed a path escape");
+    return request(...args);
+  };
+  const writeFile = w.remote.writeFile.bind(w.remote);
+  w.remote.writeFile = async (path: string, data: any) => {
+    if (path.includes("/objects/")) blobs.push(path);
+    return writeFile(path, data);
+  };
+  const record = await handoffs.checkpoint("e1", "t1");
+  assert.equal(w.state.tasks[0].execution.localAgent, true, "检查点不切换执行权");
+  assert.equal(w.state.tasks[0].cwd, "/local/work");
+  assert.equal(w.state.tasks[0].status, "running");
+  assert.equal(w.sessions.get("s1").localAgent, true);
+  assert.equal(record!.where, "local");
+  assert.equal(record!.epoch, 0, "检查点不增加执行代次");
+  assert.equal(record!.checkpoint!.seq, 1);
+  assert.equal(record!.checkpoint!.epoch, 0);
+  assert.match(record!.checkpoint!.note!, /接口已改完/);
+  assert.deepEqual(record!.base.map((file) => file.path), ["a.ts", "b.ts", "c.ts"]);
+  assert.equal(w.remote.text(record!.shadowCwd + "/a.ts"), "v1");
+  assert.ok(record!.shadowCwd!.includes("/checkpoints/"));
+  assert.equal(new Set(blobs).size, 2, "相同内容只存一份");
+  await assert.rejects(handoffs.toCloud("e1", "t1"), /还在执行/);
+
+  reads = 0;
+  const again = await handoffs.checkpoint("e1", "t1");
+  assert.equal(again!.checkpoint!.seq, 1, "没有新变化就不另开一份影子");
+  assert.equal(reads, 0, "未变化的文件不重新上传");
+
+  w.local.put("/local/work/a.ts", "v1b");
+  const updated = await handoffs.checkpoint("e1", "t1");
+  assert.equal(updated!.checkpoint!.seq, 2);
+  assert.equal(updated!.epoch, 0);
+  assert.equal(w.state.tasks[0].execution.localAgent, true);
+  assert.equal(w.remote.text(updated!.shadowCwd + "/a.ts"), "v1b");
+  assert.equal(w.remote.text(updated!.shadowCwd + "/b.ts"), "same");
+  assert.equal(w.remote.text(record!.shadowCwd + "/a.ts"), "", "旧影子目录不再当作当前基线");
+  assert.deepEqual(updated!.checkpoint!.pack.written.map((file) => file.path), ["a.ts"]);
+});
+
+test("hard exit restores the last confirmed checkpoint and ignores a stale cloud workspace", async () => {
+  const options: any = { clientOnline: true };
+  const w = world(options);
+  w.task.checkpoint = "做到一半，接口已改完";
+  w.local.put("/local/work/a.ts", "v1");
+  w.remote.put("/cloud/.vega/handoffs/t1/stale.ts", "old cloud copy");
+  const handoffs = new TaskHandoffs(w.deps);
+  await handoffs.checkpoint("e1", "t1");
+  w.local.put("/local/work/a.ts", "v2-not-confirmed");
+  w.local.put("/local/work/only-local.ts", "stay local");
+  options.clientOnline = false;
+  await handoffs.clientsGone("c1", "u1");
+  const restored = (await handoffs.record("t1"))!;
+  assert.equal(w.state.tasks[0].execution.localAgent, false);
+  assert.match(restored.cloudCwd!, /-restore-/);
+  assert.notEqual(restored.cloudCwd, "/cloud/.vega/handoffs/t1");
+  assert.equal(w.remote.text(restored.cloudCwd + "/a.ts"), "v1");
+  assert.equal(w.remote.text(restored.cloudCwd + "/stale.ts"), "");
+  assert.equal(w.remote.text("/cloud/.vega/handoffs/t1/stale.ts"), "old cloud copy");
+  assert.match(restored.note!, /已按最近确认的文件检查点还原/);
+  assert.match(restored.note!, /文本还原点：做到一半，接口已改完/);
+  assert.match(restored.note!, /检查点之后的本机改动没有带过来/);
+  assert.equal(/本机文件没有带过来/.test(restored.note!), false);
+
+  w.remote.put(restored.cloudCwd + "/a.ts", "v3");
+  w.remote.put(restored.cloudCwd + "/b.ts", "from cloud");
+  options.clientOnline = true;
+  await handoffs.backHome("u1");
+  assert.equal(w.state.tasks[0].execution.localAgent, true, "回连后执行权按原自动接回规则回来");
+  assert.equal(w.local.text("/local/work/a.ts"), "v2-not-confirmed", "没进检查点的本机修改留在本机");
+  assert.equal(w.local.text("/local/work/a.ts.vega-conflict-cloud"), "v3", "两边都改过就各留一份");
+  assert.equal(w.local.text("/local/work/b.ts"), "from cloud");
+  assert.equal(w.local.text("/local/work/only-local.ts"), "stay local");
+});
+
+test("manual hard exit then reconnect merges against the checkpoint and leaves execution in the cloud", async () => {
+  const options: any = { clientOnline: true };
+  const w = world(options);
+  w.local.put("/local/work/a.ts", "v1");
+  const handoffs = new TaskHandoffs(w.deps);
+  await handoffs.checkpoint("e1", "t1");
+  w.local.put("/local/work/a.ts", "v2-not-confirmed");
+  options.clientOnline = false;
+  const restored = await handoffs.toCloud("e1", "t1");
+  assert.equal(restored.source, "manual");
+  w.remote.put(restored.cloudCwd + "/a.ts", "v3");
+  w.remote.put(restored.cloudCwd + "/b.ts", "from cloud");
+  options.clientOnline = true;
+  await handoffs.syncBack("c1", "u1");
+  assert.equal(w.state.tasks[0].execution.localAgent, false, "回传不拿回执行权");
+  assert.equal(w.local.text("/local/work/a.ts"), "v2-not-confirmed");
+  assert.equal(w.local.text("/local/work/a.ts.vega-conflict-cloud"), "v3");
+  assert.equal(w.local.text("/local/work/b.ts"), "from cloud");
+});
+
+test("a tampered checkpoint is not restored and a stale cloud directory is still ignored", async () => {
+  const options: any = { clientOnline: true };
+  const w = world(options);
+  w.local.put("/local/work/a.ts", "v1");
+  const handoffs = new TaskHandoffs(w.deps);
+  const saved = (await handoffs.checkpoint("e1", "t1"))!;
+  w.remote.put(saved.shadowCwd + "/a.ts", "tampered");
+  w.remote.put("/cloud/.vega/handoffs/t1/stale.ts", "old");
+  options.clientOnline = false;
+  const resumed = await handoffs.toCloud("e1", "t1");
+  assert.deepEqual(resumed.base, []);
+  assert.match(resumed.cloudCwd!, /-restore-/);
+  assert.match(resumed.note!, /本机文件没有带过来/);
+  assert.equal(w.remote.text(resumed.cloudCwd + "/a.ts"), "");
+  assert.equal(w.remote.text(resumed.cloudCwd + "/stale.ts"), "");
+  assert.equal(w.remote.text("/cloud/.vega/handoffs/t1/stale.ts"), "old");
+});
+
+test("a missing cloud directory is created under the workspace root and a symlink parent is refused", async () => {
+  const w = world();
+  w.local.put("/local/work/a.ts", "v1");
+  const cloud = w.deps.cloud("u1");
+  const ready = new Set<string>();
+  cloud.cwd = async (input?: string) => {
+    const path = "/cloud/" + (input || "");
+    if (input && !ready.has(path)) throw Object.assign(Error("ENOENT"), { code: "ENOENT" });
+    return path;
+  };
+  cloud.fs.lstat = async (path: string) => {
+    if (!ready.has(path)) throw Object.assign(Error("ENOENT"), { code: "ENOENT" });
+    return { isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false, size: 0 };
+  };
+  cloud.fs.mkdir = async (path: string) => { ready.add(path); };
+  const saved = await new TaskHandoffs(w.deps).checkpoint("e1", "t1");
+  assert.equal(w.remote.text(saved!.shadowCwd + "/a.ts"), "v1");
+  assert.equal(ready.has(saved!.shadowCwd!), true);
+
+  const linked = world();
+  linked.local.put("/local/work/a.ts", "v1");
+  const other = linked.deps.cloud("u1");
+  other.cwd = async (input?: string) => {
+    if (input) throw Object.assign(Error("ENOENT"), { code: "ENOENT" });
+    return "/cloud/";
+  };
+  other.fs.lstat = async (path: string) => path.endsWith("/.vega")
+    ? { isDirectory: () => false, isFile: () => false, isSymbolicLink: () => true, size: 0 }
+    : Promise.reject(Object.assign(Error("ENOENT"), { code: "ENOENT" }));
+  other.fs.mkdir = async () => { throw Error("should not create past a symlink"); };
+  await assert.rejects(new TaskHandoffs(linked.deps).checkpoint("e1", "t1"), /链接/);
+  assert.equal(linked.remote.text("/cloud/.vega/checkpoints/t1/s1/a.ts"), "");
+});
+
+test("hard exit without a confirmed checkpoint is still an empty directory and says local files were not brought over", async () => {
+  const hard = world({ clientOnline: false });
+  hard.remote.put("/cloud/.vega/handoffs/t1/stale.ts", "do not use");
+  const resumed = await new TaskHandoffs(hard.deps).toCloud("e1", "t1");
+  assert.deepEqual(resumed.base, []);
+  assert.match(resumed.cloudCwd!, /-restore-/);
+  assert.equal(hard.remote.text(resumed.cloudCwd + "/stale.ts"), "");
+  assert.match(resumed.note!, /以还原点为准，离线期间的新文件不在其中/);
+  assert.match(resumed.note!, /本机文件没有带过来/);
+  assert.match(resumed.note!, /task_ask_user/);
+});
+
+test("an oversized file is left out of the checkpoint and does not fail the rest", async () => {
+  const w = world();
+  w.local.put("/local/work/ok.txt", "ok");
+  const request = w.deps.agents.request;
+  w.deps.agents.request = async (...args: any[]) => {
+    if (args[2].op === "list") {
+      const listed = await request(...args);
+      listed.files.push({ path: "big.bin", size: (4 << 20) + 1, hash: "ab".repeat(32) });
+      listed.files.push({ path: "../secret.txt", size: 4, hash: "cd".repeat(32) });
+      return listed;
+    }
+    if (args[2].op === "read" && (args[2].path === "big.bin" || args[2].path === "../secret.txt")) throw Error("read " + args[2].path);
+    return request(...args);
+  };
+  const record = await new TaskHandoffs(w.deps).checkpoint("e1", "t1");
+  assert.deepEqual(record!.base.map((file) => file.path), ["ok.txt"]);
+  assert.equal(record!.checkpoint!.skipped!.some((item) => item.path === "big.bin"), true);
+  assert.equal(w.state.tasks[0].execution.localAgent, true);
+  assert.equal(w.remote.text(record!.shadowCwd + "/ok.txt"), "ok");
+  assert.equal(w.remote.text(record!.shadowCwd + "/big.bin"), "");
+});
+
+test("a live handoff still fails the whole transfer when the workspace reports skipped files", async () => {
+  const w = world();
+  w.local.put("/local/work/ok.txt", "ok");
+  const request = w.deps.agents.request;
+  w.deps.agents.request = async (...args: any[]) => {
+    if (args[2].op === "list") return { files: [{ path: "ok.txt", size: 2, hash: "aa" }], skipped: [{ path: "big.bin", size: 9, reason: "文件过大" }] };
+    return request(...args);
+  };
+  await assert.rejects(new TaskHandoffs(w.deps).toCloud("e1", "t1"), /文件过大/);
+  assert.equal(w.state.tasks[0].execution.localAgent, true, "超限的在线交接不切换执行权");
 });

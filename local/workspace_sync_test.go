@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,5 +57,66 @@ func TestWorkspaceSyncWriteRejectsSymlinkParents(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "escape.txt")); !os.IsNotExist(err) {
 		t.Fatalf("sync wrote outside the workspace: %v", err)
+	}
+}
+
+func TestListWorkspaceKeepsSmallFilesWhenOneIsOversized(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "ok.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "node_modules", "dep.js"), []byte("nope"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	big := make([]byte, maxSyncFileSize+1)
+	if err := os.WriteFile(filepath.Join(root, "big.bin"), big, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := listWorkspace(root)
+	if result["error"] != nil {
+		t.Fatal(result["error"])
+	}
+	files := result["files"].([]map[string]any)
+	if len(files) != 1 || files[0]["path"] != "ok.txt" {
+		t.Fatalf("files: %#v", files)
+	}
+	sum := sha256.Sum256([]byte("hi"))
+	if files[0]["hash"] != hex.EncodeToString(sum[:]) {
+		t.Fatalf("hash: %v", files[0]["hash"])
+	}
+	skipped := result["skipped"].([]map[string]any)
+	if len(skipped) != 1 || skipped[0]["path"] != "big.bin" || skipped[0]["reason"] != "文件过大" {
+		t.Fatalf("skipped: %#v", skipped)
+	}
+}
+
+func TestListWorkspaceSkipsFilesPastTheTotalBudget(t *testing.T) {
+	root := t.TempDir()
+	payload := make([]byte, maxSyncFileSize)
+	for i := 0; i < 4; i++ {
+		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf("f%d.bin", i)), payload, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "z-extra.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := listWorkspace(root)
+	if result["error"] != nil {
+		t.Fatal(result["error"])
+	}
+	files := result["files"].([]map[string]any)
+	if len(files) != 4 {
+		t.Fatalf("included %d files: %#v", len(files), files)
+	}
+	skipped := result["skipped"].([]map[string]any)
+	if len(skipped) != 1 || skipped[0]["path"] != "z-extra.txt" {
+		t.Fatalf("skipped: %#v", skipped)
 	}
 }

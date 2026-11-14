@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { allowed, compare, hash, manifest, merge, relativePath } from "../shared/workspace-sync.mjs";
+import { allowed, checkpointPlan, compare, hash, manifest, merge, relativePath } from "../shared/workspace-sync.mjs";
 
 const file = (path: string, content: string = path) => ({ path, data: Buffer.from(content) });
 
@@ -46,4 +46,47 @@ test("merge applies the only changed side and keeps real conflicts", () => {
   assert.equal(actions["remote-deleted.ts"], "remote:delete");
   assert.equal(actions["local-deleted.ts"], "local:delete");
   assert.deepEqual(plan.conflicts.sort(), ["both-changed-differently.ts", "local-delete-remote-edit.ts"]);
+});
+
+test("checkpoint ships only the delta and skips one oversized file", () => {
+  const limits = { files: 10, bytes: 100, fileBytes: 4 };
+  const base = manifest([file("keep.ts", "ok")], limits);
+  const plan = checkpointPlan([
+    file("keep.ts", "ok"),
+    file("big.bin", "12345"),
+    file("add.ts", "new"),
+    file("../outside.ts", "no"),
+  ], base, limits);
+  assert.deepEqual(plan.files.map((item) => item.path), ["add.ts", "keep.ts"]);
+  assert.deepEqual(plan.pack.written.map((item) => item.path), ["add.ts"]);
+  assert.deepEqual(plan.pack.removed, []);
+  assert.deepEqual(plan.skipped.map((item) => item.path), ["big.bin"]);
+});
+
+test("checkpoint keeps a confirmed file when a new one does not fit", () => {
+  const limits = { files: 10, bytes: 5, fileBytes: 4 };
+  const base = manifest([file("a.ts", "abcd")], limits);
+  const plan = checkpointPlan([file("a.ts", "abcd"), file("b.ts", "xy")], base, limits);
+  assert.deepEqual(plan.files.map((item) => item.path), ["a.ts"]);
+  assert.deepEqual(plan.pack.written, []);
+  assert.equal(plan.skipped[0].path, "b.ts");
+  assert.equal(plan.skipped[0].reason, "超出交接总量上限");
+});
+
+test("a change that does not fit leaves the previous confirmed bytes in place", () => {
+  const limits = { files: 10, bytes: 4, fileBytes: 4 };
+  const base = manifest([file("a.ts", "ab"), file("b.ts", "cd")], limits);
+  const plan = checkpointPlan([file("a.ts", "ab"), file("b.ts", "WXYZ")], base, limits);
+  assert.equal(plan.files.find((item) => item.path === "b.ts")?.hash, hash(Buffer.from("cd")));
+  assert.deepEqual(plan.pack.written, []);
+  assert.equal(plan.skipped[0].path, "b.ts");
+});
+
+test("held paths stay confirmed when this scan could not resend them", () => {
+  const base = manifest([file("a.ts", "a"), file("b.ts", "b")]);
+  const plan = checkpointPlan([file("a.ts", "a2")], base, undefined, ["b.ts"]);
+  assert.deepEqual(plan.files.map((item) => item.path), ["a.ts", "b.ts"]);
+  assert.deepEqual(plan.pack.written.map((item) => item.path), ["a.ts"]);
+  assert.deepEqual(plan.pack.removed, []);
+  assert.equal(plan.files.find((item) => item.path === "b.ts")?.hash, hash(Buffer.from("b")));
 });
