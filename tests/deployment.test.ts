@@ -232,13 +232,14 @@ test(
         text: "stored not executed while disabled",
         key: "fixture:task",
       });
-      const duty = await api("/employee", "POST", {
-        action: "add",
-        kind: "duty",
-        text: "manual fixture",
-        manual: true,
+      assert(task.id);
+      const rejectedDuty = await fetch(base + "/api/employee", {
+        method: "POST",
+        headers: { Cookie: cookie, "X-CSRF-Token": csrf, "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add", kind: "duty", text: "manual fixture", manual: true }),
       });
-      assert(task.id && duty.id);
+      assert.equal(rejectedDuty.status, 400);
+      await rejectedDuty.json();
       const skillDir = join(dir, "fixture-skill");
       await mkdir(join(skillDir, "scripts"), { recursive: true });
       await writeFile(
@@ -275,7 +276,7 @@ test(
       await start();
       const restored = await api("/employee");
       assert(restored.tasks.some((t: any) => t.id === task.id));
-      assert(restored.duties.some((d: any) => d.id === duty.id));
+      assert.equal(restored.duties, undefined);
       assert.equal(
         (await api("/sessions/" + fireSession.id)).fire.status,
         "accepted",

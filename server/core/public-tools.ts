@@ -86,14 +86,11 @@ const one = (value: string) => ({ type: "string", enum: [value] });
 const tool = (name: string, description: string, properties: Obj = {}, required: string[] = []): Tool => ({ name, description, parameters: obj(properties, required) });
 const beijing = (description: string) => str(description + "，北京时间 YYYY-MM-DD HH:MM，须晚于现在", { minLength: 16, maxLength: 16, pattern: "^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}$" });
 const taskId = str("任务 ID（employee_status 的 tasks[].id）", { minLength: 1 });
-const dutyId = str("职责 ID（employee_status 的 duties[].id）", { minLength: 1 });
 const memoryId = str("记忆 ID（memory_search 返回的 id）", { minLength: 1 });
 const credentialId = str("密码本条目 ID（vault_list 返回的 id）", { minLength: 1 });
 const instructions = (what: string) => str(what + "，1–8000 字", { minLength: 1, maxLength: 8000 });
 const delayMinutes = (what: string) => int(`${what}，从现在起多少分钟，1–10080`, { minimum: 1, maximum: 10080 });
 const profile = str("开局场景偏好：lightweight（默认）或 coding，推荐用英文值；也接受中文别名 轻量化（= lightweight）、编码（= coding）。新主任务实际总是先用轻量模型判断，真正编码时在原会话用 switch_scene 升级", { enum: ["lightweight", "coding", "轻量化", "编码"] });
-const dailyTimes = { type: "array", minItems: 1, maxItems: 48, items: str("", { pattern: "^([01]\\d|2[0-3]):[0-5]\\d$" }), description: "每天触发的北京时间 HH:MM 列表，如 [\"09:00\",\"14:30\"]" };
-const everyMinutes = int("固定间隔分钟数 1–10080：立即开始，之后距上次任务完成每隔这么久触发一次", { minimum: 1, maximum: 10080 });
 const vaultUrl = str("可选：当前页面或服务地址，辅助核对使用条件；通常自动参考当前浏览器观察", { minLength: 1, maxLength: 2048 });
 
 /** Branches of a request union, filtered to the commands visible in this context. */
@@ -107,16 +104,6 @@ const commands = (allowed: string[] | undefined, phrases: [string, string][]) =>
   phrases.filter(([command]) => !allowed || allowed.includes(command)).map(([command, text]) => `${command} ${text}`).join("；");
 
 export const TASK_COMMANDS = ["update", "set_instructions", "set_profile", "reschedule", "cancel", "resume", "answer", "stop"];
-export const DUTY_COMMANDS = ["update", "set_instructions", "set_note", "set_profile", "set_manual", "set_condition", "set_daily", "set_interval", "schedule_next", "enable", "disable", "remove"];
-
-/** Duty trigger branches shared by create and the multi-field update. */
-const dutyTrigger = (description: string) => ({ description, anyOf: [
-  obj({ kind: one("manual") }, ["kind"], "不定时，不自动触发"),
-  obj({ kind: one("condition"), condition: str("自然语言触发条件，1–2000 字；外部事件无法自动监听，须写明检查频率", { minLength: 1, maxLength: 2000 }) }, ["kind", "condition"], "按条件自动触发"),
-  obj({ kind: one("daily"), times: dailyTimes }, ["kind", "times"], "每天固定时刻"),
-  obj({ kind: one("interval"), everyMinutes }, ["kind", "everyMinutes"], "固定间隔"),
-  obj({ kind: one("dynamic"), runAt: beijing("下一次执行时间"), delayMinutes: delayMinutes("多久后执行") }, ["kind"], "动态安排，runAt 和 delayMinutes 二选一"),
-] });
 export const MEMORY_COMMANDS = ["confirm", "merge", "keep", "archive", "restore", "feedback", "pin", "unpin", "forget"];
 
 export type ToolContext = {
@@ -127,8 +114,6 @@ export type ToolContext = {
   member?: boolean;
   /** A turn in a group chat (the bulletin decides who does the work). */
   group?: boolean;
-  /** Task session: visible duty commands for the task's own duty (empty = no duty tool). */
-  dutyCommands?: string[];
   /** Task session: the current task's id (target of task_reschedule). */
   taskId?: string;
 };
@@ -137,13 +122,13 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   const out: Tool[] = [];
   const task = ctx.kind === "task";
   out.push(tool("employee_status",
-    "查看当前牛马总览：现在时间（北京时间）、职责、任务摘要（每条 id、status、dedupeKey、所属 dutyId、内容和结果节选、创建/计划/结束时间，最近 50 条，taskCount 是匹配总数）、最近运行、相关记忆和待确认记忆、可用场景。沟通会话系统提示已含活跃任务摘要，新派单不必先调本工具。续做、停止或修改前用它核对 taskId/dutyId，或要看某条完整内容、计划、进度和结果时传 taskId。派单不必先查重：带 dedupeKey 的 employee_task_create 会自动去重。查记忆细节用 memory_search。",
+    "查看当前牛马总览：现在时间（北京时间）、工作原则、任务摘要（每条 id、status、dedupeKey、内容和结果节选、创建/计划/结束时间，最近 50 条，taskCount 是匹配总数）、最近运行、相关记忆和待确认记忆、可用场景。沟通会话系统提示已含活跃任务摘要，新派单不必先调本工具。续做、停止或修改前用它核对 taskId，或要看某条完整内容、计划、进度和结果时传 taskId。派单不必先查重：带 dedupeKey 的 employee_task_create 会自动去重。查记忆细节用 memory_search。",
     { taskId: str("只看这条任务的完整记录（任务 ID）；省略返回总览", { minLength: 1 }),
       dedupeKey: str("只列这个 dedupeKey 的任务", { minLength: 1, maxLength: 200 }),
       status: str("任务过滤：all（默认）全部、active 未收尾、ended 已收尾（完成、失败、停止、取消、封存）", { enum: ["all", "active", "ended"] }),
       memoryQuery: str("只影响返回的相关记忆：按这个关键词挑最相关的 30 条；省略为不按关键词", { maxLength: 2000 }) }));
   out.push(tool("employee_task_create",
-    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务但不自动续做；需要继续同一目标时核对状态并用 resume，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。反复、定时或按条件做的事用 employee_duty_create" +
+    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务但不自动续做；需要继续同一目标时核对状态并用 resume，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。用户明确说出的时刻或重复周期由系统记在同一条任务上，到点只续做这一条，不要为定时另建一条" +
       (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。" : "。"),
     { instructions: instructions("任务目标、范围、约束和交付标准，保留用户原话；不写工具名或动作名"),
       dedupeKey: str("业务唯一标识，≤200 字；同 key 已有任务（含已收尾）时直接返回原任务。用户明确要求重做已完成的事时用新 key（如原 key 加 :v2）", { minLength: 1, maxLength: 200 }),
@@ -153,10 +138,10 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     const allowed = ctx.kind === "chat" ? (ctx.member ? ["resume", "answer", "stop"] : TASK_COMMANDS) : ["update", "set_instructions", "set_profile", "reschedule", "cancel"];
     out.push(tool("employee_task_manage",
       "管理一条指定任务（taskId），request.command 选一种：" + commands(allowed, [
-        ["update", "一次改多项：instructions、profile、runAt 或 delayMinutes 中至少给一项，一起生效（任一项不合法则全部不改；内容和场景只能改尚未开始、不是职责触发的任务，职责触发的任务不能改期）"],
-        ["set_instructions", "改尚未开始的任务内容（职责触发的任务不能改）"],
-        ["set_profile", "改尚未开始的任务的开局场景偏好（职责触发的任务不能改）"],
-        ["reschedule", "改执行时间，runAt 或 delayMinutes 二选一（职责触发的任务不能改期）"],
+        ["update", "一次改多项：instructions、profile、runAt 或 delayMinutes 中至少给一项，一起生效（任一项不合法则全部不改；内容和场景只能改尚未开始的任务）"],
+        ["set_instructions", "改尚未开始的任务内容"],
+        ["set_profile", "改尚未开始的任务的开局场景偏好"],
+        ["reschedule", "改执行时间，runAt 或 delayMinutes 二选一"],
         ["cancel", "取消任务并保留记录，不交付（运行中的先 stop）"],
         ["resume", "不带 supplement 时按用户明确意图继续已停止、失败或取消的任务；带 supplement 时补充未收尾任务，或在原会话继续已交付任务的同一目标，不按交付时间设期限。写清用户真实意图与已知外部回执；继续原目标时保留计划并恢复仍需完成的步骤，不能只做补充中的一步。审批、封存和停止仍受原权限约束；无关的新目标才新建"],
         ["answer", "回答正在等待信息的任务；审批只能用户在界面点击，不能用 answer 批准"],
@@ -173,47 +158,9 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       ], allowed) },
       ["taskId", "request"]));
   }
-  const dutyAllowed = task ? ctx.dutyCommands || [] : ctx.member ? [] : DUTY_COMMANDS;
-  if (!task && !ctx.member)
-    out.push(tool("employee_duty_create",
-      "新建一条职责（反复执行的工作，归用户所有，只在用户明确要求时创建）：instructions 写每次要达成的目标和交付标准，不写工具名或动作名；trigger.kind 选一种：manual 不定时（只按交代的任务需要执行，不自动触发）；condition 用自然语言描述（如“每天 9 点”“每 30 分钟检查”），系统编译成下面某种规则，无法可靠识别时报错；daily 每天固定时刻 times；interval 每隔 everyMinutes 分钟；dynamic 只安排首次执行（runAt 或 delayMinutes 二选一），之后由执行它的任务再安排下次。note 写用户的细化要求，每次执行都会带上。一次性的事用 employee_task_create。",
-      { instructions: instructions("每次触发时要做的事"),
-        trigger: dutyTrigger("触发规则，选一种 kind"),
-        note: str("用户对这条职责的细化要求，≤4096 字节"),
-        profile },
-      ["instructions", "trigger"]));
-  if (dutyAllowed.length)
-    out.push(tool("employee_duty_manage",
-      (task ? "管理本任务所属的职责（dutyId 只能是本任务的职责），只能：" : "管理一条指定职责（dutyId），只在用户明确要求时调用，request.command 选一种：") + commands(dutyAllowed, [
-        ["update", "一次改多项：instructions、note、profile、enabled、trigger 中至少给一项，一起生效（任一项不合法则全部不改）；trigger 与 employee_duty_create 相同，含义同下面对应的单项命令（dynamic 会改成动态职责并安排下一次）"],
-        ["set_instructions", "替换职责内容（同步到尚未开始的派生任务）"],
-        ["set_note", "替换备注，\"\" 清空"],
-        ["set_profile", "改开局场景偏好（同步到尚未开始的派生任务）"],
-        ["set_manual", "改为不定时：清除自动触发规则和原触发条件文字，只按交代的任务需要执行（不是停用）"],
-        ["set_condition", "用自然语言替换触发规则，系统重新编译"],
-        ["set_daily", "改为每天固定时刻 times（取消间隔触发）"],
-        ["set_interval", "改为每隔 everyMinutes 分钟（取消每天时刻）"],
-        ["schedule_next", "给动态职责（没有固定时刻、间隔，也不是不定时）安排下一次执行，runAt 或 delayMinutes 二选一"],
-        ["enable", "启用"],
-        ["disable", "停用，并取消它还没收尾的任务（含派生的）"],
-        ["remove", "删除职责，并取消它还没收尾的任务"],
-      ]) + "。",
-      { dutyId, request: request([
-        obj({ command: one("update"), instructions: instructions("新的职责内容"), note: str("新的备注，\"\" 清空，≤4096 字节"), profile,
-          enabled: { type: "boolean", description: "true 启用；false 停用，并取消它还没收尾的任务（含派生的）" }, trigger: dutyTrigger("新的触发规则，选一种 kind") }, ["command"]),
-        obj({ command: one("set_instructions"), instructions: instructions("新的职责内容") }, ["command", "instructions"]),
-        obj({ command: one("set_note"), note: str("新的备注，\"\" 清空，≤4096 字节") }, ["command", "note"]),
-        obj({ command: one("set_condition"), condition: str("自然语言触发条件，1–2000 字", { minLength: 1, maxLength: 2000 }) }, ["command", "condition"]),
-        obj({ command: one("set_profile"), profile }, ["command", "profile"]),
-        obj({ command: one("set_daily"), times: dailyTimes }, ["command", "times"]),
-        obj({ command: one("set_interval"), everyMinutes }, ["command", "everyMinutes"]),
-        obj({ command: one("schedule_next"), runAt: beijing("下一次执行时间"), delayMinutes: delayMinutes("多久后执行") }, ["command"]),
-        obj({ command: { type: "string", enum: ["set_manual", "enable", "disable", "remove"] } }, ["command"]),
-      ], dutyAllowed) },
-      ["dutyId", "request"]));
   if (task) {
     out.push(tool("task_progress",
-      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、适用职责和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。步骤需要交付成果时用 stepOutput 保存为独立产物，正文和文件不混入对话消息；不新建任务或会话、不结束本轮，最终仍需 task_complete。",
+      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、工作原则和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。步骤需要交付成果时用 stepOutput 保存为独立产物，正文和文件不混入对话消息；不新建任务或会话、不结束本轮，最终仍需 task_complete。",
       { message: str("当前进度，1–200 字", { minLength: 1, maxLength: 200 }),
         plan: { type: "array", minItems: 1, maxItems: 50, description: "完整计划，包括未来步骤", items: obj({
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
@@ -228,7 +175,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         }, ["step"], "步骤的独立产物：文本填 text，构建/导出文件填 paths，也可同时填写；已有正文可用 ref 引用。系统单独展示并允许导出，不放进对话正文；每任务最多 50 条。草稿、未执行或未验证项须如实说明。") },
       ["message"]));
     out.push(tool("task_reschedule",
-      "把当前任务整体改到以后再继续（例如用户要求晚点或明天再处理、要等的时间点还没到）：runAt 或 delayMinutes 二选一。任务转为延后并立即结束本轮，到时在原会话续做。只改本任务自己；在等已提交的外部作业结果、需要记下恢复点时用 task_wait；给所属动态职责安排下次用 employee_duty_manage。",
+      "把当前任务整体改到以后再继续（例如用户要求晚点或明天再处理、要等的时间点还没到）：runAt 或 delayMinutes 二选一。任务转为延后并立即结束本轮，到时在原会话续做。只改本任务自己；在等已提交的外部作业结果、需要记下恢复点时用 task_wait。用户说清的时刻或周期由系统记在同一条任务上。",
       { runAt: beijing("续做时间"), delayMinutes: delayMinutes("多久后续做") }));
     out.push(tool("task_request_approval",
       "请用户审批一项需要先确认或尚未授权的不可逆操作（支付、删除、对外发送、提交审批等）：request 写清是什么操作。任务挂起并立即结束本轮；批准后在原会话继续获批事项，驳回则任务取消。常规开发分支的提交和普通推送不需要审批；缺信息用 task_ask_user。必须单独调用。",
@@ -243,10 +190,10 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     if (!ctx.computer) {
       // Browser work uses same-session switch_scene(scene=computer); isolated task_relay_computer is retired.
       out.push(tool("task_complete",
-        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、适用职责与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用尚未作为步骤产物交出的最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。已交出的步骤产物不会自动算作最终正文，也不要重复放进正文；仅当用户明确要求时可显式引用其文本。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独的最终正文时传 []（本次交付期内已写出未交出的正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
+        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、工作原则与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用尚未作为步骤产物交出的最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。已交出的步骤产物不会自动算作最终正文，也不要重复放进正文；仅当用户明确要求时可显式引用其文本。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独的最终正文时传 []（本次交付期内已写出未交出的正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
         { evidence: str("实际结果与验证证据，1–8000 字", { minLength: 1, maxLength: 8000 }),
-          outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、适用职责与用户最新要求；回执 changedSteps 每条在 requirement 原样列出并解释如何完成、替代或为何不适用，这不要求旧计划保持不变。每项写状态和真实依据。", items: obj({
-            requirement: str("用户任务或适用职责中的一项要求", { minLength: 1, maxLength: 500 }),
+          outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、工作原则与用户最新要求；回执 changedSteps 每条在 requirement 原样列出并解释如何完成、替代或为何不适用，这不要求旧计划保持不变。每项写状态和真实依据。", items: obj({
+            requirement: str("用户任务或工作原则中的一项要求", { minLength: 1, maxLength: 500 }),
             status: str("met 已满足 / not_applicable 条件不适用 / unmet 尚未满足", { enum: ["met", "not_applicable", "unmet"] }),
             evidence: str("实际回执、验证证据或不适用/未完成的原因", { minLength: 1, maxLength: 2000 }),
           }, ["requirement", "status", "evidence"]) },
@@ -265,7 +212,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       "写入一条跨任务仍成立的稳定事实：claim 1–200 字，一条一事；同向近义自动合并，矛盾的进入 conflict，person_org 人事类先进 draft 待用户确认，其余直接生效；带 memoryId 时改写该条。声称“已记住”前必须调用成功；临时进度、验证码、一次性链接和凭据不进记忆。确认、合并、归档、钉选或删除用 memory_manage。",
       { claim: str("稳定主张，1–200 字", { minLength: 1, maxLength: 200 }),
         memoryKind: str("preference 偏好、convention 约定、procedure 流程、environment 环境、person_org 人事、correction 纠错；省略时按主张内容自动推断（改写已有条目时也会重新推断）", { enum: ["preference", "convention", "procedure", "environment", "person_org", "correction"] }),
-        scope: str("作用域：global、项目路径、站点 host 或职责 id；省略时任务中为工作目录，否则 global", { maxLength: 500 }),
+        scope: str("作用域：global、项目路径或站点 host；省略时任务中为工作目录，否则 global", { maxLength: 500 }),
         memoryScene: str("适用场景；省略时任务中按当前场景，否则 chat", { enum: ["chat", "coding", "computer", "any"] }),
         evidence: str("简短核实依据", { maxLength: 500 }),
         tags: { type: "array", maxItems: 8, items: str("标签，不超过 40 字", { maxLength: 40 }), description: "可选自由标签（项目、技术栈、站点等），也参与检索；也可直接写在 claim 里如 #vue，两条路径等价" },
@@ -300,7 +247,7 @@ export function vaultTools(ctx: ToolContext): Tool[] {
 export const CHROME_TOOL_DEFINITIONS = chromeTools as Tool[];
 export const CHROME_TOOLS = new Set(CHROME_TOOL_DEFINITIONS.map((t) => t.name));
 export const EMPLOYEE_TOOLS = new Set([
-  "employee_status", "employee_task_create", "employee_task_manage", "employee_duty_create", "employee_duty_manage",
+  "employee_status", "employee_task_create", "employee_task_manage",
   "task_progress", "task_reschedule", "task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete",
   "memory_search", "memory_propose", "memory_manage",
 ]);
@@ -308,28 +255,13 @@ export const VAULT_TOOLS = new Set(["vault_list", "vault_get"]);
 /** Calls that suspend, hand off or end the turn: they must be the only call in a batch. */
 export const STANDALONE_TOOLS = new Set(["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete"]);
 
-export type Internal = { tool: "chrome" | "employee"; args: Obj; target?: "task" | "duty" };
+export type Internal = { tool: "chrome" | "employee"; args: Obj; target?: "task" };
 
 /** runAt / delayMinutes → the old nextAt / nextCheckInMinutes; exactly one unless optional. */
 function when(a: Obj, path: string, required = true): Obj {
   const both = a.runAt !== undefined && a.delayMinutes !== undefined, none = a.runAt === undefined && a.delayMinutes === undefined;
   if (both || (required && none)) throw new ArgumentError(`参数${path}.runAt 和 参数${path}.delayMinutes ${required ? "必须恰好填一个" : "最多填一个"}`);
   return Object.fromEntries(Object.entries({ nextAt: a.runAt, nextCheckInMinutes: a.delayMinutes }).filter(([, v]) => v !== undefined));
-}
-
-/**
- * A trigger branch → the old add/update duty fields. On update (replace=true) the other automatic rules are reset
- * in the same call, which is what the old update needed (manual=false plus the competing rule cleared) to switch kinds.
- * Like the old update, only manual clears the old condition wording; condition compiles and overrides the rest.
- */
-function dutyTriggerFields(t: Obj, path: string, replace: boolean): Obj {
-  switch (t.kind) {
-    case "manual": return { manual: true };
-    case "condition": return { condition: t.condition };
-    case "daily": return replace ? { manual: false, times: t.times, everyMinutes: 0 } : { times: t.times };
-    case "interval": return replace ? { manual: false, everyMinutes: t.everyMinutes, times: [] } : { everyMinutes: t.everyMinutes };
-    default: return replace ? { manual: false, times: [], everyMinutes: 0, ...when(t, path) } : when(t, path);
-  }
 }
 
 /** Map a validated public call onto the existing internal executor arguments. Fixed values cannot be overridden. */
@@ -398,29 +330,6 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
         case "answer": return employee({ action: "answer", id, text: r.answer }, "task");
         default: return employee({ action: "stop", id }, "task");
       }
-    }
-    case "employee_duty_create":
-      return employee(defined({ action: "add", kind: "duty", text: a.instructions, note: a.note, profile: a.profile, ...dutyTriggerFields(a.trigger, ".trigger", false) }));
-    case "employee_duty_manage": {
-      const r = a.request, id = a.dutyId;
-      if (r.command === "remove") return employee({ action: "done", id }, "duty");
-      if (r.command === "update") {
-        const fields = defined({ text: r.instructions, note: r.note, profile: r.profile, enabled: r.enabled, ...(r.trigger ? dutyTriggerFields(r.trigger, ".request.trigger", true) : {}) });
-        if (!Object.keys(fields).length) throw new ArgumentError("参数.request 的 update 至少要改一项：instructions、note、profile、enabled 或 trigger");
-        return employee({ action: "update", id, ...fields }, "duty");
-      }
-      const fields: Obj =
-        r.command === "set_instructions" ? { text: r.instructions }
-        : r.command === "set_note" ? { note: r.note }
-        : r.command === "set_profile" ? { profile: r.profile }
-        : r.command === "set_manual" ? { manual: true }
-        : r.command === "set_condition" ? { condition: r.condition }
-        // Replacing the trigger: the old update needed manual=false plus the other rule cleared alongside.
-        : r.command === "set_daily" ? { manual: false, times: r.times, everyMinutes: 0 }
-        : r.command === "set_interval" ? { manual: false, everyMinutes: r.everyMinutes, times: [] }
-        : r.command === "schedule_next" ? when(r, ".request")
-        : { enabled: r.command === "enable" };
-      return employee({ action: "update", id, ...fields }, "duty");
     }
     case "task_progress": return employee(defined({ action: "progress", text: a.message, plan: a.plan, tellUser: a.tellUser, stepOutput: a.stepOutput }));
     case "task_reschedule":

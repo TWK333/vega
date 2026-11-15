@@ -5,7 +5,7 @@ export const ADMIN_PAGES = ["browser", "experiences", "debug"];
 /** Page sub-views kept in the path: a fixed list, or any id (the selected item) when true. */
 const PAGE_SUBS = { settings: ["scenes", "vault", "external-mcp"], debug: true, experiences: true };
 const pageSub = (page, sub) => PAGE_SUBS[page] === true || PAGE_SUBS[page]?.includes(sub);
-export const EMPLOYEE_TABS = ["tasks", "browser", "duties", "memories", "capabilities", "settings"];
+export const EMPLOYEE_TABS = ["tasks", "browser", "memories", "capabilities", "settings"];
 /** First path segments that are app pages; the server answers these with index.html. */
 export const ROUTE_ROOTS = ["employees", "groups", "chat", ...PAGES];
 

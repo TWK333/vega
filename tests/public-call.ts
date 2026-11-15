@@ -4,30 +4,19 @@ type Obj = Record<string, any>;
 const defined = (o: Obj) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 
 // target "self": an update issued by a task session about itself (task_reschedule).
-export function employeeCall(a: Obj, target: "task" | "duty" | "self" = "task"): { name: string; arguments: Obj } {
+export function employeeCall(a: Obj, target: "task" | "self" = "task"): { name: string; arguments: Obj } {
+  if (a.kind === "duty" || (target as string) === "duty") throw new Error("职责配置已移除");
   const call = (name: string, args: Obj = {}) => ({ name, arguments: defined(args) });
   const when = { runAt: a.nextAt, delayMinutes: a.nextCheckInMinutes };
   switch (a.action) {
     case "list": return call("employee_status");
     case "add":
-      if (a.kind === "duty") {
-        const trigger = a.condition ? { kind: "condition", condition: a.condition } : a.times?.length ? { kind: "daily", times: a.times }
-          : a.everyMinutes ? { kind: "interval", everyMinutes: a.everyMinutes } : a.nextAt || a.nextCheckInMinutes ? defined({ kind: "dynamic", ...when }) : { kind: "manual" };
-        return call("employee_duty_create", { instructions: a.text, note: a.note, profile: a.profile, trigger });
-      }
       return call("employee_task_create", { instructions: a.text, dedupeKey: a.key, ...when, profile: a.profile });
     case "update":
-      if (target === "duty") {
-        const request = a.enabled === false ? { command: "disable" } : a.enabled === true ? { command: "enable" } : a.nextAt || a.nextCheckInMinutes ? defined({ command: "schedule_next", ...when })
-          : a.condition ? { command: "set_condition", condition: a.condition } : a.manual ? { command: "set_manual" } : a.times?.length ? { command: "set_daily", times: a.times }
-          : a.everyMinutes ? { command: "set_interval", everyMinutes: a.everyMinutes } : a.profile ? { command: "set_profile", profile: a.profile }
-          : "note" in a ? { command: "set_note", note: a.note } : { command: "set_instructions", instructions: a.text };
-        return call("employee_duty_manage", { dutyId: a.id, request });
-      }
       if (target === "self") return call("task_reschedule", when);
       return call("employee_task_manage", { taskId: a.id, request: a.nextAt || a.nextCheckInMinutes ? defined({ command: "reschedule", ...when })
         : a.profile ? { command: "set_profile", profile: a.profile } : { command: "set_instructions", instructions: a.text } });
-    case "done": return target === "duty" ? call("employee_duty_manage", { dutyId: a.id, request: { command: "remove" } }) : call("employee_task_manage", { taskId: a.id, request: { command: "cancel" } });
+    case "done": return call("employee_task_manage", { taskId: a.id, request: { command: "cancel" } });
     case "resume": return call("employee_task_manage", { taskId: a.id, request: defined({ command: "resume", supplement: a.text }) });
     case "answer": return call("employee_task_manage", { taskId: a.id, request: { command: "answer", answer: a.text } });
     case "stop": return call("employee_task_manage", { taskId: a.id, request: { command: "stop" } });

@@ -65,7 +65,6 @@ async function run(action) {
     <header class="detail-head">
       <div class="detail-badges">
         <span :class="['badge', taskTone(task.status)]"><span :class="['dot', taskTone(task.status), { pulse: task.status === 'running' }]" aria-hidden="true"></span>{{ taskLabel(task.status) }}</span>
-        <span v-if="task.dutyId" class="badge"><Icon name="repeat" :size="12" />职责触发</span>
         <span class="badge"><Icon :name="task.execution?.localAgent || task.execution?.localBrowser ? 'laptop' : 'server'" :size="12" />文件系统 {{ task.execution?.localAgent ? (task.execution.clientName || '已绑定设备') : '云端' }} · 浏览器 {{ task.execution?.localBrowser ? (task.execution.browserClientName || task.execution.clientName || '已绑定设备') : '云端' }}</span>
         <time class="detail-time">{{ formatBeijing(task.createdAt) }}</time>
       </div>

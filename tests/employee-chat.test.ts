@@ -517,14 +517,14 @@ test("clearEmployeeChat refuses while the chat turn is still running", async () 
   }
 });
 
-test("resetEmployee drops all sessions and tasks but keeps memories, settings, duties and the vault", async () => {
+test("resetEmployee drops all sessions and tasks but keeps memories, 工作原则, settings and the vault", async () => {
   const { store, engine, employee, chat } = await fixture();
   try {
     await store.append(chat.id, { role: "user", text: "hello" });
     const old = Date.now() - 3 * 86400000;
     await employee.update((state) => {
             state.instruction = "keep instruction";
-            state.duties.push({ id: "duty-daily", text: "daily", enabled: true, times: ["09:00"], firedAt: old }, { id: "duty-every", text: "interval", enabled: true, everyMinutes: 60, lastRunAt: old });
+            (state as any).duties = [{ id: "duty-daily", text: "daily", enabled: true, times: ["09:00"], firedAt: old }];
             for (const id of ["task-done", "task-waiting"]) state.tasks.push({ id, text: id, status: id === "task-done" ? "done" : "waiting", createdAt: old, profile: "coding", cwd: state.cwd, owner: { token: "", name: "owner" }, dutyId: "duty-daily" });
             state.runs.push({ taskId: "task-done", status: "done" });
           });
@@ -547,8 +547,7 @@ test("resetEmployee drops all sessions and tasks but keeps memories, settings, d
     assert.equal(state.instruction, "keep instruction");
     assert.ok(state.memories.some((entry: any) => entry.id === memory.value.id));
     assert.deepEqual((await employee.vault.list()).map((entry) => entry.id), [credential.id]);
-    assert.deepEqual(state.duties.map((duty) => duty.id), ["duty-daily", "duty-every"]);
-    assert.ok(state.duties[0].firedAt > old && state.duties[1].lastRunAt > old, "duty clocks restart from the reset");
+    assert.equal("duties" in state, false);
     employee.closed = false;
     await employee.tick();
     assert.deepEqual((await employee.state()).tasks, [], "no backlog fires right after a reset");

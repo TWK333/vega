@@ -18,6 +18,17 @@ import { requireSceneModel, schedulerLimits, type Config } from "./config";
 import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
+import {
+  explicitScheduleEvent,
+  nextDue,
+  parseExplicitSchedule,
+  planIntake,
+  wakeFrom,
+  workKey,
+  type ExplicitSchedule,
+  type WakeEvent,
+  type WorkEvent,
+} from "./work-intake";
 
 export type Execution = Pick<Session, "localAgent" | "localBrowser" | "clientId" | "clientName" | "browserClientId" | "localPlatform" | "ownerId"> & { browserClientName?: string };
 export type Owner = { token: string; name: string };
@@ -33,10 +44,20 @@ export type Task = Obj & {
   group?: TaskGroup;
   /** Images and files of the messages that started or supplemented the task; each run passes on the new ones. */
   attachments?: { images: NonNullable<Message["images"]>; files: NonNullable<Message["files"]> };
+  /** 用户点名的定时。没有它，调度器不会为了找活而醒来。 */
+  schedule?: ExplicitSchedule;
+  /** 当前这一步还在跑时送到的事件，等这一步结束再吸收。 */
+  inbox?: WorkEvent[];
+  /** 启动或唤醒这一轮的事件，供事后核对。 */
+  wake?: WakeEvent;
+  /** 不是用户当下交代的，调度时让位于用户任务。 */
+  proactive?: boolean;
+  seenEvents?: string[];
+  seenEvidence?: string[];
 };
 /** Who said something in a group chat: a user or an employee. */
 export type GroupAuthor = { kind: "user" | "employee"; id: string; name: string };
-/** byOwner: the request came from this employee's owner (anyone else may only work with tasks, never duties or memories; the vault is always the employee's own). */
+/** byOwner: the request came from this employee's owner (anyone else may only work with tasks, never memories; the vault is always the employee's own). */
 export type TaskGroup = { groupId: string; name: string; hop: number; requester: GroupAuthor; byOwner: boolean };
 export type EmployeeState = {
   id: string;
@@ -56,7 +77,6 @@ export type EmployeeState = {
   takeoverSeconds: number;
   desktopAskAfter: number;
   cwd: string;
-  duties: Obj[];
   tasks: Task[];
   memories: Obj[];
   runs: Obj[];
@@ -84,7 +104,6 @@ export const taskSummary = (t: Task) =>
     id: t.id,
     status: t.status,
     dedupeKey: t.key || undefined,
-    dutyId: t.dutyId || t.fromDuty || undefined,
     excerpt: excerpt(t.text, 120),
     result: excerpt(t.summary || t.result, 200) || undefined,
     createdAt: at(t.createdAt),
@@ -92,6 +111,7 @@ export const taskSummary = (t: Task) =>
     finishedAt: at(t.finishedAt),
   }).filter(([, v]) => v !== undefined));
 /** Eligibility is about task ownership/state, not how long ago the task was delivered. */
+const evidenceOf = (event: WorkEvent) => String(event.evidence || "").trim();
 export const followUpOpen = (t: Task) =>
   t.status === "done" && !t.dutyId && !t.fromDuty && t.side !== "computer" && !!t.workSession;
 /** Sealed tasks are archived by the user by hand; nothing (model, scheduler, remote member) may revive them. */
@@ -253,86 +273,6 @@ export function requestedTime(a: Obj, now = Date.now()) {
     return now + a.nextCheckInMinutes * 60000;
   }
   return 0;
-}
-export function applyDuty(d: Obj, a: Obj, now = Date.now()) {
-  for (const k of ["text", "note", "condition"])
-    if (k in a) {
-      assert(typeof a[k] === "string", `${k} must be text`);
-      d[k] = a[k].trim();
-    }
-  if (d.condition !== undefined) assert(typeof d.condition === "string" && d.condition.trim() && [...d.condition].length <= 2000, "触发条件需要 1–2000 字");
-  if ("profile" in a) {
-    d.profile = profile(a.profile);
-    assert(["lightweight", "coding"].includes(d.profile), "Invalid profile");
-  }
-  for (const k of ["enabled", "manual"])
-    if (k in a) {
-      assert(typeof a[k] === "boolean", `${k} must be boolean`);
-      d[k] = a[k];
-    }
-  if (a.manual === true) {
-    // Switching to manual drops the old trigger wording too, unless this same update supplies new wording.
-    if (!("condition" in a)) delete d.condition;
-    d.times = [];
-    d.events = [];
-    d.everyMinutes = 0;
-    d.nextCheckAt = 0;
-    d.pending = [];
-    d.eventAt = 0;
-  }
-  if ("times" in a) {
-    assert(
-      Array.isArray(a.times) && a.times.every(hhmm),
-      "times must contain HH:MM values",
-    );
-    const times = [...new Set(a.times)].sort();
-    if (JSON.stringify(times) !== JSON.stringify(d.times)) {
-      d.times = times;
-      d.firedAt = now;
-    }
-  }
-  if ("everyMinutes" in a) {
-    assert(
-      Number.isInteger(a.everyMinutes) &&
-        a.everyMinutes >= 0 &&
-        a.everyMinutes <= 10080,
-      "everyMinutes must be 0–10080",
-    );
-    d.everyMinutes = a.everyMinutes;
-  }
-  assert(
-    !(d.everyMinutes && d.times?.length),
-    "times and everyMinutes are mutually exclusive",
-  );
-  if ("events" in a) {
-    assert(
-      Array.isArray(a.events) && a.events.length === 0,
-      "不再支持星轨事件触发",
-    );
-    d.events = [...new Set(a.events)];
-    d.pending = [];
-    d.eventAt = 0;
-  }
-  assert(
-    !(d.manual && (d.everyMinutes || d.times?.length || d.events?.length)),
-    "manual duties cannot have auto triggers; set manual=false first",
-  );
-  const at = requestedTime(a, now);
-  if (at) {
-    assert(
-      !d.manual && !d.everyMinutes && !d.times?.length && !d.events?.length,
-      "Only dynamic duties use nextAt",
-    );
-    d.nextCheckAt = at;
-  }
-  assert(
-    typeof d.text === "string" && d.text.trim() && [...d.text].length <= 8000,
-    "Duty text requires 1–8000 characters",
-  );
-  assert(
-    Buffer.byteLength(d.note || "") <= 4096,
-    "Duty note exceeds 4096 bytes",
-  );
 }
 import {
   retention,
@@ -554,22 +494,14 @@ export class Employee {
     (this.root || this).members.delete(this.employeeId);
     this.runtime.emit("employee_changed", { employeeId: this.employeeId, deleted: true, ownerId: state.ownerId });
   }
-  /**
-   * Reset wipes tasks and runs. Duties are configuration and stay, but their clocks restart from now: a fixed-time
-   * duty waits for its next slot, an interval duty for one full interval, so wiping history never fires a backlog.
-   */
-  async clearWork(now = Date.now()) {
+  /** Reset wipes tasks and runs. 工作原则、记忆和设置留下。不保留职责配置。 */
+  async clearWork() {
     assert(this.resetting && !this.busy.size, "Reset requires an idle employee");
     const taskIds = await this.update((s) => {
           const ids = s.tasks.map((task) => task.id);
           s.tasks = [];
           s.runs = [];
-          for (const duty of s.duties) {
-            duty.pending = [];
-            duty.eventAt = 0;
-            if (duty.times?.length) duty.firedAt = now;
-            if (duty.everyMinutes) duty.lastRunAt = now;
-          }
+          delete (s as Obj).duties;
           return ids;
         });
     for (const taskId of taskIds) {
@@ -591,6 +523,7 @@ export class Employee {
   }
   /** The employee record, plus only the task and run rows that changed (see employee-rows.ts). */
   async save(s: EmployeeProfile) {
+    if ("duties" in s) delete (s as Obj).duties;
     await this.store.transaction(async () => {
       const base = baseRecord(s);
       if (this.employeeId === "default") await this.store.put("employee", base);
@@ -750,7 +683,6 @@ export class Employee {
       takeoverSeconds: 15,
       desktopAskAfter: 0,
       cwd: process.cwd(),
-      duties: [],
       memories: [],
       orbit: [],
     } as unknown as EmployeeProfile;
@@ -775,24 +707,17 @@ export class Employee {
         await this.save(state);
       }
     }
-    // Legacy availability fields no longer gate employees; only duty schedules determine when work is due.
+    // Legacy availability fields no longer gate employees. Due work is an explicit schedule on a task.
     state.enabled = true;
     state.workStart = state.workEnd = "00:00";
     Object.assign(state, { id: this.employeeId, name: state.name || fallback.name, instruction: state.instruction || "", ownerId: state.ownerId || "" });
-    // Retain legacy data but do not fire removed Orbit subscriptions.
-    for (const duty of state.duties)
-      if (duty.events?.some((name: string) => name.startsWith("orbit."))) {
-        duty.events = [];
-        duty.pending = [];
-        duty.eventAt = 0;
-        if (!duty.manual && !duty.everyMinutes && !duty.times?.length)
-          duty.enabled = false;
-      }
+    const droppedDuties = "duties" in state;
+    if (droppedDuties) delete (state as Obj).duties;
     const migrated = migrateMemories(state.memories);
     state.memories = migrated.memories;
     const pruned = pruneMemories(state.memories as MemoryRecord[]);
     state.memories = pruned.memories;
-    if (migrated.changed || pruned.changed) await this.save(state);
+    if (migrated.changed || pruned.changed || droppedDuties) await this.save(state);
     return state;
   }
   /** 绑定新任务的执行位置：默认在云端执行，浏览器端与执行端一致；发生任务交接时才切到客户端。 */
@@ -918,35 +843,17 @@ export class Employee {
     )
       return t;
     if (action === "add") {
-      assert(a.kind === "todo", "Task cannot create duties");
+      assert(a.kind === "todo", "Task cannot create a second task of another kind");
       return t;
     }
     if (action === "update") {
-      if (a.id === t.id)
-        assert(
+      assert(
+        a.id === t.id &&
           Object.keys(a).every((k) =>
             ["action", "id", "nextAt", "nextCheckInMinutes"].includes(k),
           ),
-          "Task may only reschedule itself",
-        );
-      else {
-        assert(a.id === t.dutyId, "Task can only update itself or its duty");
-        const d = s.duties.find((d) => d.id === a.id);
-        assert(d, "Duty missing");
-        assert(
-          Object.entries(a).every(
-            ([k, v]) =>
-              ["action", "id"].includes(k) ||
-              (k === "enabled" && v === false) ||
-              (["nextAt", "nextCheckInMinutes"].includes(k) &&
-                !d.manual &&
-                !d.everyMinutes &&
-                !d.times?.length &&
-                !d.events?.length),
-          ),
-          "Cannot modify user-owned duty text, note or fixed rules",
-        );
-      }
+        "Task may only reschedule itself",
+      );
       return t;
     }
     throw Error("Action is user-only");
@@ -1007,7 +914,7 @@ export class Employee {
                 name: s.name,
                 now: beijingDateTime(now),
                 timeZone: "Asia/Shanghai",
-                duties: s.duties,
+                instruction: s.instruction || "",
                 taskCount: matched.length,
                 tasks: matched.slice(-TASK_LIST_LIMIT).map(taskSummary),
                 recentRuns: s.runs
@@ -1024,34 +931,17 @@ export class Employee {
               assert(content, "text is required");
               const p = profile(a.profile);
               assert(["lightweight", "coding"].includes(p), "Invalid profile");
-              if (a.kind === "duty") {
-                assert(s.duties.length < 50, "Duty capacity reached");
-                const d: Obj = {
-                  id: id("d"),
-                  text: content,
-                  enabled: true,
-                  profile: p,
-                  owner,
-                  createdAt: now,
-                  firedAt: now,
-                };
-                applyDuty(d, a, now);
-                assert(
-                  d.manual ||
-                    d.everyMinutes ||
-                    d.times?.length ||
-                    d.events?.length ||
-                    d.nextCheckAt,
-                  "Duty requires explicit trigger or manual=true",
-                );
-                s.duties.push(d);
-                return { id: d.id };
-              }
-              assert(a.kind === "todo", "kind is duty or todo");
+              assert(a.kind !== "duty", "职责配置已移除；行为约束用工作原则。用户说清的时刻或周期记在同一条任务上");
+              assert(a.kind === "todo", "kind is todo");
               assert(
                 !a.key || (typeof a.key === "string" && [...a.key].length <= 200),
                 "key exceeds 200",
               );
+              // 用户话里已经点了时刻或周期：并进同一条定时，不另开。
+              if (parseExplicitSchedule(content, now)) {
+                const outcome = this.applyEvent(s, explicitScheduleEvent(content, now)!, now);
+                return { id: outcome.taskId, exists: outcome.action !== "start", scheduled: true, status: outcome.status, next: outcome.reason };
+              }
               const old = a.key ? s.tasks.find((t) => t.key === a.key) : undefined;
               if (old) return { id: old.id, exists: true, status: old.status, next: "这是已有任务，本次创建没有自动续做；先核对原目标和用户意图，需要继续时按状态使用 employee_task_manage 的 resume，不要绕过审批或用户停止。" };
               assert(
@@ -1073,7 +963,6 @@ export class Employee {
                 execution: t ? { ...(t.execution || {} ) } : bound!.execution,
                 key: a.key || "",
                 origin: t?.id || "",
-                fromDuty: t?.dutyId || t?.fromDuty || "",
                 chatSource: t?.chatSource,
                 nextCheckAt: requestedTime(a, now),
                 plan: [],
@@ -1084,30 +973,6 @@ export class Employee {
               return { id: task.id };
             }
             case "update": {
-              const d = s.duties.find((d) => d.id === a.id);
-              if (d) {
-                applyDuty(d, a, now);
-                for (const task of s.tasks.filter(
-                  (t) => t.dutyId === d.id || t.fromDuty === d.id,
-                )) {
-                  if (!d.enabled && !ended(task.status)) {
-                    task.status = "cancelled";
-                    this.runtime.cancel(
-                      task.side === "computer"
-                        ? task.computerSession
-                        : task.workSession,
-                    );
-                  } else if (
-                    !task.workSession &&
-                    !task.computerSession &&
-                    !this.busy.has(task.id)
-                  ) {
-                    task.text = d.text;
-                    task.profile = d.profile;
-                  }
-                }
-                return { ok: true };
-              }
               const task = get();
               assert(!ended(task.status), "Task has ended");
               if ("text" in a || "profile" in a) {
@@ -1146,27 +1011,10 @@ export class Employee {
               return { ok: true };
             }
             case "done": {
-              const task = s.tasks.find((t) => t.id === a.id);
-              if (task) {
-                assert(!this.busy.has(task.id), "Stop running task first");
-                task.status = "cancelled";
-                task.finishedAt = now;
-                return { ok: true };
-              }
-              const d = s.duties.find((d) => d.id === a.id);
-              assert(d, "Duty/task not found");
-              s.duties = s.duties.filter((v) => v.id !== a.id);
-              for (const task of s.tasks.filter(
-                (t) => t.dutyId === a.id || t.fromDuty === a.id,
-              ))
-                if (!ended(task.status)) {
-                  task.status = "cancelled";
-                  this.runtime.cancel(
-                    task.side === "computer"
-                      ? task.computerSession
-                      : task.workSession,
-                  );
-                }
+              const task = get();
+              assert(!this.busy.has(task.id), "Stop running task first");
+              task.status = "cancelled";
+              task.finishedAt = now;
               return { ok: true };
             }
             case "complete": {
@@ -1221,9 +1069,9 @@ export class Employee {
                 return {
                   ok: false, code: "outline_review_required",
                   task: t.text,
-                  duties: s.duties.filter((d) => d.enabled).map((d) => ({ text: d.text, note: d.note })),
+                  principles: s.instruction || "",
                   changedSteps: references,
-                  next: "计划可重写、合并或删改，旧步骤只是线索而非必须照搬。对照原始任务、适用职责和用户最新变更，逐项核对要求与实际回执后用 outlineReview 交付；changedSteps 每条也须在 requirement 原样列出并说明完成或不适用的依据。未完成应继续、按授权澄清或等待，确需部分交付才标 cancelled 并请求确认。",
+                  next: "计划可重写、合并或删改，旧步骤只是线索而非必须照搬。对照原始任务、工作原则和用户最新变更，逐项核对要求与实际回执后用 outlineReview 交付；changedSteps 每条也须在 requirement 原样列出并说明完成或不适用的依据。未完成应继续、按授权澄清或等待，确需部分交付才标 cancelled 并请求确认。",
                 };
               }
               const unchecked = references.filter((reference) => !(review || []).some((item: Obj) => item.requirement.trim() === reference));
@@ -1628,12 +1476,7 @@ export class Employee {
             for (const key of ["name", "instruction", "cwd"] as const) if (key in a) s[key] = a[key].trim();
             return { ok: true };
           }
-          if (a.action === "fire") {
-            const duty = s.duties.find((d) => d.id === a.id);
-            assert(duty && duty.enabled, "Duty not enabled");
-            const task = this.fire(s, duty, Date.now(), a.text);
-            return { id: task.id };
-          }
+          if (a.action === "fire") assert(false, "职责配置已移除");
           const t = this.task(s, a.id);
           assert(
             !owner.token || t.owner.token === owner.token,
@@ -1789,8 +1632,6 @@ export class Employee {
                 plan: [],
                 progress: [],
                 origin: t.id,
-                fromDuty: t.dutyId || t.fromDuty,
-                triggerCondition: t.triggerCondition,
               };
               s.tasks.push(copy);
               return { id: copy.id };
@@ -1831,27 +1672,144 @@ export class Employee {
     }
     return value;
   }
-  fire(s: EmployeeState, d: Obj, now: number, event?: string) {
+  /** 用户在对话里说清了时刻或周期时记下，到点由现有调度器续做同一条。认不出就什么都不建。 */
+  async acceptUserSchedule(text: string, now = Date.now()) {
+    const event = explicitScheduleEvent(text, now);
+    if (!event) return;
+    return this.intake(event, now);
+  }
+  /** 外部事件（点名、CI、评论、到点）接入已有任务。不新建执行器，也不轮询找活。 */
+  async intake(event: WorkEvent, now = event.at || Date.now()) {
+    return this.update((s) => this.applyEvent(s, event, now));
+  }
+  private applyEvent(s: EmployeeState, event: WorkEvent, now: number) {
+    const views = s.tasks.map((task) => ({
+      id: task.id,
+      key: task.key || "",
+      status: task.status,
+      busy: this.busy.has(task.id) || task.status === "running",
+      seenEvidence: task.seenEvidence,
+      seenEvents: task.seenEvents,
+    }));
+    const plan = planIntake(views, event, now);
+    const found = (taskId?: string) => s.tasks.find((task) => task.id === taskId);
+    if (plan.action === "ignore") {
+      const existing = s.tasks.find((task) => task.key === workKey(event.item));
+      return { action: plan.action, taskId: existing?.id, reason: plan.reason, status: existing?.status };
+    }
+    if (plan.action === "leave") {
+      const task = found(plan.taskId);
+      if (task) this.rememberEvent(task, event, false);
+      return { action: plan.action, taskId: plan.taskId, reason: plan.reason, status: task?.status };
+    }
+    if (plan.action === "attach" || plan.action === "queue-fire") {
+      const task = found(plan.taskId)!;
+      this.rememberEvent(task, event, true);
+      if (plan.action === "queue-fire") {
+        const schedule = task.schedule || event.schedule;
+        if (schedule) {
+          task.schedule = schedule;
+          schedule.queuedFire = { at: now, eventId: event.id };
+        }
+      } else {
+        task.inbox = [...(task.inbox || []), event].slice(-20);
+      }
+      return { action: plan.action, taskId: task.id, reason: plan.reason, status: task.status };
+    }
+    if (plan.action === "resume") {
+      const task = found(plan.taskId)!;
+      this.rememberEvent(task, event, true);
+      this.writeEvent(task, event, plan.status, plan.nextCheckAt, plan.reason);
+      return { action: plan.action, taskId: task.id, reason: plan.reason, status: task.status };
+    }
+    assert(s.tasks.filter((task) => !ended(task.status)).length < 100, "Active task capacity reached");
     const bound = this.bindExecution(s);
-    const t: Task = {
+    const task: Task = {
       id: id("t"),
-      text: d.text,
-      status: "queued",
-      profile: profile(d.profile),
+      text: event.text,
+      status: plan.status,
+      createdAt: now,
+      profile: "lightweight",
       cwd: bound.cwd || s.cwd,
-      owner: d.owner || { token: "", name: "" },
+      owner: { token: s.ownerId || "", name: "" },
       employeeId: this.employeeId,
       execution: bound.execution,
-      createdAt: now,
-      dutyId: d.id,
-      triggerCondition: d.condition,
-      event: event || "",
+      key: workKey(event.item),
+      nextCheckAt: plan.nextCheckAt,
       plan: [],
       progress: [],
+      schedule: event.schedule ? { dueAt: event.schedule.dueAt, repeat: event.schedule.repeat, request: event.schedule.request } : undefined,
+      wake: wakeFrom(event),
+      proactive: !event.userInitiated,
+      seenEvents: [event.id],
+      seenEvidence: evidenceOf(event) ? [evidenceOf(event)] : [],
+      inbox: [],
+      waiting: plan.status === "waiting" ? plan.reason : "",
     };
-    s.tasks.push(t);
-    d.firedAt = now;    if (!d.everyMinutes && !d.times?.length) d.nextCheckAt = 0;
-    return t;
+    s.tasks.push(task);
+    return { action: "start" as const, taskId: task.id, reason: plan.reason, status: task.status };
+  }
+  private rememberEvent(task: Task, event: WorkEvent, keepEvidence: boolean) {
+    task.seenEvents = [...new Set([...(task.seenEvents || []), event.id])].slice(-50);
+    const evidence = evidenceOf(event);
+    if (keepEvidence && evidence)
+      task.seenEvidence = [...new Set([...(task.seenEvidence || []), evidence])].slice(-50);
+  }
+  private writeEvent(task: Task, event: WorkEvent, status: string, nextCheckAt: number, reason: string) {
+    if (event.schedule) {
+      task.schedule = { dueAt: event.schedule.dueAt, repeat: event.schedule.repeat, request: event.schedule.request };
+      if (event.text) task.text = event.text;
+    }
+    const note = [event.text, event.evidence].filter(Boolean).join("\n");
+    if (note) task.answer = `${task.answer || ""}\n${note}`.trim();
+    task.wake = wakeFrom(event);
+    task.proactive = !event.userInitiated;
+    task.status = status;
+    task.nextCheckAt = nextCheckAt;
+    task.finishedAt = 0;
+    if (status === "waiting") task.waiting = reason;
+    else if (status === "queued" || status === "deferred") task.waiting = "";
+  }
+  /** 当前步骤结束后才吸收。返回 true 表示同一条任务要再走一轮，这一轮不能当成做完。 */
+  private absorbStep(task: Task) {
+    const inbox = task.inbox || [];
+    const queued = task.schedule?.queuedFire;
+    if (!inbox.length && !queued) return false;
+    const note = [
+      ...inbox.map((event) => [event.text, event.evidence].filter(Boolean).join("\n")),
+      queued ? "上一拍还在执行，这一拍没有另开任务，也没有打断当前步骤；这一步结束后继续同一条。" : "",
+    ].filter(Boolean).join("\n");
+    if (note) task.answer = `${task.answer || ""}\n${note}`.trim();
+    const last = inbox.at(-1);
+    if (last) task.wake = wakeFrom(last);
+    else if (queued && task.schedule)
+      task.wake = { id: queued.eventId, kind: "schedule", at: queued.at, text: [...task.schedule.request].slice(0, 200).join(""), item: String(task.key || task.id), userInitiated: false };
+    task.inbox = [];
+    if (task.schedule) delete task.schedule.queuedFire;
+    const hold = inbox.find((event) => event.hold);
+    task.finishedAt = 0;
+    task.completion = "";
+    if (hold) {
+      task.status = "waiting";
+      task.waiting = hold.text;
+      task.nextCheckAt = 0;
+      return true;
+    }
+    task.status = "queued";
+    task.nextCheckAt = 0;
+    return true;
+  }
+  /** 重复周期的一轮结束：还是这一条，下一拍再做用户点名的那一件，不补跑错过的每一拍。 */
+  private armSchedule(task: Task, now: number) {
+    const schedule = task.schedule;
+    if (!schedule?.repeat) return;
+    if (!schedule.dueAt || schedule.dueAt <= now) schedule.dueAt = nextDue(schedule.repeat, now);
+    delete schedule.queuedFire;
+    task.status = "deferred";
+    task.nextCheckAt = schedule.dueAt;
+    task.finishedAt = 0;
+    task.completion = "";
+    task.checkpoint = `用户要求按这个周期重复：${schedule.request}。下一拍 ${beijingDateTime(schedule.dueAt)}，只做这一件。`;
   }
   async tick(now = Date.now()) {
     if (this.closed || this.deleting || this.deleted || this.resetting) return;
@@ -1883,7 +1841,7 @@ export class Employee {
     let next = Infinity,
       changed = false;
     const limits = schedulerLimits(await this.runtime.config());
-    // One transaction: the snapshot this pass judges (orphans, due duties, slots) is the one it saves.
+    // One transaction: the snapshot this pass judges (orphans, due schedules, slots) is the one it saves.
     try {
       await this.store.transaction(async () => {
         const s = await this.state();
@@ -1895,33 +1853,27 @@ export class Employee {
             changed = true;
           }
         }
-        for (const d of s.duties) {
-          if (!d.enabled || d.manual) continue;
-          let due = 0;
-          if (d.everyMinutes) {
-            if (!s.tasks.some((t) => t.dutyId === d.id && !ended(t.status)))
-              due = d.lastRunAt ? d.lastRunAt + d.everyMinutes * 60000 : 1;
-          } else if (d.times?.length) due = nextFixed(d.times, d.firedAt || now);
-          else due = d.nextCheckAt || 0;
-          const event = d.eventAt && d.eventAt <= now;
-          if ((due && due <= now) || event) {
-            this.fire(s, d, now, event ? (d.pending || []).join("\n") : undefined);
-            if (event) {
-              d.pending = [];
-              d.eventAt = 0;
+        // 只为已经记下的定时醒一次。正在跑的那一拍到点了就排队，不另开、不打断。
+        for (const t of s.tasks) {
+          const due = t.schedule?.repeat ? t.schedule.dueAt || 0 : 0;
+          if (!due || ["stopped", "cancelled", "sealed", "done"].includes(t.status)) continue;
+          if (due > now) next = Math.min(next, due);
+          else if (this.busy.has(t.id) || t.status === "running") {
+            if (!t.schedule!.queuedFire) {
+              t.schedule!.queuedFire = { at: now, eventId: `schedule:${due}` };
+              changed = true;
             }
-            changed = true;
-          } else {
-            if (due > now) next = Math.min(next, due);
-            if (d.eventAt > now) next = Math.min(next, d.eventAt);
           }
         }
         const root = this.root || this;
         let globalSlots = limits.global - root.busyTotal();
         let localSlots = limits.perEmployee - this.busy.size;
         const writers = root.writers;
-        for (const t of s.tasks) {
-          if (this.busy.has(t.id) || !["queued", "deferred", "recovering"].includes(t.status))
+        const rank = (t: Task) => (t.schedule || t.proactive ? 1 : 0);
+        const ordered = [...s.tasks].sort((a, b) => rank(a) - rank(b));
+        for (const t of ordered) {
+          const canStart = ["queued", "deferred", "recovering"].includes(t.status) || (t.status === "failed" && !!t.schedule);
+          if (this.busy.has(t.id) || !canStart)
             continue;
           // 这台设备还没回连（或已待命）：不派发、不换设备、不改到服务端执行。
           const waitClient = t.status === "recovering" ? t.recovery?.waitClient : undefined;
@@ -1975,6 +1927,22 @@ export class Employee {
           t.queueReason = "";
           t.status = "running";
           t.nextCheckAt = 0;
+          if (t.schedule) {
+            t.wake = {
+              id: `schedule:${now}`,
+              kind: "schedule",
+              at: now,
+              text: [...String(t.schedule.request || t.text || "")].slice(0, 200).join(""),
+              item: String(t.key || t.id),
+              userInitiated: false,
+            };
+            t.proactive = true;
+            if (t.schedule.repeat) {
+              t.schedule.dueAt = nextDue(t.schedule.repeat, now);
+              next = Math.min(next, t.schedule.dueAt);
+            }
+            delete t.schedule.queuedFire;
+          }
           jobs.push(clone(t));
           changed = true;
         }
@@ -2051,7 +2019,7 @@ export class Employee {
         for (const note of notes) task.checkpoint = (task.checkpoint || "") + "\n" + note;
         if (computer) task.computerSession = session;
         else task.workSession = session;
-        s.runs.push({ taskId: task.id, session, scene, at: Date.now(), status: "running", notes: [] });
+        s.runs.push({ taskId: task.id, session, scene, at: Date.now(), status: "running", notes: [], ...(task.wake ? { wake: task.wake } : {}) });
         s.runs = s.runs.slice(-200);
         task.completion = "";
         task.summary = "";
@@ -2061,7 +2029,6 @@ export class Employee {
         return s;
       });
       let task = this.task(state, job.id);
-      const duties = state.duties.filter((d) => d.enabled);
       if (computer && !this.runtime.isolated) stopMonitor = this.monitorComputer(task.id, session);
       const rowsBefore = (await this.store.sharedMessages(session)).rows, continuing = rowsBefore.some((message) => message.role === "user");
       const previous = {
@@ -2088,14 +2055,18 @@ export class Employee {
       state = await this.update((s) => { this.task(s, job.id).recalledMemoryIds = recalled; return s; });
       task = this.task(state, job.id);
       const memoryBlock = formatMemoriesForPrompt(memories);
+      const principles = `[工作原则]\n${state.instruction || "（无）"}`;
+      const scheduleNote = task.schedule
+        ? "这是用户点名的定时，只做这一件已经记下的事，不要另找工作。缺少必要文件、遇到合并冲突、下一步会对外发送或提交、或授权范围会扩大时，停下来问用户，不要自行扩大授权。"
+        : "";
       const context = continuing
-        ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n当前计划和恢复点：${snapshot}${memoryBlock}`
-        : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n启用职责（参考匹配流程；不重复派单、不扩大本次授权）：${JSON.stringify(duties)}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, fromDuty: task.fromDuty, triggerCondition: task.triggerCondition, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
+        ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}\n${principles}${scheduleNote ? "\n" + scheduleNote : ""}\n当前计划和恢复点：${snapshot}${memoryBlock}`
+        : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n${principles}${scheduleNote ? "\n" + scheduleNote : ""}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
       const groupNote = task.group && !computer ? await this.groupTaskNote(task.group) : "";
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n${task.triggerCondition && !computer ? "职责时刻由调度器或手动触发负责，不因排队/续做晚于时刻而拒绝执行；含业务条件时先核对，未满足只交付检查结果、不执行对应动作；同次触发依据历史回执续做，不重复处理。\n" : ""}首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、适用职责与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。用户要求步骤产物时，在该步骤完成后用task_progress的stepOutput交出独立产物并继续，不把产物塞进对话正文，也不等最终收口；已保存的步骤产物不要重复发送。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统只会选用本次交付期内尚未作为步骤产物交出的最新较长正文；已交出的步骤产物留在独立产物卡中，不重复写进最终正文；仅当用户明确要求时可显式引用其文本；没有单独最终正文时可传deliverableRefs=[]，已写出未交出的正文时不要传[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
+      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、工作原则与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。用户要求步骤产物时，在该步骤完成后用task_progress的stepOutput交出独立产物并继续，不把产物塞进对话正文，也不等最终收口；已保存的步骤产物不要重复发送。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统只会选用本次交付期内尚未作为步骤产物交出的最新较长正文；已交出的步骤产物留在独立产物卡中，不重复写进最终正文；仅当用户明确要求时可显式引用其文本；没有单独最终正文时可传deliverableRefs=[]，已写出未交出的正文时不要传[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       // Attachments the work session has not been given yet.
       const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));
@@ -2126,6 +2097,11 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                 if (t.status === "running") {
                   if (this.stopping || this.root?.stopping) {
                     t.status = "running";
+                  } else if (this.absorbStep(t)) {
+                    // 这一步已经结束，才吸收期间送到的事件或被错过的一拍。
+                  } else if (t.schedule?.repeat) {
+                    t.result = result;
+                    this.armSchedule(t, Date.now());
                   } else if (error) {
                     t.failures = (t.failures || 0) + 1;
                     this.recover(t, result);
@@ -2173,6 +2149,8 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                       : "上次结果：" + result));
                   }
                 }
+                // task_complete 会先把重复任务标成 done；周期还在，就回到同一条的下一拍，不另开。
+                if (t.status === "done" && t.schedule?.repeat) this.armSchedule(t, Date.now());
                 const run = [...s.runs]
                   .reverse()
                   .find((r) => r.taskId === t.id && r.status === "running");
@@ -2188,11 +2166,6 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                       const memory = (s.memories as MemoryRecord[]).find((item) => item.id === mid);
                       if (memory) applyFeedback(memory, "success", t.finishedAt);
                     }
-                  }
-                  const d = s.duties.find((d) => d.id === t.dutyId);
-                  if (d) {
-                    d.lastRunAt = t.finishedAt;
-                    d.lastResult = t.result || result;
                   }
                 }
               });
