@@ -1,7 +1,7 @@
 package main
 
 // 动鼠标键盘前先问用户一句：与 Nova 数字员工操作电脑同一套（employee::claim_desktop / ask_takeover）——
-// 蝴蝶上方弹一张要作答的卡，倒计时内不选就当作同意；选「我在用」就冷却几分钟，期间不再问也不再操作。
+// 原生确认框倒计时内不选就当作同意；选「我在用」就冷却几分钟，期间不再问也不再操作。
 // shortcut: 冷却和“问过谁”只存在本次运行里（Nova 把它们落进 employee.json），客户端重启后会再问一次。
 
 import (
@@ -65,7 +65,7 @@ func (a *Agent) saveConfirmSeconds(seconds int) error {
 }
 
 // appuseConfirmCard 弹出这张卡；测试里换成不真的弹窗、直接当作能点的实现。
-var appuseConfirmCard = butterflyConfirm
+var appuseConfirmCard = clientConfirm
 
 var appuseConfirmState struct {
 	sync.Mutex
@@ -97,17 +97,16 @@ func appuseConfirmInput(owner string) string {
 	}
 	state.Unlock()
 
-	if !appuseConfirmCard() {
-		// 蝴蝶被关掉或没有 WebView2：没有能作答的卡，按「不拒绝默认视为同意」直接开始。
-		state.Lock()
-		state.owner, state.at = owner, time.Now()
-		state.Unlock()
-		return ""
-	}
 	answer := make(chan string, 1)
 	state.Lock()
 	state.answer = answer
 	state.Unlock()
+	if !appuseConfirmCard(answer) {
+		state.Lock()
+		state.answer = nil
+		state.Unlock()
+		return "无法显示操作电脑确认框，本批未执行"
+	}
 
 	timer := time.NewTimer(appuseConfirmTimeout)
 	choice := "allow"
@@ -116,7 +115,6 @@ func appuseConfirmInput(owner string) string {
 	case <-timer.C:
 	}
 	timer.Stop()
-	butterflyHideNotice()
 
 	state.Lock()
 	state.answer = nil
@@ -133,7 +131,7 @@ func appuseConfirmInput(owner string) string {
 	return ""
 }
 
-// appuseConfirmAnswer 是蝴蝶卡上「现在接管 / 我在用」的答复入口。
+// appuseConfirmAnswer 接收当前原生确认框的答复。
 func appuseConfirmAnswer(option string) {
 	if option != "allow" && option != "reject" {
 		return

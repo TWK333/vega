@@ -20,8 +20,8 @@ var iconConnectedData []byte
 func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetTitle("牵牛星")
-		mButterfly := systray.AddMenuItem("蝴蝶助理", "打开蝴蝶窗口（对话和设置都在里面）")
-		mConfigure := systray.AddMenuItem("设置", "管理站点授权、按牛马配置主从和补充内容")
+		mClient := systray.AddMenuItem("打开 Vega", "打开客户端对话窗口")
+		mConfigure := systray.AddMenuItem("设置", "管理站点授权、浏览器和补充内容")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		trayState.Lock()
 		trayState.ready = true
@@ -30,8 +30,10 @@ func systrayRun(configure, onQuit func()) {
 		go func() {
 			for {
 				select {
-				case <-mButterfly.ClickedCh:
-					butterflyOpen()
+				case <-mClient.ClickedCh:
+					if clientOpen != nil {
+						clientOpen()
+					}
 				case <-mConfigure.ClickedCh:
 					configure()
 				case <-mQuit.ClickedCh:
@@ -48,7 +50,7 @@ var trayState struct {
 	ready     bool
 	connected bool
 	site      string
-	// 蝴蝶提示："" 无、running 正在操作电脑、needs_review 待用户核对。
+	// 操作电脑提示独立于聊天窗口。
 	notice     string
 	noticeText string
 }
@@ -74,7 +76,7 @@ func connectionTooltip(connected bool) string {
 	return base + " · 未连接"
 }
 
-// trayTooltip 把蝴蝶提示叠在连接状态上，鼠标停在托盘图标上就能看到。
+// trayTooltip 把操作提示叠在连接状态上。
 func trayTooltip(connected bool, notice, text string) string {
 	switch notice {
 	case "needs_review":
@@ -94,7 +96,7 @@ func applyTrayAppearance(connected bool) {
 	systray.SetTooltip(trayTooltip(connected, trayState.notice, trayState.noticeText))
 }
 
-func butterflyTrayNotice(notice *butterflyNotice) {
+func clientTrayNotice(notice *clientNotice) {
 	trayState.Lock()
 	defer trayState.Unlock()
 	trayState.notice, trayState.noticeText = "", ""

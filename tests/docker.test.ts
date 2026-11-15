@@ -153,6 +153,8 @@ test("Docker image builds Linux-native artifacts, uses a restricted identity lau
     ignore = readFileSync(".dockerignore", "utf8");
   assert.match(docker, /FROM node:24-bookworm-slim AS build/);
   assert.match(docker, /RUN npm ci/);
+  assert.match(docker, /COPY local\/grok_ui \.\/grok_ui/);
+  assert(ignore.includes("!local/grok_ui/**"), "embedded renderer must reach the Go Docker build");
   assert.match(docker, /RUN npm run build/);
   assert.match(docker, /COPY --from=build \/app\/\.output \/app\/\.output/);
   assert.match(docker, /USER root/);

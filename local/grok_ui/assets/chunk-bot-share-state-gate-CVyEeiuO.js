@@ -1,0 +1,3 @@
+!function(t){try{var e="undefined"!=typeof window?window:"undefined"!=typeof global?global:"undefined"!=typeof globalThis?globalThis:"undefined"!=typeof self?self:{},n="Error\n    at "+t+":1:1";e._sentryDebugIds=e._sentryDebugIds||{},e._sentryDebugIds[n]="f168440f-d125-466f-a061-b3a2a43cc1ba",e._sentryDebugIdIdentifier="sentry-dbid-f168440f-d125-466f-a061-b3a2a43cc1ba"}catch(e){}}(import.meta.url);
+import{i as e,s as t}from"./chunk-use-bot-sharing-CFZLx2Vc.js";function n(r){n.d=452;let{botId:i,children:a}=r;return a(e(t(i)))}export{n as BotShareStateGate};
+//# debugId=f168440f-d125-466f-a061-b3a2a43cc1ba

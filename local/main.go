@@ -54,25 +54,6 @@ func main() {
 		case "--apply-update":
 			must(applyUpdate(os.Args[2:]))
 			return
-		case "--butterfly-preview":
-			// 只为看气泡与任务栏蝴蚋长什么样：真实提示来自 appuse（第二个参数 running/needs_review 看两种态）。
-			kind := "needs_review"
-			if len(os.Args) > 2 {
-				kind = os.Args[2]
-			}
-			if kind == "confirm" {
-				// 走 appuse 真正那条路：卡上点了什么、倒计时到了没有，都看最后这行输出。
-				fmt.Println("confirm:", appuseConfirmInput("preview"))
-				return
-			}
-			butterflyChipStart()
-			if kind == "running" {
-				butterflyNotify("running", "正在用鼠标键盘操作这台电脑（appuse act），期间请不要抢鼠标")
-			} else {
-				butterflyNotify("needs_review", "appuse 可能已经部分执行：点击后输入文字可能已发出；请核对屏幕上的实际结果")
-			}
-			time.Sleep(20 * time.Second)
-			return
 		case "--glow-preview":
 			// 只为看光效与剑形指针：与 appuse 点亮时完全同一条路径（持有租约 → 亮光效/换指针 → 还原）。
 			glowStart()
@@ -93,22 +74,14 @@ func main() {
 				os.Exit(1)
 			}
 			return
-		case "--butterfly-panel-open":
-			// 只验证入口：像点托盘一样拉起（或唤到前面）面板，然后退出，不再持有它。
-			url := "http://127.0.0.1:8080/"
+		case "--client-window-open":
 			if len(os.Args) > 2 {
-				url = os.Args[2]
+				fmt.Println(clientWindowOpen(os.Args[2]))
 			}
-			fmt.Println(butterflyPanelOpen(url))
 			return
-		case "--butterfly-panel":
-			// 由客户端拉起的面板子进程：go run . --butterfly-panel <assistant-url>
-			url := "http://127.0.0.1:8080/"
-			if len(os.Args) > 2 {
-				url = os.Args[2]
-			}
-			if !butterflyPanelRun(url) {
-				fmt.Fprintln(os.Stderr, "vega-local: WebView2 不可用，无法打开蝴蝶面板")
+		case "--client-window":
+			if len(os.Args) > 2 && !clientWindowRun(os.Args[2]) {
+				fmt.Fprintln(os.Stderr, "vega-local: WebView2 不可用，无法打开客户端")
 			}
 			return
 		}
@@ -138,7 +111,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/agent", a.serveWS)
 	mux.HandleFunc("/config/"+a.configToken, a.configure)
-	a.assistantMount(mux) // 蝴蝶面板的本地页面与数据接口
+	a.assistantMount(mux) // 内嵌 Grok renderer 与本地数据通道
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(lis) }()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -147,7 +120,6 @@ func main() {
 	needsPairing := len(a.config.Servers) == 0
 	a.startConnections(ctx)
 	setSiteLabel(a.siteLabel())
-	butterflySetEnabled(a.config.Butterfly)
 	setAppuseConfirmSeconds(a.config.ConfirmSeconds)
 	setSshKeysAllowed(a.config.sshKeysAllowed())
 	// 默认用客户端自己的无头 Chrome；设置里选「我自己的 Chrome」就不拉起。
@@ -160,35 +132,21 @@ func main() {
 		}()
 	}
 	configure := func() {
-		url := "http://" + localAddress + "/config/" + a.configToken
-		// 设置也在蝴蝶窗口里开：先把目标页写给面板，面板不在时退回系统浏览器。
-		butterflyPanelTarget(a.dataDir, url)
-		if !butterflyPanelOpen(url) {
+		openBrowser("http://" + localAddress + "/config/" + a.configToken)
+	}
+	clientOpen = func() {
+		url := a.assistantURL()
+		if !clientWindowOpen(url) {
 			openBrowser(url)
 		}
 	}
-	// 面板在启动时就预热好（窗口停屏幕外、页面先加载），点蝴蝶秒开，没有初始化白框。
-	go func() {
-		time.Sleep(2 * time.Second)
-		butterflyPanelWarm(a.assistantURL())
-	}()
-	butterflySetOpen(func() {
-		url := a.assistantURL()
-		if url == "" {
-			configure()
-			return
-		}
-		// 蝴蝶面板里就是网页里的 BOT 会话；WebView2 不可用时退回系统浏览器。
-		butterflyPanelTarget(a.dataDir, url)
-		if !butterflyPanelOpen(url) {
-			openBrowser(url)
-		}
-	})
+	// The client has its own regular taskbar window; no Explorer child window or butterfly is started.
+	clientOpen()
 	fmt.Fprintln(os.Stderr, "vega-local: connection settings at http://"+localAddress+"/config/"+a.configToken)
 	a.clientLog("本地端口 %s 已启用（浏览器需在同一台电脑打开站点）", localAddress)
 	quit := func() {
 		headlessStop()
-		butterflyPanelClose()
+		clientWindowClose()
 		cancel()
 		a.mu.Lock()
 		for conn := range a.connections {

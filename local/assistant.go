@@ -1,61 +1,83 @@
 package main
 
-// 蝴蝶面板的界面与数据通道：面板里不登录网站、也不加载站点前端。
-// 页面（assistant_page.html）由本进程直接发给 WebView2，数据由这段代码带设备凭据
-// 转发给本站点的 /api/local-agent/chat/*（原生客户端通道）。
+// 原版 Grok renderer 由本进程内嵌发给 WebView2；只替换 Electron 数据通道。
+// 设备凭据只在 Go 进程里使用，页面通过本站点的 /api/local-agent/chat/* 读取数据。
 // 地址带 configToken：本机别的程序不知道令牌就打不开，接口也只认这个令牌。
 
 import (
 	"bytes"
 	"context"
-	_ "embed"
+	"crypto/sha256"
+	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
 
-//go:embed assistant_page.html
-var assistantPage []byte
-
-//go:embed assistant_marked.js
-var assistantMarked []byte
+//go:embed all:grok_ui
+var assistantAssets embed.FS
 
 // assistantMount 把面板页面和它的几个接口挂到本地服务器上。
 func (a *Agent) assistantMount(mux *http.ServeMux) {
 	base := a.assistantPath()
+	assets, err := fs.Sub(assistantAssets, "grok_ui")
+	if err != nil {
+		panic(err)
+	}
+	files := http.StripPrefix(base, http.FileServer(http.FS(assets)))
 	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/api/threads"):
-			a.assistantProxy(w, r, "threads")
-		case strings.HasSuffix(r.URL.Path, "/api/messages"):
-			a.assistantProxy(w, r, "messages")
-		case strings.HasSuffix(r.URL.Path, "/api/send"):
-			a.assistantProxy(w, r, "send")
-		case strings.HasSuffix(r.URL.Path, "/api/read"):
-			a.assistantProxy(w, r, "read")
-		case strings.HasSuffix(r.URL.Path, "/api/control"):
-			// 待确认气泡上的「允许 / 拒绝 / 回答」：透传给牛马的 employee.control。
-			a.assistantProxy(w, r, "control")
-		case strings.HasSuffix(r.URL.Path, "/api/file"):
-			a.assistantProxy(w, r, "file")
-		case strings.HasSuffix(r.URL.Path, "/api/close"):
-			// 页面上的 × 只是把面板收回屏幕外（WebView2 留在内存里，下次点蝴蝶秒开）。
-			butterflyPanelPark()
-			assistantReply(w, http.StatusOK, map[string]any{"ok": true})
-		case strings.HasSuffix(r.URL.Path, "/marked.js"):
-			// markdown 渲染用 marked（MIT），面板里不带构建步骤，直接内嵌发出去。
-			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write(assistantMarked)
-		case r.Method == http.MethodGet:
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write(assistantPage)
-		default:
-			http.NotFound(w, r)
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Cache-Control", "no-store")
+		path := strings.TrimPrefix(r.URL.Path, base)
+		if strings.HasPrefix(path, "api/") {
+			if r.Method != http.MethodPost {
+				http.Error(w, "POST required", http.StatusMethodNotAllowed)
+				return
+			}
+			if origin := r.Header.Get("Origin"); origin != "" && origin != "http://"+localAddress {
+				http.Error(w, "cross-origin request denied", http.StatusForbidden)
+				return
+			}
+			switch strings.TrimPrefix(path, "api/") {
+			case "host":
+				a.mu.Lock()
+				account := a.pinnedOrigin
+				if len(a.config.Servers) > 0 {
+					account += ":" + a.config.Servers[len(a.config.Servers)-1].UserID
+				}
+				a.mu.Unlock()
+				hash := sha256.Sum256([]byte(account))
+				_, _, paired := a.assistantCredential()
+				assistantReply(w, http.StatusOK, map[string]any{"version": clientVersion, "account": hex.EncodeToString(hash[:]), "paired": paired, "configURL": "/config/" + a.configToken})
+			case "external":
+				var input struct {
+					URL string `json:"url"`
+				}
+				err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&input)
+				target, parseErr := url.Parse(input.URL)
+				if err != nil || parseErr != nil || target.Host == "" || (target.Scheme != "http" && target.Scheme != "https") || target.User != nil {
+					http.Error(w, "invalid external URL", http.StatusBadRequest)
+					return
+				}
+				openBrowser(target.String())
+				assistantReply(w, http.StatusOK, map[string]any{"ok": true})
+			case "threads", "messages", "send", "read", "control", "file", "create":
+				a.assistantProxy(w, r, strings.TrimPrefix(path, "api/"))
+			default:
+				http.NotFound(w, r)
+			}
+			return
 		}
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "GET required", http.StatusMethodNotAllowed)
+			return
+		}
+		files.ServeHTTP(w, r)
 	})
 }
 
@@ -81,7 +103,11 @@ func (a *Agent) assistantProxy(w http.ResponseWriter, r *http.Request, op string
 		http.Error(w, "cross-origin request denied", http.StatusForbidden)
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	requestLimit := int64(1 << 20)
+	if op == "send" {
+		requestLimit = 90 << 20 // Same attachment envelope as the website; upstream validates file sizes.
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, requestLimit))
 	if err != nil {
 		http.Error(w, "unreadable body", http.StatusBadRequest)
 		return
@@ -117,7 +143,7 @@ func (a *Agent) assistantProxy(w http.ResponseWriter, r *http.Request, op string
 	}
 	if response.StatusCode == http.StatusNotFound || response.StatusCode == http.StatusUnauthorized {
 		// 老版本服务端没有这几个接口（还得要网站 cookie）：给页面一句能看懂的话。
-		assistantReply(w, http.StatusConflict, map[string]any{"error": "服务端还没有更新到支持蝴蝶面板的版本（缺少 /api/local-agent/chat）"})
+		assistantReply(w, http.StatusConflict, map[string]any{"error": "服务端还没有更新到支持客户端聊天的版本（缺少 /api/local-agent/chat）"})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

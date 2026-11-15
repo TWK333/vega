@@ -47,7 +47,7 @@ test("「新」分界进来时留着，来了新消息就收起", async () => {
   assert.equal(state.markGone.value, true, "来了新消息就收起");
 });
 
-test("客户端和网页都画出「新」分界，并在这之后收起", async () => {
+test("网页画出「新」分界，并在这之后收起", async () => {
   const text = (path: string) => readFile(path, "utf8");
   for (const path of ["web/src/EmployeeChat.vue", "web/src/GroupChat.vue", "web/src/ConversationTimeline.vue"]) {
     const source = await text(path);
@@ -58,8 +58,4 @@ test("客户端和网页都画出「新」分界，并在这之后收起", async
   const app = await text("web/src/App.vue");
   assert.match(app, /newFrom\.value = seenSeq\(user\.value\.id, session\.id\)/, "进来时取上次看到的位置");
   assert.match(app, /next === "chat" && user\.value && current\.value\) newFrom\.value = seenSeq/, "切出再回来也能重新取");
-  const panel = await text("local/assistant_page.html");
-  assert.match(panel, /markGone \? " gone" : ""/);
-  assert.match(panel, /\.ta-new\.gone \{ visibility: hidden; \}/);
-  assert.match(panel, /state\.markGone = true;/, "面板来了新消息就收起");
 });

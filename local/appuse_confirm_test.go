@@ -8,10 +8,10 @@ import (
 // quietConfirm 让确认走状态机但不动真实窗口，并返回一个“用户点了 / 到点了”的入口。
 func quietConfirm(t *testing.T) {
 	t.Helper()
-	quiet, card, timeout := butterflyQuiet, appuseConfirmCard, appuseConfirmTimeout
-	butterflyQuiet = true
-	appuseConfirmCard = func() bool { return true }
-	t.Cleanup(func() { butterflyQuiet, appuseConfirmCard, appuseConfirmTimeout = quiet, card, timeout })
+	quiet, card, timeout := clientNoticeQuiet, appuseConfirmCard, appuseConfirmTimeout
+	clientNoticeQuiet = true
+	appuseConfirmCard = func(chan<- string) bool { return true }
+	t.Cleanup(func() { clientNoticeQuiet, appuseConfirmCard, appuseConfirmTimeout = quiet, card, timeout })
 	appuseConfirmState.Lock()
 	appuseConfirmState.owner, appuseConfirmState.at, appuseConfirmState.askAfter = "", time.Time{}, time.Time{}
 	appuseConfirmState.answer = nil
@@ -42,6 +42,17 @@ func TestAppuseConfirmStartsWhenNobodyAnswers(t *testing.T) {
 	}
 	if time.Since(start) > appuseConfirmTimeout {
 		t.Fatal("同一个会话不该再等一次确认")
+	}
+}
+
+func TestAppuseConfirmUnavailableDoesNotExecuteInput(t *testing.T) {
+	quietConfirm(t)
+	appuseConfirmCard = func(chan<- string) bool { return false }
+	if reason := appuseConfirmInput("s1"); reason == "" {
+		t.Fatal("没有原生确认框时必须拒绝输入")
+	}
+	if confirmWaiting() {
+		t.Fatal("确认框失败后不能遗留待答复状态")
 	}
 }
 

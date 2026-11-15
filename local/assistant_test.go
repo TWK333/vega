@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -8,7 +9,7 @@ import (
 	"testing"
 )
 
-// 同一站点可以配多个账号（配对时新的追加在末尾）：蝴蝶面板要跟最近配对的账号走。
+// 同一站点可以配多个账号（配对时新的追加在末尾）：客户端要跟最近配对的账号走。
 // 跟着最早那个的话，用户换了账号后面板左栏一直是空的。
 func TestAssistantCredentialFollowsTheNewestPairing(t *testing.T) {
 	newest, err := protectToken(strings.Repeat("n", 43))
@@ -30,6 +31,60 @@ func TestAssistantCredentialFollowsTheNewestPairing(t *testing.T) {
 	agent.config.Servers[1].Token = "broken"
 	if _, token, ok := agent.assistantCredential(); !ok || token != strings.Repeat("o", 43) {
 		t.Fatalf("picked %q (ok=%v), want the older pairing as fallback", token, ok)
+	}
+}
+
+func TestAssistantStaticAssetsAndAPIStayTokenScoped(t *testing.T) {
+	agent := &Agent{configToken: "fixture"}
+	mux := http.NewServeMux()
+	agent.assistantMount(mux)
+	for _, tc := range []struct {
+		method, path, origin string
+		status               int
+	}{
+		{"GET", "/assistant/fixture/", "", 200},
+		{"GET", "/assistant/fixture/vega-bridge.js", "", 200},
+		{"GET", "/assistant/wrong/", "", 404},
+		{"GET", "/assistant/fixture/missing.js", "", 404},
+		{"GET", "/assistant/fixture/api/host", "", 405},
+		{"POST", "/assistant/fixture/api/host", "https://foreign.example", 403},
+		{"POST", "/assistant/fixture/api/unknown", "", 404},
+		{"POST", "/assistant/fixture/api/host", "http://" + localAddress, 200},
+		{"POST", "/assistant/fixture/api/external", "", 400},
+	} {
+		r := httptest.NewRequest(tc.method, tc.path, strings.NewReader(`{"url":"file:///private"}`))
+		r.Header.Set("Origin", tc.origin)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("%s %s: %d, want %d", tc.method, tc.path, w.Code, tc.status)
+		}
+		if w.Code == 200 && tc.path == "/assistant/fixture/" && !strings.Contains(w.Body.String(), "vega-bridge.js") {
+			t.Fatal("original renderer entry not served")
+		}
+		if w.Code == 200 && tc.method == "POST" {
+			var value map[string]any
+			if json.Unmarshal(w.Body.Bytes(), &value) != nil || value["paired"] != false {
+				t.Fatal("unpaired host status invalid")
+			}
+			if strings.Contains(w.Body.String(), "deviceToken") {
+				t.Fatal("device credentials reached the renderer")
+			}
+		}
+	}
+}
+
+func TestAssistantRejectsOversizeBeforeProxyDispatch(t *testing.T) {
+	a := &Agent{}
+	w := httptest.NewRecorder()
+	a.assistantProxy(w, httptest.NewRequest("POST", "/", strings.NewReader(strings.Repeat("x", (1<<20)+1))), "messages")
+	if w.Code != 400 {
+		t.Fatalf("oversize request was not refused: %d", w.Code)
+	}
+	w = httptest.NewRecorder()
+	a.assistantProxy(w, httptest.NewRequest("POST", "/", strings.NewReader(strings.Repeat("x", 2<<20))), "send")
+	if w.Code != 409 {
+		t.Fatalf("attachment envelope should pass body check and fail pairing: %d", w.Code)
 	}
 }
 

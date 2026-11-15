@@ -25,9 +25,15 @@ An operation never silently falls back to the other mode or to the server: if th
 
 The client listens on the first free loopback port in `47753–47762`; the extension pairs through `/pair`, authenticates `/poll` and `/reply` with that process's token, and executes CDP through `chrome.debugger`. Chrome does not need a `9222` remote-debugging listener. Multiple Chrome/Edge profiles can stay connected, with per-client queues, Chrome preferred for new turns, 20-second polls and the same 3-second ordinary / 10-second CDP deadlines as Nova. An acquired turn remains pinned to its browser and never silently switches profiles. Employee main tasks must use `employee.relay(scene=computer)` to reach the browser tool; a missing `chrome` tool or a failed `9222` probe is not evidence of extension failure. If the extension cannot proceed or a native dialog requires input, the assistant must stop and ask you to handle it, never fall back to desktop automation. Computer scenes retain `bash` for ordinary file, build, test and diagnostic commands. Command execution on both the server and native client rejects recognized native mouse/keyboard/focus APIs, UI automation tools, alternative browser drivers and encoded PowerShell commands before dispatch or process creation. This is a conservative literal-command guard, **not an OS sandbox**: it can also reject diagnostic text containing these names (use `read` instead), and cannot inspect arbitrary saved scripts or executables. Rebuild/restart the native client and upgrade the server for both checks to take effect.
 
-## 蝴蝶窗口 (Windows)
+## Grok renderer window (Windows)
 
-The taskbar butterfly is now a launcher for a real **window** instead of a click-popover bubble: clicking the butterfly (or tray → **蝴蝶助理**) opens a 900×720 window hosting the same BOT conversation page, with remembered size and position (clamped into the monitor's work area) and kept out of the taskbar — the butterfly and the tray remain its entry points. The in-page **×** hides the window (it stays warm); the title-bar **×** closes it, and the next click reopens it. Its header **⚙** opens 设置 — the local permission page described above — which links back to the conversation. The **hint bubbles** above the butterfly (正在操作这台电脑 / 需要你核对) still appear before desktop input and after an uncertain result; they can be turned off in 设置 → 电脑 along with the butterfly itself.
+The client opens a regular taskbar window using the installed Grok Bot renderer, embedded in WebView2. Its React components, DOM, styles, fonts and other assets are reused directly, not recreated. Tray → **打开 Vega** reopens it; closing the window leaves the execution client running. Window geometry is remembered within the monitor work area. The Explorer taskbar butterfly, popover, hint bubbles and their setting are removed. Desktop input still requires a native timed confirmation (No rejects input for five minutes); uncertain input results retain their safety notification independently of the chat window.
+
+`node scripts/import-grok-ui.mjs [path/to/app.asar]` imports only `dist/renderer` from a locally installed Grok Bot (default `%LOCALAPPDATA%/Programs/Grok Bot/resources/app.asar`), validates the archive's SHA-256 entries, and writes provenance in `local/grok_ui/source-manifest.json`. Every original asset remains unchanged; only `index.html` loads `desktop-methods.js` / `vega-bridge.js` and restricts `connect-src`. No Electron main process, user profile, cookies or credentials from Grok Bot are copied. Reimporting overwrites the imported build, not the Vega adapter.
+
+The bridge uses Vega device credentials held by Go for conversations, history/pagination, unread state, sending, attachments and new bots. This is **not** a port of Grok's backend: its commercial cloud computer, voice, purchases, integrations and other unmapped services explicitly report unavailable. Connection permissions remain in tray → **设置**. Update the server and client together for attachment uploads and bot creation.
+
+**Third-party rights:** the imported renderer and branding retain their original ownership. This extraction does not provide a redistribution license; obtain the rights to distribute them before publishing a client containing these assets.
 
 ## Device credentials and revocation
 
@@ -63,7 +69,7 @@ Docker builds all five clients from the same source as the server: Windows x64 (
 
 For non-Docker deployments, build the matching binaries below and place them in `web/public/clients/` using the filenames `vega-local-windows-amd64.exe`, `vega-local-linux-amd64`, `vega-local-linux-arm64`, `vega-local-darwin-amd64` and `vega-local-darwin-arm64`. Run `node scripts/client-manifest.mjs web/public/clients` from the repository root **before** `npm run build`. Publish the manifest and all five binaries together. Docker does this automatically; CI includes the manifest in its release assets. A plain frontend/server build does not compile the clients. Check the installed version with `vega-local --version`.
 
-Windows (system tray only, no console window):
+Windows (WebView2 chat window and system tray, no console window):
 
 ```powershell
 go test ./...

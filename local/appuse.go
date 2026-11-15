@@ -205,7 +205,7 @@ func appuseExecute(raw json.RawMessage) map[string]any {
 	defer appuseMu.Unlock()
 	// 只有会动鼠标键盘、会抢焦点的操作才提醒；纯截图不该打扰用户。
 	if request.Operation == "act" || request.Operation == "activate" {
-		butterflyNotify("running", appuseRunningText(request.Operation))
+		clientNotify("running", appuseRunningText(request.Operation))
 		glowHold()
 		defer glowRelease()
 	}
@@ -242,10 +242,10 @@ func appuseAnnounce(result map[string]any) {
 				break
 			}
 		}
-		butterflyNotify("needs_review", "appuse 可能已经部分执行："+appuseShort(reason)+"；请核对屏幕上的实际结果")
+		clientNotify("needs_review", "appuse 可能已经部分执行："+appuseShort(reason)+"；请核对屏幕上的实际结果")
 		return
 	}
-	butterflyClearIfKind("running")
+	clientClearIfKind("running")
 }
 
 func appuseShort(text string) string {

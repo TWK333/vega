@@ -585,7 +585,7 @@ func (runner *jobRunner) run(conn *Conn, pending, leases []string) {
 		if request.Type == "task_status" {
 			// 服务端算好的任务栏五档（对齐 Nova taskbar_status）：本地 appuse 优先级更高。
 			if status := request.Status; status != nil {
-				butterflyChipStatus(status.Kind, status.Text, status.Trailing, status.Detail, status.Thread)
+				clientTaskStatus(status.Kind, status.Text)
 			}
 			continue
 		}

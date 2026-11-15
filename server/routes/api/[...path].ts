@@ -83,13 +83,13 @@ export default defineEventHandler(async (event) => {
     catch (e: any) { throw createError({ statusCode: 409, statusMessage: e.message }); }
   }
   if (path[0] === "local-agent" && path[1] === "chat" && method === "POST") {
-    // 蝴蝶面板（原生客户端）：设备凭据自己验，不用网站 cookie，只碰它自己的牛马/群聊。
+    // 原生客户端：设备凭据自己验，不用网站 cookie，只碰授权账号的牛马/群聊。
     setHeader(event, "Cache-Control", "no-store");
     const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
     let grant: { userId: string };
     try { grant = await app().clientSockets.authorize(request); }
     catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
-    const body = await bodyJSON(event, 1 << 20);
+    const body = await bodyJSON(event, path[2] === "send" ? 90 << 20 : 1 << 20);
     try { return await clientChat(path[2], body, grant.userId); }
     catch (e: any) { throw createError({ statusCode: e.statusCode || 400, statusMessage: String(e.message || e).slice(0, 500) }); }
   }
@@ -732,8 +732,7 @@ export default defineEventHandler(async (event) => {
 });
 
 /**
- * 蝴蝶面板（原生客户端凭据）的聊天接口：thread = "employee:<id>" | "group:<id>"。
- * 只做三件事：列会话、读历史（after/limit）、发一条用户消息。
+ * 原生客户端凭据的聊天接口：thread = "employee:<id>" | "group:<id>"。
  */
 async function clientChat(op: string, a: Obj, userId: string) {
   const { engine, store } = app(), user = await app().auth.user(userId);
@@ -742,7 +741,7 @@ async function clientChat(op: string, a: Obj, userId: string) {
     assert(typeof a.blobId === "string" && /^blob-[a-f\d]{32}$/.test(a.blobId) && await app().auth.canBlob(user, a.blobId), "File not found");
     const blob = await store.blobData(a.blobId);
     assert(blob && blob.data.length <= ATTACHMENT_BYTES, "File unavailable");
-    return { data: Buffer.from(blob.data).toString("base64") };
+    return { data: Buffer.from(blob.data).toString("base64"), mime: blob.mime };
   }
   if (op === "threads") {
     const employees = await Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
@@ -764,12 +763,23 @@ async function clientChat(op: string, a: Obj, userId: string) {
     }));
     return { employees, groups };
   }
+  if (op === "create") {
+    check(user.role !== "viewer", 403, "只读账号不能创建牛马");
+    const name = String(a.name || "").trim();
+    check(name.length > 0 && name.length <= 80, 400, "名称需为 1–80 字");
+    check(a.instruction === undefined || (typeof a.instruction === "string" && a.instruction.length <= 8000), 400, "指令不能超过 8000 字");
+    return await engine.employee.create({ name, instruction: a.instruction || "" }, user.id);
+  }
+  check(!["send", "control"].includes(op) || user.role !== "viewer", 403, "只读账号不能操作会话");
   const thread = String(a.thread || ""), colon = thread.indexOf(":"), kind = thread.slice(0, colon), id = thread.slice(colon + 1);
-  assert(colon > 0 && id, "Invalid thread");
+  assert(["employee", "group"].includes(kind) && id, "Invalid thread");
   if (op === "messages") {
     const query = new URLSearchParams();
     if (typeof a.after === "number") query.set("after", String(Math.max(0, Math.floor(a.after))));
-    else query.set("limit", String(Math.min(200, Math.max(1, Number(a.limit) || 100))));
+    else {
+      query.set("limit", String(Math.min(200, Math.max(1, Number(a.limit) || 100))));
+      if (typeof a.before === "number") query.set("before", String(Math.max(1, Math.floor(a.before))));
+    }
     if (kind === "employee") {
       const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
       assert(employee && await employee.accessible(user), "Employee not found");
@@ -806,21 +816,24 @@ async function clientChat(op: string, a: Obj, userId: string) {
     // 面板上的待确认气泡：只允许对自己的牛马发 approve/answer（群聊任务不在这里控制）。
     assert(kind === "employee", "Panel control only applies to an employee thread");
     const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
-    assert(employee && await employee.accessible(user), "Employee not found");
+    assert(employee && await employee.manageable(user), "Employee not found");
     assert(["approve", "answer", "stop"].includes(String(a.action || "")), "Unsupported control action");
-    return await employee.control({ id: a.id, action: a.action, approved: a.approved, text: a.text }, { token: "", name: user.username || "用户" });
+    return await employee.control({ id: a.id, action: a.action, approved: a.approved, text: a.text }, { token: user.id, name: user.username || "用户" });
   }
   if (op === "send") {
-    const text = String(a.text || "").trim();
-    assert(text && text.length <= 2 << 20, "Message required");
+    const nonce = a.clientMessageId;
+    check(nonce === undefined || (typeof nonce === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(nonce)), 400, "Invalid message nonce");
     if (kind === "employee") {
       const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
       assert(employee && await employee.accessible(user), "Employee not found");
       const session = await employee.chat(user.id);
-      await engine.submitChat(session.id, { role: "user", text, actorId: user.id });
+      const input = await inputMessage(a, store, session.id);
+      await engine.submitChat(session.id, { ...input, actorId: user.id, clientMessageId: nonce,
+        clientMessageHash: nonce ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.files || []])).digest("hex") : undefined });
       return { ok: true };
     }
-    await engine.groups.send(user, id, { text });
+    const group = await engine.groups.mine(user, id), input = await inputMessage(a, store, group.session);
+    await engine.groups.send(user, id, { text: input.text, images: input.images, files: input.files, clientMessageId: nonce });
     return { ok: true };
   }
   throw createError({ statusCode: 404, statusMessage: "Chat route not found" });

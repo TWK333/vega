@@ -1,0 +1,2 @@
+# Preserve the imported renderer's verified bytes on Windows and Linux checkouts.
+local/grok_ui/** -text

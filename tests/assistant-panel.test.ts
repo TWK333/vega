@@ -1,145 +1,119 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
-import { createServer } from "node:http";
-import { execFile } from "node:child_process";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
+import { createHash, webcrypto } from "node:crypto";
 import vm from "node:vm";
 
-const source = readFileSync("local/assistant_page.html", "utf8");
-const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end));
-
-// 蝴蝶面板不订阅事件，只靠轮询；这里只跑 pollMessages，其余 DOM 更新用空函数替代。
-function panel(state: any, responses: any[]) {
-  const calls: any[] = [], opened: string[] = [];
+const source = readFileSync("local/grok_ui/vega-bridge.js", "utf8");
+const plain = (value: unknown) => JSON.parse(JSON.stringify(value));
+function bridge(respond: (op: string, body: any) => any = () => ({})) {
+  const calls: any[] = [], storage = new Map<string, string>(), events: any[] = [];
+  class Reader {
+    result: string | null = null;
+    onload?: () => void;
+    readAsDataURL(blob: Blob) { blob.arrayBuffer().then(bytes => { this.result = `data:${blob.type};base64,` + Buffer.from(bytes).toString("base64"); this.onload?.(); }); }
+  }
   const context: any = {
-    state,
-    api: async (op: string, body: any) => { calls.push([op, body]); return responses.shift(); },
-    open: async (thread: string) => { opened.push(thread); },
-    updateHead() {}, renderStream() {},
+    URL, Blob, Uint8Array, FileReader: Reader, crypto: webcrypto, atob, console,
+    location: new URL("http://127.0.0.1:47673/assistant/fixture/"), navigator: { language: "en" },
+    localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value), removeItem: (key: string) => storage.delete(key) },
+    matchMedia: () => ({ matches: false }), setInterval() {}, setTimeout,
+    addEventListener() {}, document: { visibilityState: "visible", addEventListener() {} },
+    fetch: async (url: URL, init: any) => {
+      const op = url.pathname.split("/").at(-1), body = JSON.parse(init.body);
+      calls.push([op, body]);
+      const value = op === "host" ? { paired: true, account: "fixture", version: "test" } : await respond(op!, body);
+      return { ok: true, json: async () => value };
+    },
   };
-  context.pollMessages = vm.runInNewContext(between("async function pollMessages(", "async function pollThreads(") + "\npollMessages", context);
-  return { ...context, calls, opened };
+  context.window = context;
+  vm.runInNewContext(source.replace(/\}\)\(\);\s*$/, "window.fixture = { coordinator, poll, entriesOf, boot, ports, resizeEdge };})();"), context);
+  context.fixture.ports.add({ postMessage: (value: any) => events.push(plain(value)) });
+  return { ...context.fixture, desktop: context.desktop, windowChanged: context.__vegaWindowChanged, calls, events, storage };
 }
 
-const empty = () => ({ current: "employee:ea", messages: [], lastSeq: 0, running: false, avatar: "", authors: {} });
-
-test("清空聊天或重置后序号倒退，面板整段重开会话而不是拿着旧 seq 干等", async () => {
-  const state = { ...empty(), messages: [{ seq: 120, text: "old" }], lastSeq: 120, running: true };
-  const p = panel(state, [{ messages: [], lastSeq: 0, running: false }]);
-  await p.pollMessages();
-  // 面板在 vm 里构造的请求对象与宿主的原型不同，按内容比。
-  assert.equal(JSON.stringify(p.calls[0]), JSON.stringify(["messages", { thread: "employee:ea", after: 120 }]));
-  assert.deepEqual(p.opened, ["employee:ea"], "历史被删：重开会话拉新历史");
-});
-
-test("正常追加只合并新消息，不重开会话", async () => {
-  const state = { ...empty(), messages: [{ seq: 120, text: "old" }], lastSeq: 120 };
-  const p = panel(state, [{ messages: [{ seq: 121, text: "new" }], lastSeq: 121, running: false }]);
-  await p.pollMessages();
-  assert.deepEqual(p.opened, []);
-  assert.deepEqual(state.messages.map((m: any) => m.seq), [120, 121]);
-  assert.equal(state.lastSeq, 121);
-});
-
-test("刚清空的空会话不会被反复重开", async () => {
-  const state = empty();
-  const p = panel(state, [{ messages: [], lastSeq: 0, running: false }]);
-  await p.pollMessages();
-  assert.deepEqual(p.opened, []);
-});
-
-test("蝴蝶对话把步骤内容和文件画成独立产物卡", () => {
-  const render = vm.runInNewContext(between("function stepOutputOf(", "function messageHTML(") + "\nstepOutputHTML", {
-    esc: (value: unknown) => String(value ?? "").replace(/[&<>\"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!),
-    marked: { parse: (text: string) => `<p>${text}</p>` }, sanitize: (html: string) => html,
-  });
-  const html = render({ seq: 10, stepOutput: { step: 1, label: "独立方案", text: "完整内容", files: [{ name: 'app".zip', blobId: "blob-" + "a".repeat(32) }] } });
-  assert.match(html, /ta-step-output/);
-  assert.match(html, /<details><summary>查看内容/);
-  assert.match(html, /完整内容/);
-  assert.match(html, /data-step-export="10"/);
-  assert.match(html, /data-step-file="blob-/);
-  assert.match(html, /app&amp;quot;\.zip|app&quot;\.zip/);
-  const legacy = render({ seq: 11, stepOutput: true, text: "**步骤产物（任务未完成）**\n\n旧方案\n\n旧的完整内容" });
-  assert.match(legacy, /旧方案/);
-  assert.match(legacy, /旧的完整内容/);
-  assert.match(legacy, /data-step-export="11"/);
-  assert.equal(render({ stepOutput: true, text: "不符合旧格式" }), "", "无法识别的旧消息保持原样");
-});
-
-test("蝴蝶面板实际渲染独立产物，并能分别下载文件和导出文本", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 60000 }, async () => {
-  const blobId = "blob-" + "a".repeat(32), requests: any[] = [];
-  const probe = `<script type="module">
-    (async () => {
-      const downloads = [], names = [];
-      let downloaded;
-      const downloadDone = new Promise(resolve => { downloaded = resolve; });
-      URL.createObjectURL = (blob) => { downloads.push(blob); if (downloads.length === 2) downloaded(); return 'blob:fixture'; };
-      HTMLAnchorElement.prototype.click = function () { names.push(this.download); };
-      await new Promise(resolve => {
-        if (document.querySelector('[data-step-file]')) return resolve();
-        const observer = new MutationObserver(() => { if (document.querySelector('[data-step-file]')) { observer.disconnect(); resolve(); } });
-        observer.observe(document.body, { subtree: true, childList: true });
-        setTimeout(() => { observer.disconnect(); resolve(); }, 5000);
-      });
-      const bubble = document.querySelector('.ta-message .ta-bubble');
-      const artifact = document.querySelector('.ta-step-output');
-      if (!artifact) { const result = document.createElement('pre'); result.id = 'probe'; result.textContent = JSON.stringify({ error: 'missing artifact', stream: document.querySelector('#stream')?.textContent, rail: document.querySelector('#empList')?.textContent, page: document.readyState }); document.body.append(result); return; }
-      const separate = bubble.textContent.includes('继续执行') && !bubble.textContent.includes('独立方案正文') && artifact.textContent.includes('独立方案正文');
-      artifact.querySelector('[data-step-export]').click();
-      artifact.querySelector('[data-step-file]').click();
-      await Promise.race([downloadDone, new Promise(resolve => setTimeout(resolve, 5000))]);
-      const markdown = downloads[0] && await downloads[0].text();
-      const bytes = downloads[1] && [...new Uint8Array(await downloads[1].arrayBuffer())];
-      const result = document.createElement('pre'); result.id = 'probe'; result.textContent = JSON.stringify({ separate, names, markdown, bytes }); document.body.append(result);
-    })();
-  </script>`;
-  const page = source.replace("</body>", probe + "</body>");
-  const server = createServer(async (request, response) => {
-    if (request.url?.endsWith("/marked.js")) { response.setHeader("Content-Type", "text/javascript"); response.end(readFileSync("local/assistant_marked.js")); return; }
-    if (request.method === "POST") {
-      const chunks: Buffer[] = []; for await (const chunk of request) chunks.push(chunk);
-      const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
-      const op = request.url?.split("/").at(-1);
-      let value: any = {};
-      if (op === "threads") value = { employees: [{ thread: "employee:e1", kind: "employee", id: "e1", name: "牛马" }], groups: [] };
-      if (op === "messages") value = { title: "牛马", lastSeq: 1, running: false, messages: body.after ? [] : [{ seq: 1, role: "assistant", text: "继续执行", stepOutput: { step: 1, label: "独立方案", text: "**独立方案正文**", files: [{ blobId, name: "app.zip", size: 3 }] } }] };
-      if (op === "file") { requests.push(body); value = { data: Buffer.from([1, 2, 255]).toString("base64") }; }
-      response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value)); return;
-    }
-    response.setHeader("Content-Type", "text/html; charset=utf-8"); response.end(page);
-  });
-  const dir = await mkdtemp(join(tmpdir(), "vega-assistant-output-"));
-  try {
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address() as { port: number };
-    const { stdout } = await promisify(execFile)(process.env.VEGA_CHROME_PATH || "C:/Program Files/Google/Chrome/Application/chrome.exe", [
-      "--headless=new", "--no-first-run", "--no-default-browser-check", "--no-sandbox", "--disable-gpu", "--user-data-dir=" + dir,
-      "--virtual-time-budget=12000", "--dump-dom", `http://127.0.0.1:${address.port}/assistant/test/`,
-    ], { encoding: "utf8", timeout: 40000, maxBuffer: 2 * 1024 * 1024, windowsHide: true });
-    const match = stdout.match(/<pre id="probe">([\s\S]*?)<\/pre>/);
-    assert(match?.[1], "the panel must finish the download fixture");
-    const result = JSON.parse(match[1]);
-    assert(!result.error, JSON.stringify(result));
-    assert.equal(result.separate, true);
-    assert.deepEqual(result.names, ["独立方案.md", "app.zip"]);
-    assert.equal(result.markdown, "**独立方案正文**");
-    assert.deepEqual(result.bytes, [1, 2, 255]);
-    assert.deepEqual(requests, [{ blobId }]);
-  } finally {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+test("the embedded renderer assets remain byte-identical to the installed Grok build", () => {
+  const manifest = JSON.parse(readFileSync("local/grok_ui/source-manifest.json", "utf8"));
+  assert.equal(manifest.product, "Grok Bot");
+  assert(manifest.files.length > 600);
+  for (const entry of manifest.files) {
+    if (entry.file === "index.html") continue; // Only the preload scripts and CSP are adapted.
+    const bytes = readFileSync("local/grok_ui/" + entry.file);
+    assert.equal(bytes.length, entry.bytes, entry.file);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), entry.sha256, entry.file);
   }
+  const index = readFileSync("local/grok_ui/index.html", "utf8");
+  assert(index.indexOf("vega-bridge.js") < index.indexOf('type="module"'));
+  assert.match(index, /connect-src 'self';/);
+  assert.match(index, /id="root"/);
+  assert.doesNotMatch(source, /innerHTML|insertAdjacentHTML/, "the adapter does not repaint or replace Grok's components");
 });
 
-// 头像的动静：只有左栏卡片在任务执行中动；本地输入中（这一轮还在跑）与聊天气泡里的头像都静止。
-test("左栏头像只在任务执行中动，输入中与聊天气泡头像保持静止", () => {
-  assert(source.includes('avatarHTML(item.avatar, seed, !!item.runningTasks, "ta-session-face")'), "左栏卡片看任务状态");
-  assert(!/avatarHTML\([^)]*,\s*true\s*\)/.test(source), "没有头像写死开动画");
-  const route = readFileSync("server/routes/api/[...path].ts", "utf8");
-  assert(route.includes('runningTasks: s.tasks.filter((task) => task.status === "running").length'), "左栏动画跟着任务，而不是聊天这一轮");
+test("WebView2 forwards all resize edges and disables them while maximized", () => {
+  const b = bridge();
+  for (const [x, y, edge] of [[0, 0, 13], [999, 0, 14], [0, 799, 16], [999, 799, 17], [0, 400, 10], [999, 400, 11], [500, 0, 12], [500, 799, 15], [500, 400, 0]])
+    assert.equal(b.resizeEdge(x, y, 1000, 800), edge);
+  b.windowChanged({ isFullscreen: false, isMaximized: true });
+  assert.equal(b.resizeEdge(0, 0, 1000, 800), 0);
+});
+
+test("tail pagination keeps the server cursor even when the last rows are tools; read state is forwarded", async () => {
+  const b = bridge(op => op === "messages" ? { messages: [{ seq: 9, role: "assistant", text: "tail" }, { seq: 10, role: "tool", text: "tool" }], hasMore: true } : {});
+  const page = await b.coordinator("openAgentTail", { agentId: "employee:e1" });
+  assert.equal(page.nextBeforeSeq, 9);
+  await b.desktop.main.setViewingAgent({ agentId: "employee:e1" });
+  await b.poll();
+  assert(b.calls.some(([op, body]: any[]) => op === "read" && body.thread === "employee:e1"));
+  assert(b.calls.some(([op, body]: any[]) => op === "messages" && body.after === 10));
+  await b.coordinator("getAgentTranscriptTail", { agentId: "employee:e1", beforeSeq: 9 });
+  assert.equal(b.calls.at(-1)[1].before, 9);
+});
+
+test("history rollback clears the original transcript replica instead of waiting on a stale cursor", async () => {
+  const b = bridge((op, body) => op === "messages" ? body.after ? { messages: [], lastSeq: 0 } : { messages: [{ seq: 10, role: "assistant", text: "old" }] } : {});
+  await b.boot;
+  await b.coordinator("openAgentTail", { agentId: "employee:e1" });
+  await b.desktop.main.setViewingAgent({ agentId: "employee:e1" });
+  await b.poll(); await b.poll();
+  assert.equal(b.events.filter((e: any) => e.family === "transcript" && e.payload.type === "cleared").length, 1);
+});
+
+test("sending a nonce is single-flight, and an uncertain failure is not automatically replayed", async () => {
+  let sends = 0;
+  const b = bridge(op => { if (op === "send") { sends++; throw Error("connection lost after dispatch"); } return {}; });
+  const args = { agentId: "employee:e1", prompt: "once", clientNonce: "a".repeat(32) };
+  await assert.rejects(b.coordinator("sendPrompt", args), /connection lost/);
+  await assert.rejects(b.coordinator("sendPrompt", args), /connection lost/);
+  assert.equal(sends, 1);
+  assert.equal(b.calls.find(([op]: any[]) => op === "send")[1].clientMessageId, args.clientNonce);
+});
+
+test("new bots return the original creation contract, never a simulated success for unavailable features", async () => {
+  const b = bridge(op => op === "create" ? { id: "e2" } : op === "threads" ? { employees: [{ thread: "employee:e2", name: "New Bot" }] } : {});
+  const value = await b.coordinator("createAgent", { name: "New Bot" });
+  assert.equal(value.agent.id, "employee:e2");
+  assert.deepEqual(plain(value.transcript), []);
+  await assert.rejects(b.coordinator("notImplemented"), /尚未接入/);
+  await assert.rejects(b.desktop.main.openExternal({ url: "file:///private" }), /Only HTTP/);
+});
+
+test("the original attachment staging contract forwards file/image bytes and renders artifact references", async () => {
+  const b = bridge(op => op === "file" ? { data: Buffer.from("artifact").toString("base64"), mime: "text/plain" } : {});
+  const file = await b.desktop.local.stageAttachmentFile("C:\\tmp\\notes.txt", new Blob(["hello"], { type: "text/plain" }));
+  assert.equal(file.ok, true);
+  const paths = await b.desktop.main.commitStagedAttachments({ paths: [file.path] });
+  await b.coordinator("sendPrompt", { agentId: "employee:e1", prompt: "", attachmentPaths: paths, clientNonce: "b".repeat(32) });
+  assert.deepEqual(b.calls.find(([op]: any[]) => op === "send")[1].files, [{ name: "notes.txt", mime: "text/plain", data: "aGVsbG8=" }]);
+  const id = "blob-" + "a".repeat(32);
+  const entries = b.entriesOf([{ seq: 1, role: "assistant", text: "continue", stepOutput: { text: "full artifact", files: [{ blobId: id, name: "app.zip", size: 7 }] } }], "employee:e1");
+  assert.equal(entries[0].kind, "user-attachment");
+  assert.equal(entries[0].file_name, "app.zip");
+  assert.equal(entries[1].content, "continue\n\nfull artifact");
+  const bytes = await b.desktop.main.readAttachmentBytes({ path: entries[0].file_path });
+  assert.equal(Buffer.from(bytes.bytes).toString(), "artifact");
+  await assert.rejects(b.desktop.main.readAttachmentBytes({ path: "C:/private.txt" }), /Unknown attachment/);
+  const oversized = await b.desktop.local.stageAttachmentFile("huge", new Blob([new Uint8Array((25 << 20) + 1)]));
+  assert.equal(oversized.ok, false);
+  await b.desktop.main.discardStagedAttachment({ path: file.path });
+  await assert.rejects(b.desktop.main.commitStagedAttachments({ paths: [file.path] }), /已失效/);
 });

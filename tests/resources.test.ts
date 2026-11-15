@@ -29,7 +29,7 @@ test("Docker builds exactly the client platforms offered by Resources before bun
   assert(clients.every((client) => client.name && client.arch));
   assert.match(docker, /FROM --platform=\$BUILDPLATFORM golang:1\.26-bookworm AS clients/);
   assert.match(docker, /COPY local\/go\.mod local\/go\.sum \.\/\s+RUN go mod download/);
-  assert.match(docker, /COPY local\/\*\.go local\/\*\.html local\/\*\.js local\/\*\.syso local\/\*\.ico local\/VERSION \.\/\s+COPY local\/extension \.\/extension/);
+  assert.match(docker, /COPY local\/\*\.go local\/\*\.syso local\/\*\.ico local\/VERSION \.\/\s+COPY local\/grok_ui \.\/grok_ui\s+COPY local\/extension \.\/extension/);
   assert.match(docker, /RUN set -eu;/, "a failed cross-build must stop the image build");
   assert.match(docker, /CGO_ENABLED=0 GOOS="\$os" GOARCH="\$arch" go build -trimpath/);
   assert.match(docker, /if \[ "\$os" = windows \]; then flags="\$flags -H=windowsgui"; suffix="\.exe"; fi/);
