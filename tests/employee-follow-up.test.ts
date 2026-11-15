@@ -166,7 +166,17 @@ test("a supplement that lands after task_complete was accepted makes that comple
       return result;
     };
     let phase = 0;
-    f.engine.providers.chat = async () => phase++ === 0 ? progress("p1", [SEARCH]) : complete("c1", "已搜索你好");
+    f.engine.providers.chat = async (_model, _system, messages) => {
+      phase++;
+      if (phase === 1) return progress("p1", [SEARCH]);
+      if (phase === 2) return complete("c1", "已搜索你好");
+      const latest = [...messages].reverse().find((message) => message.role === "user" && message.runtime !== "dynamic")?.text || "";
+      assert.match(latest, /顺便点开第一条结果/);
+      assert.match(latest, /轮中补充/);
+      assert.equal(f.employee.busy.has(job.id), true, "the supplement is followed in the same run, before the task is released");
+      assert.equal(phase, 3);
+      return { role: "assistant", text: "已看到补充，本轮不交付。" };
+    };
     let current = await f.segment(job);
     assert.equal(current.status, "queued", "stale completion is not delivered");
     assert.equal((await f.deliveries()).length, 0);

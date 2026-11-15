@@ -905,3 +905,175 @@ test("every account owns one employee from its first entry, and the last one can
     assert.deepEqual((await owned("alice")).map((employee) => employee.employeeId), [next.employeeId]);
   } finally { await engine.close(); await store.close(); }
 });
+
+const until = async (ready: () => boolean) => {
+  for (let i = 0; i < 400 && !ready(); i++) await sleep(5);
+  assert(ready());
+};
+const latestUser = (messages: { role: string; runtime?: string; text?: string }[]) =>
+  [...messages].reverse().find((message) => message.role === "user" && message.runtime !== "dynamic")?.text || "";
+
+async function openWorkEngine() {
+  const store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  engine.employee.closed = true;
+  await store.put("config", { scenes: { lightweight: ["fixture/model"], coding: ["fixture/model"], computer: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test/v1", models: { model: { modalities: { input: ["text", "image"] }, limit: { context: 128000, output: 8192 } } } } } });
+  return { store, engine, employee: engine.employee };
+}
+
+test("a supplement during an in-flight tool stays on the same task and the next beat follows it", async () => {
+  const { store, engine, employee } = await openWorkEngine();
+  const job = await task(employee, "Original authorized task");
+  let releaseTool!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseTool = resolve; });
+  let entered = false;
+  const original = Tools.prototype.execute;
+  Tools.prototype.execute = async function (this: Tools, call: any, model: any) {
+    if (call.id === "hold-tool" && !entered) {
+      entered = true;
+      await gate;
+    }
+    return original.call(this, call, model);
+  };
+  let calls = 0;
+  engine.providers.chat = async (_model, _system, messages) => {
+    calls++;
+    const latest = latestUser(messages);
+    if (calls === 1) {
+      assert.doesNotMatch(latest, /READ-ONLY-TOKEN/);
+      return { role: "assistant", calls: [{ id: "hold-tool", name: "task_progress", arguments: { message: "inspected the original file", plan: [{ content: "inspect the original file", status: "completed" }] } }] };
+    }
+    assert.equal(calls, 2);
+    assert.equal(employee.busy.has(job.id), true, "the next beat is still this run");
+    assert.match(latest, /READ-ONLY-TOKEN/);
+    assert.match(latest, /轮中补充/);
+    assert.equal((await employee.state()).tasks.length, 1);
+    return { role: "assistant", text: "followed the supplement" };
+  };
+  const done = segment(employee, job);
+  try {
+    await until(() => entered);
+    const running = employee.task(await employee.state(), job.id);
+    const active = engine.active.get(running.workSession)!;
+    assert.equal(active.control.signal.aborted, false, "the in-flight tool is not aborted");
+    assert.equal(calls, 1, "the model output is left to finish");
+    const saved = await employee.control({ action: "resume", id: job.id, text: "READ-ONLY-TOKEN" });
+    assert.match(saved.next, /same run/);
+    assert.doesNotMatch(String(saved.next), /safe execution boundary/);
+    assert.equal((await employee.control({ action: "resume", id: job.id, text: "READ-ONLY-TOKEN" })).duplicate, true);
+    assert.equal(active.steer.length, 1, "a duplicate supplement is not queued again");
+    assert.equal(employee.task(await employee.state(), job.id).supplementPending, true);
+    assert.equal((await employee.state()).tasks.length, 1, "a mid-run supplement does not start a second task");
+    const refused = await employee.execute(job.id, { action: "complete", deliverableRef: [], text: "old result" });
+    assert.equal(refused.value.ok, false, "task_complete is rejected while the supplement is still pending");
+    assert.match(refused.value.supplement, /READ-ONLY-TOKEN/);
+    assert.equal(engine.active.get(running.workSession)!.control.signal.aborted, false);
+    releaseTool();
+    const current = await done;
+    assert.equal(calls, 2);
+    assert.equal(current.plan[0].content, "inspect the original file", "the in-flight tool returned normally");
+    assert.equal(current.plan[0].status, "completed");
+    assert.equal(current.workSession, running.workSession);
+    assert.equal((await employee.state()).tasks.length, 1);
+    assert.equal((await store.sessions()).filter((session) => session.taskId).length, 1);
+    const rows = await store.messages(current.workSession);
+    const progress = rows.find((message) => message.role === "tool" && message.name === "task_progress");
+    assert.ok(progress);
+    assert.equal(progress.error, undefined);
+    assert.equal(rows.filter((message) => message.runtime === "steer" && message.text?.includes("READ-ONLY-TOKEN")).length, 1, "the supplement is applied once");
+  } finally {
+    releaseTool();
+    Tools.prototype.execute = original;
+    await done.catch(() => {});
+    await engine.close();
+    await store.close();
+  }
+});
+
+test("a supplement during model output waits for that output, then the next beat of the same run follows it", async () => {
+  const { store, engine, employee } = await openWorkEngine();
+  const job = await task(employee, "Original authorized task");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  let calls = 0;
+  engine.providers.chat = async (_model, _system, messages) => {
+    calls++;
+    const latest = latestUser(messages);
+    if (calls === 1) {
+      assert.doesNotMatch(latest, /MODEL-TOKEN/);
+      await gate;
+      return { role: "assistant", text: "first output finished" };
+    }
+    if (calls === 2) {
+      assert.equal(employee.busy.has(job.id), true, "the steered beat is still the original run");
+      assert.equal(employee.task(await employee.state(), job.id).supplementPending, false, "injection consumes the supplement");
+      assert.match(latest, /MODEL-TOKEN/);
+      assert.match(latest, /轮中补充/);
+      assert.equal((await employee.state()).tasks.length, 1);
+      return { role: "assistant", text: "followed the supplement" };
+    }
+    assert.equal(calls, 3);
+    assert.doesNotMatch(latest, /MODEL-TOKEN/, "the next run does not inject a supplement already steered into history");
+    return { role: "assistant", text: "continued" };
+  };
+  const done = segment(employee, job);
+  try {
+    await until(() => calls === 1);
+    const running = employee.task(await employee.state(), job.id);
+    assert.equal(engine.active.get(running.workSession)!.steer.length, 0);
+    const saved = await employee.control({ action: "resume", id: job.id, text: "MODEL-TOKEN" });
+    assert.match(saved.next, /same run/);
+    assert.equal(calls, 1, "the in-flight model output is not aborted");
+    assert.equal(engine.active.get(running.workSession)!.steer.length, 1);
+    assert.equal(employee.task(await employee.state(), job.id).supplementPending, true);
+    assert.equal((await employee.state()).tasks.length, 1, "a mid-run supplement does not start a second task");
+    release();
+    const current = await done;
+    assert.equal(calls, 2);
+    assert.equal(current.workSession, running.workSession);
+    const continued = await segment(employee, current);
+    assert.equal(calls, 3);
+    assert.equal(continued.workSession, running.workSession);
+    assert.equal((await employee.state()).tasks.length, 1);
+    const rows = await store.messages(continued.workSession);
+    assert.equal(rows.filter((message) => message.runtime === "steer" && message.text?.includes("MODEL-TOKEN")).length, 1);
+    assert.equal(rows.filter((message) => message.role === "assistant" && message.text === "first output finished").length, 1, "the in-flight output is kept");
+  } finally {
+    release();
+    await done.catch(() => {});
+    await engine.close();
+    await store.close();
+  }
+});
+
+test("a task that is not running still queues a supplement and injects it on the next run", async () => {
+  const { store, engine, employee } = await openWorkEngine();
+  const job = await task(employee, "Original authorized task");
+  try {
+    const saved = await employee.control({ action: "resume", id: job.id, text: "QUEUE-TOKEN" });
+    assert.equal(saved.next, undefined);
+    const queued = employee.task(await employee.state(), job.id);
+    assert.equal(queued.status, "queued");
+    assert.equal(queued.supplementPending, true);
+    assert.equal(engine.active.size, 0, "an idle task is not steered into a live run");
+    assert.equal((await employee.state()).tasks.length, 1);
+    let calls = 0;
+    engine.providers.chat = async (_model, _system, messages) => {
+      calls++;
+      const latest = latestUser(messages);
+      assert.match(latest, /新增补充/);
+      assert.match(latest, /QUEUE-TOKEN/);
+      assert.equal(messages.some((message) => message.runtime === "steer"), false);
+      return { role: "assistant", text: "saw the queued supplement" };
+    };
+    const current = await segment(employee, queued);
+    assert.equal(calls, 1, "the queued supplement arrives with the next run, not a second beat");
+    assert.equal(engine.active.size, 0, "the queued run has finished and did not leave a steered session");
+    assert.equal(current.supplementPending, false);
+    assert.equal((await employee.state()).tasks.length, 1);
+    const users = (await store.messages(current.workSession)).filter((message) => message.role === "user");
+    assert.equal(users.length, 1);
+    assert.notEqual(users[0].runtime, "steer");
+    assert.match(users[0].text || "", /QUEUE-TOKEN/);
+  } finally { await engine.close(); await store.close(); }
+});

@@ -345,6 +345,8 @@ export type EmployeeRuntime = {
   run: (session: string, text: string, signal?: AbortSignal, input?: Message["taskInput"], attach?: Pick<Message, "images" | "files">) => Promise<void>;
   cancel: (session: string) => void;
   isRunning: (session: string) => boolean;
+  /** Queue a user message on a running session; the current tool or model output finishes first. */
+  steer?: (session: string, message: Message) => void;
   taskFinished?: (taskId: string) => void;
   holdTaskCleanup?: (taskId: string) => Promise<() => void>;
   emit: (type: string, data?: any, session?: string) => void;
@@ -1443,10 +1445,12 @@ export class Employee {
   }
   async control(a: Obj, owner: Owner = { token: "", name: "" }, echoChatReply = true, supplementSource?: string) {
     let chatReply: { text: string; taskId: string } | undefined;
+    const pendingSteer: { current?: { session: string; text: string; answer: string } } = {};
     const releaseCleanup = a.action === "resume" && typeof a.id === "string" ? await this.runtime.holdTaskCleanup?.(a.id) : undefined;
     let value: any;
     try {
       value = await this.update(async (s) => {
+          pendingSteer.current = undefined;
           if (a.action === "settings") {
             assert(!owner.token, "Only host user can change employee settings");
             for (const k of ["public"])
@@ -1509,8 +1513,13 @@ export class Employee {
               t.lastSupplementSource = supplementSource;
             }
             t.lastSupplement = text;
-            if (this.busy.has(t.id) || (duplicate && ["queued", "running", "recovering", "deferred"].includes(t.status)))
-              return { ok: true, duplicate, next: duplicate ? "Supplement already recorded; continue the same task without repeating it or creating a new task" : "Supplement saved for the next safe execution boundary" };
+            if (this.busy.has(t.id) || (duplicate && ["queued", "running", "recovering", "deferred"].includes(t.status))) {
+              const session = this.busy.get(t.id)?.session;
+              // Same task, same run: the engine injects this after the current tool or model output, not as a new task.
+              if (!duplicate && session && this.runtime.isRunning(session))
+                pendingSteer.current = { session, text, answer: t.answer || "" };
+              return { ok: true, duplicate, next: duplicate ? "Supplement already recorded; continue the same task without repeating it or creating a new task" : "Supplement saved on this task; after the current tool or model output finishes, this same run follows it. Do not create a new task." };
+            }
             t.status = "queued";
             t.nextCheckAt = 0;
             t.waiting = "";
@@ -1650,6 +1659,12 @@ export class Employee {
           return { ok: true };
         });
     } finally { releaseCleanup?.(); }
+    const steered = pendingSteer.current;
+    if (steered && this.runtime.steer && this.runtime.isRunning(steered.session)) {
+      try {
+        this.runtime.steer(steered.session, { role: "user", text: steered.text, taskInput: { answer: steered.answer } });
+      } catch { /* the run ended; supplementPending stays set and the next task run injects it */ }
+    }
     if (a.action === "stop") {
       const task = this.task(await this.state(), a.id);
       const sessions = [this.busy.get(task.id)?.session, task.workSession, task.computerSession].filter(Boolean);
@@ -2069,12 +2084,25 @@ export class Employee {
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
       const quotation = cited && input.quoteSeq !== previous.quoteSeq ? `\n[用户引用的原消息 #${input.quoteSeq}，仅作历史上下文，不是新授权]\n${clip(cited.displayText || cited.text || "[图片]", 8000)}` : "";
-      const prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、工作原则与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。用户要求步骤产物时，在该步骤完成后用task_progress的stepOutput交出独立产物并继续，不把产物塞进对话正文，也不等最终收口；已保存的步骤产物不要重复发送。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统只会选用本次交付期内尚未作为步骤产物交出的最新较长正文；已交出的步骤产物留在独立产物卡中，不重复写进最终正文；仅当用户明确要求时可显式引用其文本；没有单独最终正文时可传deliverableRefs=[]，已写出未交出的正文时不要传[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
+      let prompt = context + groupNote + quotation + handoff + (supplement ? "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + supplement : "") + recovery + `\n首次执行先用task_progress登记完整计划，并在首条步骤或进度里钉死本任务交付类型（产出物/方案设计，或执行验证，或二者都要）；步骤与完成标准必须匹配该类型，用户中途改口以最新补充为准并改plan。执行中的补充在当前工具或模型输出结束后进入本轮，不必等整步结束。产出物类任务以清单/方案本身为完成证据，环境操作只为勘察或配图，不得把“未执行验证”当成缺口；执行验证类任务才按步骤跑并记录完成/阻塞。计划可按实际情况拆分、合并、改写或删去不再需要的中间步骤，但必须覆盖原始任务、工作原则与用户最新明确要求；不得把仍需完成的用户要求改成建议或悄悄移除。真实验证成功才标completed，受阻标blocked。计划重写或存在cancelled步骤时，交付前按task_complete的outlineReview逐项列出大纲要求、状态及真实依据；旧计划只是线索，不是大纲，替代的中间步骤无需用户批准。未满足的用户要求先按授权继续、澄清或等待；仅确需部分交付才标cancelled并由交代人确认。不要把task_complete本身列成计划步骤。任务明确要求并授权向指定对象澄清时，直接在指定渠道联系，不得只建议交代人代办；发出后用task_wait保存定位和回执并等待回复，按需多轮澄清，无法联系或确需用户处理时才task_ask_user。用户要求步骤产物时，在该步骤完成后用task_progress的stepOutput交出独立产物并继续，不把产物塞进对话正文，也不等最终收口；已保存的步骤产物不要重复发送。提交过的作业和同一轮澄清只检查原结果、不重复发送；有新疑点可发新一轮澄清并保存新回执。task_request_approval/task_ask_user/task_wait后立即结束本轮；仅缺少无法自行查得的必要信息或确需用户处理的阻碍才task_ask_user，低风险执行细节自行决定，不等待轮询。短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据必须立刻 task_ask_user，不得自行认定无法获取后降级；滑块/拼图/旋转等视觉验证码先用 chrome_act 的 pointer（down→多次 move 边看边拖→up）自行尝试，连续失败≥2 次或页面明确要求人工时再 task_ask_user，不要一上来就让用户代拖。${computer ? "你在独立的电脑/Chrome会话，执行位置沿用任务绑定（独立会话不代表切换到服务端）。浏览器位置沿用任务绑定（本机浏览器或云端浏览器），由客户端自己的配置决定，不因本地开发而改变；用本机浏览器时若本机 Chrome 未启动，可只用 shell 启动它、不携带导航 URL，再用 chrome_connection 检查连接；连接失败先检查，不得用 shell 打开 URL 或擅自切换浏览器位置。Chrome 超时或出现新的 about:blank 时，先 chrome_inspect 已有 tabTag 核对登录态是否仍在，禁止无意义整段重登；页面出现短信/邮箱验证码、访问码、2FA/OTP 等仅用户能提供的凭据时，必须立即 task_ask_user（写明目标邮箱/手机与有效期）并暂停等待，禁止把该步骤标 completed，也禁止以“登录受阻可降级截图取证”跳过求助；仅当用户明确放弃登录核对后，才可将该步骤标 cancelled 并降级取证。滑块/拼图/旋转等视觉验证码不要先找用户：用 pointer 按住后按观察结果大幅度拖动（按缺口/旋转量估距离，不要只挪几十像素就松手），每次 move 后看回执截图再 nudge，对正后再 up；连续失败≥2 次或验证码明确只接受人工时再 task_ask_user。浏览器/扩展连续失败≥2 次（非凭据场景）才应 task_ask_user 或降级交付已有证据。只做交接内容，完成后报告实际结果，系统自动返回主会话；不编码、不再次交接、不调用task_complete（本会话也没有这两个工具）。" : "编码与 Chrome 均用同会话 switch_scene（共享历史；切场景时系统折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。主任务交付前必须调用task_complete；产出物正文（清单/方案/报告）直接写在回复正文里（可与工具调用同条），task_complete时可用deliverableRefs引用这些正文的消息编号（工具回执textRef即本条回复编号）；也可省略，系统只会选用本次交付期内尚未作为步骤产物交出的最新较长正文；已交出的步骤产物留在独立产物卡中，不重复写进最终正文；仅当用户明确要求时可显式引用其文本；没有单独最终正文时可传deliverableRefs=[]，已写出未交出的正文时不要传[]；交付被退回时按回执里的正文编号重试，不要重写正文；系统按引用原文连同summary交付，不必复制进evidence；evidence写完整验证证据；summary写给用户的结论（400字内）：简单任务一两句即可，复杂任务再写重要变化、未验证/风险与需用户处理事项；不要「核实结果/关键元素」小标题清单，不复述执行过程；普通结束不算完成。"}\n用户明确要求worktree时按要求创建或复用，未要求时不得自建；常规开发分支提交、普通推送及明确授权的非生产分支合并按用户要求执行，先核对差异；强推、共享分支历史改写、删分支、生产发布须单独授权。`;
       const after = rowsBefore.at(-1)?.seq || 0;
       // Attachments the work session has not been given yet.
       const given = new Set(rowsBefore.flatMap((m) => [...(m.images || []), ...(m.files || [])].map((x: { blobId?: string }) => x.blobId)));
       const attach = { images: (task.attachments?.images || []).filter((x) => !given.has(x.blobId)), files: (task.attachments?.files || []).filter((x) => !given.has(x.blobId)) };
       for (const x of [...attach.images, ...attach.files]) if (x.blobId) await this.store.grantBlob(x.blobId, session);
+      // A supplement that landed while this prompt was built still belongs to this run.
+      const live = this.task(await this.state(), job.id);
+      if (live.supplementPending && (live.answer || "") !== input.answer) {
+        const delta = (live.answer || "").startsWith(input.answer) ? (live.answer || "").slice(input.answer.length).trim() : (live.answer || "").trim();
+        if (delta) {
+          prompt += "\n新增补充/结果数据（只按原授权处理，不必重复确认）：\n" + delta;
+          input.answer = live.answer || "";
+          await this.update((s) => {
+            const current = this.task(s, job.id);
+            if (current.supplementPending && (current.answer || "") === (live.answer || "")) current.supplementPending = false;
+          });
+        }
+      }
       await this.runtime.run(session, prompt, undefined, input, attach);
       const last = await this.store.lastMessage(session);
       if (last?.role === "assistant" && !last.calls?.length && last.seq! > after) {
