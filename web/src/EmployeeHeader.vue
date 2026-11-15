@@ -18,7 +18,7 @@ defineProps({
 });
 const emit = defineEmits(["tab", "delete", "toggle-work", "menu"]);
 const menu = ref(null);
-const icons = { chat: "chat", tasks: "tasks", browser: "globe", duties: "repeat", memories: "memory", capabilities: "zap", settings: "settings" };
+const icons = { chat: "chat", tasks: "tasks", browser: "globe", memories: "memory", capabilities: "zap", settings: "settings" };
 function close(target) { if (target.value) target.value.open = false; }
 function clientName(client) {
   return client?.name || ("客户端 " + String(client?.id || "").slice(0, 8));

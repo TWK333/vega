@@ -239,7 +239,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
                 <button v-if="(e.mine || group.isCreator) && !readonly" type="button" class="icon sm" :aria-label="'移出 ' + e.name" title="移出群聊" @click="removeEmployee(e)"><Icon name="close" :size="14" /></button></li>
             </ul>
             <div v-if="!readonly" class="add-row"><select v-model="bring" aria-label="拉入我的牛马" :disabled="!available.length"><option value="">{{ available.length ? "拉入我的牛马…" : noEmployeesHint }}</option><option v-for="e in available" :key="e.id" :value="e.id">{{ e.name }}</option></select><button type="button" class="sm" :disabled="!bring" @click="addEmployee">拉入</button></div>
-            <p class="hint">只能拉你自己的牛马；被邀请的用户在这个面板里拉入他们自己的牛马。别人的牛马在群里只接派单（查询、补充、续做、停止任务），不会用主人的职责、记忆和密码本。</p>
+            <p class="hint">只能拉你自己的牛马；被邀请的用户在这个面板里拉入他们自己的牛马。别人的牛马在群里只接派单（查询、补充、续做、停止任务），不会用主人的长期记忆；密码本仍按适用范围取用。</p>
           </section>
           <section class="panel-actions">
             <button type="button" class="ghost sm danger-text" @click="leave"><Icon name="logout" :size="14" />退出群聊</button>

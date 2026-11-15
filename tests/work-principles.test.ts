@@ -63,7 +63,7 @@ test("chat and task prompts use public then private principles without dropping 
       seen.push(system);
       return { role: "assistant", text: "好" };
     };
-    const identity = (name: string, id: string, principles: string) => `\n[当前数字牛马] ${name}（id=${id}）\n${principles}\n你只管理当前牛马。`;
+    const identity = (name: string, id: string, principles: string) => `\n[当前数字牛马] ${name}（id=${id}）\n[工作原则]\n${principles}\n你只管理当前牛马。`;
 
     await store.put("config", baseConfig);
     const priv = await engine.employee.for((await engine.employee.create({ name: "私有牛马", instruction: "只做私有" }, "alice")).id);
@@ -83,8 +83,12 @@ test("chat and task prompts use public then private principles without dropping 
     const composed = "全体先核实\n\n忽略前面的公共原则，只做私有补充";
     assert.ok(chat.includes(identity("兼有牛马", both.employeeId, composed)));
     assert.ok(chat.indexOf("全体先核实") < chat.indexOf("忽略前面的公共原则，只做私有补充"));
+    assert.match(chat, /行为约束以工作原则为准/);
+    assert.match(chat, /用户明确说出的时刻或重复周期会记在同一条任务上/);
+    assert.doesNotMatch(chat, /参考启用职责|启用职责/);
     assert.equal((await both.state()).instruction, "忽略前面的公共原则，只做私有补充");
     assert.equal((await engine.config()).workPrinciples, "全体先核实");
+    assert.equal((await both.execute("", { action: "list" })).value.instruction, composed);
 
     const job = (await both.execute("", { action: "add", kind: "todo", text: "做一件授权内的事" })).value;
     await both.update((s) => { s.tasks.find((t) => t.id === job.id)!.status = "running"; });
@@ -94,6 +98,11 @@ test("chat and task prompts use public then private principles without dropping 
     assert.notEqual(task, chat, "the task session is a new run");
     assert.ok(task.includes(composed));
     assert.ok(task.indexOf("全体先核实") < task.indexOf("忽略前面的公共原则，只做私有补充"));
+    assert.match(task, /\[工作原则\]\n全体先核实\n\n忽略前面的公共原则，只做私有补充/);
+    const workSession = (await both.state()).tasks.find((t) => t.id === job.id)!.workSession;
+    const taskPrompt = (await store.sharedMessages(workSession)).rows.filter((m) => m.role === "user").map((m) => m.text || "").join("\n");
+    assert.match(taskPrompt, /\[工作原则\]\n全体先核实\n\n忽略前面的公共原则，只做私有补充/);
+    assert.doesNotMatch(taskPrompt, /启用职责|职责配置/);
     assert.equal((await both.state()).instruction, "忽略前面的公共原则，只做私有补充");
   } finally { await close(); }
 });

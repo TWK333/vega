@@ -1201,14 +1201,8 @@ test(
         "confirmed redispatch",
       );
       acceptDialog = false;
-      await byText("职责", ".tabs");
-      await evaluate(
-        `(()=>{const e=[...document.querySelectorAll('.workspace button')].find(e=>e.textContent.includes('职责')&&!e.closest('.tabs'));if(!e)throw Error('Missing duty action');e.dataset.mobileTest='duty'})()`,
-      );
-      await tap('[data-mobile-test="duty"]');
-      await until(`document.querySelector('form textarea')`);
-      await layout("duty form");
-      await byText("长期记忆", ".tabs");
+      assert.equal(await evaluate(`document.querySelector('.tabs').textContent.includes('职责')`), false, "职责配置已移除");
+      await byText("记忆", ".tabs");
       assert.equal(
         await evaluate(`document.querySelector('.tabs').textContent.includes('密码本')`),
         false,

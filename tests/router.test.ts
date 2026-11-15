@@ -62,7 +62,7 @@ function app(href: string, { admin = false, employees = ["ea", "eb"], groups = [
     selectedEmployee: ref("ea"), creatingEmployee: ref(false), employeeTab: ref("chat"), employeeTaskFocus: ref(""), employeeSession: ref(""),
     selectedGroup: ref(""), current: ref(null), sessions: ref([{ id: "s1" }]), employee: ref({ id: "ea" }),
     employees: ref(employees.map((id) => ({ id }))), groups: ref(groups.map((id) => ({ id }))),
-    employeeTabs: ref([["chat"], ["tasks"], ["duties"], ["settings"]]),
+    employeeTabs: ref([["chat"], ["tasks"], ["memories"], ["settings"]]),
     attempt: (fn: any) => fn(), selectSession: async (s: any) => { c.current.value = s; c.view.value = "chat"; },
     openGroup: (id: string) => { c.selectedGroup.value = id; c.view.value = "group"; },
     chooseEmployee: async (id: string) => { c.selectedEmployee.value = id; c.employee.value = { id }; c.employeeTab.value = "chat"; c.employeeSession.value = ""; c.employeeTaskFocus.value = ""; c.creatingEmployee.value = false; c.view.value = "employee"; },
@@ -83,14 +83,15 @@ test("App routing: refresh restores page and tab; tab and page switches push; ba
   const s = await boot("https://vega.test/employees/eb/tasks/t1");
   assert.deepEqual([s.c.selectedEmployee.value, s.c.employeeTab.value, s.c.employeeTaskFocus.value], ["eb", "tasks", "t1"]);
   assert.deepEqual(s.history, [], "an exact path needs no rewrite");
-  s.c.employeeTaskFocus.value = ""; s.c.employeeTab.value = "duties"; await nextTick();
+  s.c.employeeTaskFocus.value = ""; s.c.employeeTab.value = "memories"; await nextTick();
   s.c.openGroup("g1"); await nextTick();
   s.c.setPageTab("work"); await nextTick();
-  assert.deepEqual(s.history, ["push /employees/eb/duties", "push /groups/g1"], "group side panels do not push");
+  assert.deepEqual(s.history, ["push /employees/eb/memories", "push /groups/g1"], "group side panels do not push");
   assert.equal(s.location.pathname, "/groups/g1");
-  s.location.href = "https://vega.test/employees/eb/duties";
+  s.location.href = "https://vega.test/employees/eb/memories";
   s.c.routeChanged(); await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual([s.c.view.value, s.c.employeeTab.value], ["employee", "duties"]);
+  assert.deepEqual([s.c.view.value, s.c.employeeTab.value], ["employee", "memories"]);
+  assert.equal(parseRoute("https://vega.test/employees/eb/duties").tab, undefined);
   s.location.href = "https://vega.test/groups/g1/work";
   s.c.routeChanged(); await new Promise((r) => setTimeout(r, 0));
   assert.deepEqual([s.c.view.value, s.c.selectedGroup.value, s.location.pathname], ["group", "g1", "/groups/g1"], "old /work link opens the group and normalizes");

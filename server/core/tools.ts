@@ -34,9 +34,7 @@ import type { Engine } from "./engine";
 import { APPUSE_RULES, CHROME_GATE_RULE, CHROME_RULES, EMPLOYEE_TASK_RULES, NORMAL_SESSION_EMPLOYEE_RULES, GUEST_RULES, OWNER_RULES } from "./prompt";
 import { appuseTools, appuseArguments, APPUSE_TOOLS, normalizeDesktopAction } from "./appuse-tools";
 import { DesktopExperiences } from "./experiences";
-import { prepareDutyInput } from "./duty-condition";
 import { Context } from "./context";
-import type { EmployeeState } from "./employee";
 import { MCP } from "./mcp";
 import {
   localAppuse,
@@ -153,19 +151,11 @@ export class Tools {
   async toolContext(): Promise<ToolContext> {
     if (!this.session.employeeId && !this.session.taskId) return { kind: "normal" };
     if (!this.session.taskId) return { kind: "chat", member: !!await this.guestRequest(), group: !!this.session.groupId };
-    let state: EmployeeState | undefined, task: Obj | undefined;
-    try {
-      const employee = await this.engine.employeeFor(this.session);
-      state = await employee.state(); task = await employee.findTask(this.session.taskId);
-    } catch { /* task record gone: only the always-visible task tools remain */ }
-    const duty = task?.dutyId ? state?.duties.find((d) => d.id === task.dutyId) : undefined;
-    const dynamic = !!duty && !duty.manual && !duty.everyMinutes && !duty.times?.length && !duty.events?.length;
     return {
       kind: "task",
       taskId: this.session.taskId,
       // Only the isolated relay session lacks task_complete; a main task that switched to computer in its own session still delivers.
       computer: this.session.scene === "computer" && !!this.session.relayComputer,
-      dutyCommands: duty ? (dynamic ? ["schedule_next", "disable"] : ["disable"]) : [],
     };
   }
   /** Shared rules for the exposed tool families, injected once into the system prompt instead of every description. */
@@ -720,12 +710,11 @@ export class Tools {
       const task = employee.task(await employee.state(), id);
       return { id, title: task.text.slice(0, 80), status: task.status };
     };
-    if (internal.target === "task") assert(await employee.findTask(a.id), "taskId 不是当前牛马的任务；职责请用 employee_duty_manage");
-    if (internal.target === "duty") assert((await employee.state()).duties.some((d) => d.id === a.id), "dutyId 不是当前牛马的职责；任务请用 employee_task_manage");
+    if (internal.target === "task") assert(await employee.findTask(a.id), "taskId 不是当前牛马的任务");
     const memberOnly = (action: string, kind?: string) => ["list", "resume", "answer", "stop", "vault_list", "vault_get"].includes(action) || (action === "add" && kind === "todo");
-    // In a group, anyone but the owner delegates work: tasks (and the employee's own vault), never duties or memories.
+    // In a group, anyone but the owner delegates work: tasks (and the employee's own vault), never memories.
     const guest = source?.group && !source.group.byOwner ? source.group.from : undefined;
-    if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；职责和记忆只有主人能用`);
+    if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；长期记忆只有主人能用`);
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
       const task = employee.task(await employee.state(), a.id);
       // shortcut: 没有客户端消息ID时用序号与毫秒时间区分清空后的消息；需严格跨清空幂等时改用持久消息ID。
@@ -744,7 +733,7 @@ export class Tools {
     }
     const result = await employee.execute(
       this.session.taskId || "",
-      await prepareDutyInput(this.engine, employee, { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) }, this.session.taskId || "", this.signal),
+      { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) },
       undefined, undefined, stepFiles,
     );
     if (a.action === "vault_get" && result.secret) {
