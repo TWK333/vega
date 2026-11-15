@@ -15,6 +15,7 @@ import type { FileRef } from "./attachments";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault, VAULT_USAGE } from "./vault";
 import { requireSceneModel, schedulerLimits, type Config } from "./config";
+import { effectiveWorkPrinciples } from "./work-principles";
 import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
@@ -898,6 +899,8 @@ export class Employee {
     let stop = false,
       pendingTell: { session: string; message: Message; group?: Task["group"] } | undefined,
       refused: { taskId: string; needed: Obj } | undefined;
+    const workPrinciples = (await this.runtime.config()).workPrinciples;
+    const principlesText = (sInstruction: unknown) => effectiveWorkPrinciples(workPrinciples, sInstruction) || "";
     const value = await this.update(async (s) => {
           const t = caller ? this.authorize(s, caller, a) : undefined,
             now = Date.now(),
@@ -914,7 +917,7 @@ export class Employee {
                 name: s.name,
                 now: beijingDateTime(now),
                 timeZone: "Asia/Shanghai",
-                instruction: s.instruction || "",
+                instruction: principlesText(s.instruction),
                 taskCount: matched.length,
                 tasks: matched.slice(-TASK_LIST_LIMIT).map(taskSummary),
                 recentRuns: s.runs
@@ -1069,7 +1072,7 @@ export class Employee {
                 return {
                   ok: false, code: "outline_review_required",
                   task: t.text,
-                  principles: s.instruction || "",
+                  principles: principlesText(s.instruction),
                   changedSteps: references,
                   next: "计划可重写、合并或删改，旧步骤只是线索而非必须照搬。对照原始任务、工作原则和用户最新变更，逐项核对要求与实际回执后用 outlineReview 交付；changedSteps 每条也须在 requirement 原样列出并说明完成或不适用的依据。未完成应继续、按授权澄清或等待，确需部分交付才标 cancelled 并请求确认。",
                 };
@@ -2055,7 +2058,7 @@ export class Employee {
       state = await this.update((s) => { this.task(s, job.id).recalledMemoryIds = recalled; return s; });
       task = this.task(state, job.id);
       const memoryBlock = formatMemoriesForPrompt(memories);
-      const principles = `[工作原则]\n${state.instruction || "（无）"}`;
+      const principles = `[工作原则]\n${effectiveWorkPrinciples(cfg.workPrinciples, state.instruction) || "（无）"}`;
       const scheduleNote = task.schedule
         ? "这是用户点名的定时，只做这一件已经记下的事，不要另找工作。缺少必要文件、遇到合并冲突、下一步会对外发送或提交、或授权范围会扩大时，停下来问用户，不要自行扩大授权。"
         : "";

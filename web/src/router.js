@@ -3,7 +3,7 @@
 export const PAGES = ["resources", "usage", "browser", "experiences", "debug", "settings", "account"];
 export const ADMIN_PAGES = ["browser", "experiences", "debug"];
 /** Page sub-views kept in the path: a fixed list, or any id (the selected item) when true. */
-const PAGE_SUBS = { settings: ["scenes", "vault", "external-mcp"], debug: true, experiences: true };
+const PAGE_SUBS = { settings: ["scenes", "vault", "external-mcp", "principles"], debug: true, experiences: true };
 const pageSub = (page, sub) => PAGE_SUBS[page] === true || PAGE_SUBS[page]?.includes(sub);
 export const EMPLOYEE_TABS = ["tasks", "browser", "memories", "capabilities", "settings"];
 /** First path segments that are app pages; the server answers these with index.html. */

@@ -98,7 +98,7 @@ test("对外 MCP is a personal settings section and does not open admin settings
   assert.match(capabilities, /对外 MCP/);
   assert.match(capabilities, /尚未配置 MCP/);
   assert.match(app, /route\.sub !== "external-mcp"/);
-  assert.match(router, /settings: \["scenes", "vault", "external-mcp"\]/);
+  assert.match(router, /settings: \["scenes", "vault", "external-mcp", "principles"\]/);
   assert.doesNotMatch(readFileSync("web/src/router.js", "utf8"), /ADMIN_PAGES = \[[^\]]*settings/);
   const exempt = gate.indexOf("/^\\/api\\/mcp\\/[^/]+$/");
   const origin = gate.indexOf("sameOrigin(event);");

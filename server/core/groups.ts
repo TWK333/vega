@@ -5,6 +5,7 @@ import { nameKey, parseMentions } from "./names";
 import { assert, id, type Obj } from "./util";
 import { ATTACHMENTS_MAX } from "./attachments";
 import { narrate, narratorSetup, NARRATOR } from "./narrator";
+import { effectiveWorkPrinciples } from "./work-principles";
 import { createHash } from "node:crypto";
 import { NEW_SESSION_NOTICE, newCommand } from "./new-session";
 
@@ -463,9 +464,10 @@ export class Groups {
     const group = await this.get(groupId);
     if (!group) return;
     const members = [];
+    const globalPrinciples = (await this.engine.config()).workPrinciples;
     for (const person of employees) {
       const profile = await (await this.employee(person.id))?.profile();
-      members.push({ id: person.id, name: person.name, instruction: cut(profile?.instruction || "", 600) });
+      members.push({ id: person.id, name: person.name, instruction: cut(effectiveWorkPrinciples(globalPrinciples, profile?.instruction || ""), 600) });
     }
     const setup = narratorSetup(group.name, group.bulletin, members), basis = createHash("sha256").update(setup).digest("hex").slice(0, 16);
     const known = group.narrator;
