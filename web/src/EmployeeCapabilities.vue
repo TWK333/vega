@@ -109,7 +109,7 @@ onBeforeUnmount(() => { disposed = true; });
       <section v-if="canEdit && detail" class="skill-detail"><div class="card-head row"><h4>{{ detail.name }}</h4><button type="button" class="icon sm" aria-label="关闭技能详情" @click="detail = null"><Icon name="close" :size="14" /></button></div><p class="hint">文件：{{ detail.files.join('、') }}</p><pre>{{ detail.content }}</pre></section>
     </section>
     <section class="card">
-      <div class="card-head row"><h3>MCP</h3><button v-if="canEdit" class="primary sm" :disabled="busy" @click="saveMcp">保存 MCP</button></div>
+      <div class="card-head row"><div><h3>MCP 客户端</h3><p class="hint">这个牛马去调用的外部 MCP 服务。要让外部客户端来找你的牛马或群聊，请用设置里的「对外 MCP」。</p></div><button v-if="canEdit" class="primary sm" :disabled="busy" @click="saveMcp">保存 MCP</button></div>
       <template v-if="canEdit">
         <p class="hint">每项配置一个 JSON 对象：远程服务使用 url / headers，本地进程使用 command / args / env。保留 __stored_secret__ 可保留已有密钥。</p>
         <p v-if="!Object.keys(mcp).length" class="empty-state">尚未配置 MCP</p>
