@@ -189,18 +189,22 @@ test("removed Orbit is not exposed to the website or scheduler; prior data is re
   employee.closed = true;
   try {
     const state = await employee.state();
-    state.duties.push({
+    (state as any).duties = [{
       id: "legacy",
       text: "old star workflow",
       enabled: true,
       events: ["orbit.added"],
       eventAt: 1,
       pending: ["old event"],
-    });
+    }];
     state.orbit.push({ id: "retained", text: "legacy data" });
     await store.put("employee", state);
-    assert.equal((await employee.state()).duties[0].enabled, false);
-    assert.equal((await employee.state()).duties[0].eventAt, 0);
+    const loaded = await employee.state();
+    assert.equal("duties" in loaded, false);
+    employee.closed = false;
+    await employee.tick();
+    employee.closed = true;
+    assert.equal((await employee.state()).tasks.length, 0);
     await assert.rejects(() =>
       employee.execute("", { action: "orbit_add", text: "x" }),
     );

@@ -131,7 +131,7 @@ test("employee task lists direct new work to chat without a separate creation fo
 });
 
 test("employee task creation never asks users to choose the initial model", () => {
-  const workspace = source + ["EmployeeTasks", "EmployeeDuties", "TaskDetail", "WorkPanel"].map((file) => readFileSync(`web/src/${file}.vue`, "utf8")).join("\n");
+  const workspace = source + ["EmployeeTasks", "TaskDetail", "WorkPanel"].map((file) => readFileSync(`web/src/${file}.vue`, "utf8")).join("\n");
   assert(!workspace.includes("taskProfile") && !workspace.includes('v-model="duty.profile"'));
   assert(readFileSync("web/src/EmployeeTasks.vue", "utf8").includes("新任务先由轻量模型起步"));
   const scenes = readFileSync("web/src/SceneSettings.vue", "utf8");

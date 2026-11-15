@@ -64,19 +64,20 @@ test("employees belong to their owner: nobody else, not even an administrator, s
   } finally { await engine.close(); await store.close(); }
 });
 
-test("employees are immediately available even with legacy disabled hours; duty triggers still control due dates", async () => {
+test("employees are immediately available even with legacy disabled hours, and duty config is gone", async () => {
   const { store, engine } = await fixture();
   try {
     await engine.employee.update((state) => { state.enabled = false; state.workStart = "23:58"; state.workEnd = "23:59"; });
     assert.equal((await engine.employee.state()).enabled, true);
     assert.equal((await engine.employee.state()).workStart, "00:00");
     const employee = await engine.employee.for((await engine.employee.create({ name: "Ready" }, "alice")).id);
-    const duty = await employee.execute("", { action: "add", kind: "duty", text: "manual work", manual: true });
+    await assert.rejects(() => employee.execute("", { action: "add", kind: "duty", text: "manual work", manual: true }), /职责配置已移除/);
     engine.employee.closed = false;
     await employee.tick();
     engine.employee.closed = true;
-    assert.equal((await employee.state()).tasks.length, 0);
-    assert((await employee.state()).duties.some((row) => row.id === duty.value.id));
+    const state = await employee.state();
+    assert.equal(state.tasks.length, 0);
+    assert.equal("duties" in state, false);
     const job = await add(employee);
     assert.equal(job.status, "queued");
   } finally { await engine.close(); await store.close(); }
@@ -153,19 +154,10 @@ test("employee deletion removes its sessions/profile and its own vault and survi
   }
 });
 
-test("set_manual clears the old trigger wording, and a task can reschedule only itself", async () => {
+test("a task can reschedule only itself", async () => {
   const { store, engine } = await fixture();
   try {
     const employee = await engine.employee.for((await engine.employee.create({ name: "Planner" }, "alice")).id);
-    const duty = await employee.execute("", { action: "add", kind: "duty", text: "report", times: ["09:00"], condition: "每天 9 点" });
-    const owner = await Tools.create(engine, await employee.chat("alice"), await engine.config(), new AbortController().signal, () => {});
-    owner.actorId = "alice";
-    await owner.execute({ id: "m", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: { command: "set_manual" } } }, {} as any);
-    const row = (await employee.state()).duties.find((d) => d.id === duty.value.id)!;
-    assert.equal(row.manual, true);
-    assert.equal(row.condition, undefined, "a stale condition would keep describing the old schedule");
-    assert.deepEqual(row.times, []);
-
     const job = await add(employee, "call back later");
     const other = await add(employee, "someone else");
     const session = await store.newSession({ employeeId: employee.employeeId, taskId: job.id, cwd: job.cwd, ownerId: "alice" });
@@ -182,34 +174,12 @@ test("set_manual clears the old trigger wording, and a task can reschedule only 
   } finally { await engine.close(); await store.close(); }
 });
 
-test("one update changes several aspects together, with the old executor's semantics", async () => {
+test("one update changes several task fields together, or none", async () => {
   const { store, engine } = await fixture();
   try {
     const employee = await engine.employee.for((await engine.employee.create({ name: "Multi" }, "alice")).id);
     const tools = await Tools.create(engine, await employee.chat("alice"), await engine.config(), new AbortController().signal, () => {});
     tools.actorId = "alice";
-    const duty = await employee.execute("", { action: "add", kind: "duty", text: "old", manual: true });
-    await tools.execute({ id: "u", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: {
-      command: "update", instructions: "new work", note: "细化", profile: "编码", trigger: { kind: "interval", everyMinutes: 30 } } } }, {} as any);
-    let row = (await employee.state()).duties.find((d) => d.id === duty.value.id)!;
-    assert.deepEqual([row.text, row.note, row.profile, row.manual, row.everyMinutes], ["new work", "细化", "coding", false, 30]);
-    await tools.execute({ id: "d", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: { command: "update", trigger: { kind: "daily", times: ["09:00"] } } } }, {} as any);
-    row = (await employee.state()).duties.find((d) => d.id === duty.value.id)!;
-    assert.deepEqual([row.everyMinutes, row.times], [0, ["09:00"]], "switching kinds resets the competing rule");
-    await tools.execute({ id: "n", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: { command: "update", trigger: { kind: "dynamic", delayMinutes: 15 } } } }, {} as any);
-    row = (await employee.state()).duties.find((d) => d.id === duty.value.id)!;
-    assert(!row.manual && !row.everyMinutes && !row.times.length && row.nextCheckAt > Date.now());
-
-    // Like the old update, an invalid part rejects the whole call.
-    const before = JSON.stringify(row);
-    await assert.rejects(tools.execute({ id: "bad", name: "employee_duty_manage", arguments: { dutyId: duty.value.id, request: { command: "update", instructions: "x", profile: "电脑" } } }, {} as any));
-    assert.equal(JSON.stringify((await employee.state()).duties.find((d) => d.id === duty.value.id)), before);
-
-    // Like master, set_daily keeps the old condition wording; only set_manual clears it.
-    const worded = await employee.execute("", { action: "add", kind: "duty", text: "w", everyMinutes: 60, condition: "每小时" });
-    await tools.execute({ id: "sd", name: "employee_duty_manage", arguments: { dutyId: worded.value.id, request: { command: "set_daily", times: ["10:00"] } } }, {} as any);
-    assert.equal((await employee.state()).duties.find((d) => d.id === worded.value.id)!.condition, "每小时");
-
     const job = await add(employee, "old task");
     await tools.execute({ id: "t", name: "employee_task_manage", arguments: { taskId: job.id, request: { command: "update", instructions: "new task", profile: "coding", delayMinutes: 60 } } }, {} as any);
     const moved = employee.task(await employee.state(), job.id);

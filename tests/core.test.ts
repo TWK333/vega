@@ -12,8 +12,6 @@ import { mutate } from "../server/core/tools";
 import { Vault } from "../server/core/vault";
 import {
   Employee,
-  applyDuty,
-  nextFixed,
   retention,
   recallMemory,
   workSlot,
@@ -229,12 +227,6 @@ test("context protects tool pairs and current turn", async () => {
 });
 test("employee task permissions, key dedup, approval reuses original sessions", async () => {
   const e = await employee();
-  const d = await e.execute("", {
-    action: "add",
-    kind: "duty",
-    text: "workflow",
-    manual: true,
-  });
   await e.update((s) =>
         s.tasks.push({
           id: "task",
@@ -244,16 +236,15 @@ test("employee task permissions, key dedup, approval reuses original sessions", 
           profile: "lightweight",
           cwd: process.cwd(),
           owner: { token: "", name: "" },
-          dutyId: d.value.id,
           workSession: "original",
         }),
       );
   e.busy.set("task", { computer: false, session: "original" });
   await assert.rejects(() =>
-    e.execute("task", { action: "update", id: d.value.id, text: "hijacked" }),
+    e.execute("task", { action: "update", id: "other", text: "hijacked" }),
   );
   await assert.rejects(() =>
-    e.execute("task", { action: "done", id: d.value.id }),
+    e.execute("task", { action: "done", id: "other" }),
   );
   const pause = await e.execute("task", {
     action: "ask",
@@ -280,54 +271,26 @@ test("employee task permissions, key dedup, approval reuses original sessions", 
   assert.equal(a.value.id, b.value.id);
   assert(b.value.exists);
 });
-test("duty validation, manual scheduling and removed Orbit do not trigger work", async () => {
-  const e = await employee(),
-    now = Date.now();
-  for (const a of [
-    { times: ["25:00"] },
-    { times: ["09:00"], everyMinutes: 1 },
-    { manual: true, events: ["orbit.added"] },
-    { nextAt: "2000-01-01 00:00" },
-    { everyMinutes: 0.5 },
-  ])
-    assert.throws(() => applyDuty({ text: "work" }, a));
-  await assert.rejects(() =>
-    e.execute("", {
-      action: "add",
-      kind: "duty",
-      text: "removed event",
-      events: ["orbit.changed"],
-    }),
+test("removed duty config and Orbit do not trigger work", async () => {
+  const e = await employee();
+  await assert.rejects(
+    () => e.execute("", { action: "add", kind: "duty", text: "removed", manual: true }),
+    /职责配置已移除/,
   );
   await assert.rejects(() =>
     e.execute("", { action: "orbit_add", text: "not available" }),
   );
-  const d = await e.execute("", {
-    action: "add",
-    kind: "duty",
-    text: "manual workflow",
-    manual: true,
-  });
   await e.update((s) => {
         s.enabled = true;
         s.workStart = s.workEnd = "00:00";
       });
   e.closed = false;
   await e.tick();
-  assert.equal((await e.state()).tasks.length, 0);
+  const state = await e.state();
+  assert.equal(state.tasks.length, 0);
+  assert.equal("duties" in state, false);
+  assert.equal(state.instruction, "");
   e.close();
-  const manual = {
-    id: "manual",
-    text: "m",
-    manual: false,
-    everyMinutes: 5,
-    times: ["09:00"],
-    events: ["orbit.added"],
-    nextCheckAt: 9,
-  };
-  applyDuty(manual, { manual: true }, now);
-  assert.equal(manual.everyMinutes, 0);
-  assert.deepEqual(manual.times, []);
   assert(
     workSlot("22:00", "06:00", Date.parse("2026-02-01T23:00:00+08:00")) ===
       Date.parse("2026-02-01T23:00:00+08:00"),

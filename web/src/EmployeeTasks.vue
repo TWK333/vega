@@ -34,7 +34,7 @@ function location(task) { return task.execution?.localAgent ? task.execution.cli
           <span :class="['dot', taskTone(task.status), { pulse: task.status === 'running' }]" aria-hidden="true"></span>
           <span class="task-main">
             <strong>{{ task.text }}</strong>
-            <span class="task-meta"><span :class="['status-text', taskTone(task.status)]">{{ taskLabel(task.status) }}</span><span>{{ location(task) }}</span><span v-if="task.dutyId">职责触发</span><time>{{ shortTime(task.createdAt) }}</time></span>
+            <span class="task-meta"><span :class="['status-text', taskTone(task.status)]">{{ taskLabel(task.status) }}</span><span>{{ location(task) }}</span><time>{{ shortTime(task.createdAt) }}</time></span>
             <span v-if="needsAttention(task.status)" class="task-ask"><span class="clamp">{{ task.status === 'approval' ? task.approval : task.waiting }}</span></span>
             <span v-else-if="task.progress?.length" class="task-note">{{ task.progress.at(-1).text }}</span>
           </span>

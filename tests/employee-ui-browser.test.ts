@@ -167,30 +167,7 @@ test("employee chat bubbles, citations and task jumps work on mobile while debug
     await until("!document.querySelector('.avatar-current img') && !!document.querySelector('.avatar-current .bot-avatar')");
     await evaluate("document.querySelector('[aria-label=\"使用星星形状\"]').click()");
     await until("document.querySelector('.avatar-current .bot-avatar')?.dataset.shape==='star'");
-    await evaluate("[...document.querySelectorAll('.employee-tabs button')].find(button=>button.querySelector('span')?.textContent==='职责').click()");
-    await until("[...document.querySelectorAll('.section-heading button')].some(button=>button.textContent.includes('新增职责'))");
-    await evaluate("[...document.querySelectorAll('.section-heading button')].find(button=>button.textContent.includes('新增职责')).click()");
-    await until("!!document.querySelector('.duty-form')");
-    assert.equal(await evaluate("document.querySelectorAll('.duty-form textarea').length"), 2);
-    assert.equal(await evaluate("document.querySelectorAll('.duty-form input,.duty-form select').length"), 0);
-    if (process.env.VEGA_EMPLOYEE_UI_SCREENSHOT) {
-      const shot = await command("Page.captureScreenshot", { format: "png" });
-      await writeFile(process.env.VEGA_EMPLOYEE_UI_SCREENSHOT.replace(/\.png$/, "-duty.png"), Buffer.from(shot.data, "base64"));
-    }
-    const dutyText = "two-field-duty-ui-" + Date.now();
-    await evaluate(`(()=>{const form=document.querySelector('.duty-form'),boxes=form.querySelectorAll('textarea');boxes[0].value='按交代的任务需要，不自动触发';boxes[1].value=${JSON.stringify(dutyText)};boxes.forEach(box=>box.dispatchEvent(new Event('input',{bubbles:true})));form.requestSubmit()})()`);
-    const dutyCard = `[...document.querySelectorAll('.duty-list li')].find(card=>card.querySelector('.duty-main strong')?.textContent===${JSON.stringify(dutyText)})`;
-    await until(`!document.querySelector('.duty-form') && !!(${dutyCard})`);
-    const triggerCalls = providerRequests.filter(request => request.tools?.some((tool: any) => tool.function?.name === 'compile_duty_trigger')).length;
-    assert.equal(triggerCalls, 1);
-    await evaluate(`[...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='停用').click()`);
-    await until(`!![...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='启用')`);
-    await evaluate(`[...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='编辑').click()`);
-    await until("!!document.querySelector('.duty-form')");
-    assert.equal(await evaluate("document.querySelector('.duty-form textarea').value"), "按交代的任务需要，不自动触发");
-    await evaluate("document.querySelector('.duty-form').requestSubmit()");
-    await until(`!document.querySelector('.duty-form') && !![...(${dutyCard}).querySelectorAll('button')].find(button=>button.textContent==='启用')`);
-    assert.equal(providerRequests.filter(request => request.tools?.some((tool: any) => tool.function?.name === 'compile_duty_trigger')).length, triggerCalls);
+    assert.equal(await evaluate("[...document.querySelectorAll('.employee-tabs button')].some(button=>button.textContent.includes('职责'))"), false);
     await evaluate("document.querySelector('[aria-label=\"牛马更多操作\"]').click();[...document.querySelectorAll('.popover-panel button')].find(button=>button.textContent==='牛马设置').click()");
     await until("!!document.querySelector('.settings-page form.profile')");
     assert.equal(await evaluate("document.querySelectorAll('.place-options [role=radio]').length"), 0, "执行位置只在客户端配，网页不再提供这个开关");

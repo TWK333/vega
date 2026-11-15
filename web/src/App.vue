@@ -14,7 +14,6 @@ import { mergeMessages } from "./chat-history.js";
 import { markSeen, seenSeq } from "./seen.js";
 import EmployeeHeader from "./EmployeeHeader.vue";
 import EmployeeTasks from "./EmployeeTasks.vue";
-import EmployeeDuties from "./EmployeeDuties.vue";
 import EmployeeMemories from "./EmployeeMemories.vue";
 import EmployeeSettings from "./EmployeeSettings.vue";
 import GroupChat from "./GroupChat.vue";
@@ -226,7 +225,6 @@ const live = ref(""),
 
   config = ref({});
 const employee = ref({
-    duties: [],
     tasks: [],
     memories: [],
     runs: [],
@@ -258,8 +256,6 @@ const employee = ref({
   memoryID = ref(""),
   importance = ref(1),
   activeTaskCount = ref(null);
-const duty = ref(emptyDuty()),
-  dutyOpen = ref(false);
 watch(selectedEmployee, () => { workRailOpen.value = false; });
 
 let eventsSocket,
@@ -276,19 +272,6 @@ let eventsSocket,
   sessionRequest = 0,
   employeeRefreshTimer;
 const EVENT_SILENCE_MS = 75000;
-function emptyDuty() {
-  return {
-    id: "",
-    text: "",
-    note: "",
-    profile: "lightweight",
-    trigger: "manual",
-    times: "09:00",
-    everyMinutes: 60,
-    nextAt: "",
-    enabled: true,
-  };
-}
 const isRunning = computed(
   () => current.value && running.value[current.value.id],
 );
@@ -358,9 +341,9 @@ const historyTasks = computed(() =>
 const attentionTasks = computed(() => activeTasks.value.filter((task) => ["waiting", "approval"].includes(task.status)));
 const visibleEmployeeTasks = computed(() => employeeTaskFilter.value === "history" ? historyTasks.value : employeeTaskFilter.value === "attention" ? attentionTasks.value : activeTasks.value);
 const employeeStatus = computed(() => attentionTasks.value.length ? "需要你处理" : activeTasks.value.some((task) => task.status === "running") ? "正在工作" : "随时待命");
-const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['duties', '职责'], ['memories', '记忆'], ['capabilities', '技能 / MCP'], ...(employee.value.canManage ? [['settings', '设置']] : [])]);
+const employeeTabs = computed(() => [['chat', '对话'], ['tasks', '任务'], ...(employee.value.canManage ? [['browser', '浏览器']] : []), ['memories', '记忆'], ['capabilities', '技能 / MCP'], ...(employee.value.canManage ? [['settings', '设置']] : [])]);
 const employeeTone = computed(() => attentionTasks.value.length ? "warn" : activeTasks.value.some((task) => task.status === "running") ? "info" : "ok");
-const employeeCounts = computed(() => ({ tasks: attentionTasks.value.length || activeTasks.value.length, attention: attentionTasks.value.length, duties: employee.value.duties?.length || 0, memories: employee.value.memories?.length || 0 }));
+const employeeCounts = computed(() => ({ tasks: attentionTasks.value.length || activeTasks.value.length, attention: attentionTasks.value.length, memories: employee.value.memories?.length || 0 }));
 const workPanelVisible = computed(() => wide.value ? !workPanelHidden.value : workRailOpen.value);
 function toggleWorkPanel() {
   if (wide.value) workPanelHidden.value = !workPanelHidden.value;
@@ -708,12 +691,10 @@ function resetLogin() {
   creatingEmployee.value = false;
   newEmployeeName.value = "";
   newEmployeeInstruction.value = "";
-  employee.value = { duties: [], tasks: [], memories: [], runs: [] };
+  employee.value = { tasks: [], memories: [], runs: [] };
   taskText.value = "";
   memoryText.value = "";
   memoryID.value = "";
-  dutyOpen.value = false;
-  duty.value = emptyDuty();
   employeeSession.value = "";
   employees.value = [];
   selectedEmployee.value = "";
@@ -1152,7 +1133,7 @@ function prepareEmployee(id) {
   if (!entry) return;
   employeeComposers.value[id] ||= { text: "", attachments: [] };
   if (employee.value.id !== id)
-    employee.value = { ...entry, canManage: false, duties: [], tasks: [], memories: [], runs: [] };
+    employee.value = { ...entry, canManage: false, tasks: [], memories: [], runs: [] };
 }
 async function loadEmployee() {
   if (!user.value) return;
@@ -1165,7 +1146,7 @@ async function loadEmployee() {
   const id = list.find((entry) => entry.id === selectedEmployee.value)?.id || list[0]?.id || "";
   selectedEmployee.value = id;
   if (!id) {
-    employee.value = { duties: [], tasks: [], memories: [], runs: [] };
+    employee.value = { tasks: [], memories: [], runs: [] };
     employeeSession.value = "";
     return;
   }
@@ -1192,7 +1173,6 @@ async function chooseEmployee(id) {
   employeeTab.value = "chat";
   employeeTaskFilter.value = "active";
   employeeTaskFocus.value = "";
-  dutyOpen.value = false;
   memoryID.value = "";
   taskText.value = "";
   employeeError.value = "";
@@ -1214,7 +1194,7 @@ async function createEmployee() {
 async function deleteEmployee() {
   if (employeeDeleting.value || !employee.value.id) return;
   const id = employee.value.id, name = employee.value.name, owner = user.value.id;
-  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的职责、记忆、所有任务和执行会话，并清除其浏览器登录数据；「设置 → 密码本」里只指向它的条目也会删除。项目文件不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
+  if (!confirm(`永久删除「${name}」？\n\n将删除该牛马的记忆、所有任务和执行会话，并清除其浏览器登录数据；「设置 → 密码本」里只指向它的条目也会删除。项目文件不会删除；已提交的外部作业不会自动取消。此操作不可撤销。`)) return;
   employeeDeleting.value = true;
   try {
     await api(`/employees/${id}?confirmed=true`, "DELETE");
@@ -1223,7 +1203,7 @@ async function deleteEmployee() {
     delete employeeComposers.value[id];
     if (selectedEmployee.value === id) {
       selectedEmployee.value = "";
-      employee.value = { duties: [], tasks: [], memories: [], runs: [] };
+      employee.value = { tasks: [], memories: [], runs: [] };
       employeeSession.value = "";
       employeeTab.value = "chat";
     }
@@ -1233,8 +1213,8 @@ async function deleteEmployee() {
   finally { employeeDeleting.value = false; }
 }
 const EMPLOYEE_RESETS = {
-  chat: { path: "chat/clear", ask: (name) => `清空「${name}」的全部聊天记录？\n\n对话消息将永久删除，任务、职责和记忆不受影响。此操作不可撤销。`, done: (name) => `已清空「${name}」的聊天记录` },
-  all: { path: "reset", ask: (name) => `重置「${name}」？\n\n将停止正在进行的对话和任务，并永久删除：全部聊天记录、所有任务记录及其执行会话、任务交付与进度。\n\n保留：记忆、职责（定时从现在起重新计时）、牛马设置、密码本和浏览器登录。已提交的外部作业不会自动撤销。此操作不可撤销。`, done: (name) => `已重置「${name}」` },
+  chat: { path: "chat/clear", ask: (name) => `清空「${name}」的全部聊天记录？\n\n对话消息将永久删除，任务和记忆不受影响。此操作不可撤销。`, done: (name) => `已清空「${name}」的聊天记录` },
+  all: { path: "reset", ask: (name) => `重置「${name}」？\n\n将停止正在进行的对话和任务，并永久删除：全部聊天记录、所有任务记录及其执行会话、任务交付与进度。\n\n保留：记忆、工作原则、牛马设置、密码本和浏览器登录。已提交的外部作业不会自动撤销。此操作不可撤销。`, done: (name) => `已重置「${name}」` },
 };
 /** 清空聊天 (scope chat) and 重置牛马 (scope all) share one flow: confirm, call, drop this employee's cached chat. */
 async function resetEmployee(scope) {
@@ -1323,21 +1303,6 @@ async function employeeAction(data) {
 async function control(data) {
   await employeeApi("/employee/control", "POST", data);
   await loadEmployee();
-}
-async function saveDuty(data) {
-  const employeeId = selectedEmployee.value, actor = user.value?.id;
-  return attempt(async () => {
-    await employeeAction(data).catch(error => {
-      if (selectedEmployee.value === employeeId && user.value?.id === actor) throw error;
-    });
-    return selectedEmployee.value === employeeId && user.value?.id === actor;
-  });
-}
-function removeDuty(d) {
-  return attempt(async () => {
-    if (confirm("移除此职责并取消未开始的任务？"))
-      await employeeAction({ action: "done", id: d.id });
-  });
 }
 async function saveMemory(data) {
   return attempt(async () => {
@@ -1625,7 +1590,6 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
             @inspect="openEmployee($event)"
             @chat="employeeTab = 'chat'"
           />
-          <div v-if="employeeTab === 'duties'" class="page-scroll"><EmployeeDuties :key="selectedEmployee" :duties="employee.duties || []" :can-manage="employee.canManage" :save="saveDuty" :remove="removeDuty" /></div>
           <div v-if="employeeTab === 'memories'" class="page-scroll"><EmployeeMemories :key="selectedEmployee" :memories="employee.memories || []" :can-manage="employee.canManage" :save="saveMemory" :forget="forgetMemory" :resolve="resolveMemory" :pin="pinMemory" :search="memorySearch" /></div>
           <EmployeeCapabilities v-if="employeeTab === 'capabilities'" :key="user.id + ':' + selectedEmployee" :api="api" :employee-id="selectedEmployee" @error="employeeError = $event" @notice="toast" />
           <EmployeeSettings
