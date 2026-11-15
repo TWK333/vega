@@ -16,7 +16,7 @@ import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
 import { EMPLOYEE_CHAT_RULES, EMPLOYEE_CONTINUITY_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, expandSkillCommand, steerPrompt, clampPromptCacheKey, BOOST } from "./prompt";
 import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, isAgentTool, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
-import { awaitPendingBash, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished } from "./bash-jobs";
+import { awaitPendingBash, bashRunning, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished } from "./bash-jobs";
 import { EventEmitter } from "node:events";
 import { rm, stat } from "node:fs/promises";
 import { keyDir } from "./key-files";
@@ -407,6 +407,7 @@ export class Engine {
       seal: (value, aad) => this.vault.sealObject(value, aad),
       open: (blob, aad) => this.vault.openObject(blob, aad),
     });
+    runtime.checkpointWorkspace = (employeeId, taskId) => this.handoffs.checkpoint(employeeId, taskId).then(() => undefined, () => undefined);
   }
   /** 账户下浏览器节点视图：云端 + 各客户端（含离线的），供客户端 runtime/ready 视图和前端节点列表使用。 */
   async clientsView(userId: string): Promise<Obj> {
@@ -1316,6 +1317,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           // A main task keeps its return scene: a plain reply mid-work must not strand or hide the browser phase.
           if (!mainTask && frames.length) { frames.length = 0; await keepFrames(); }
           if (state.steer.length) continue;
+          await this.confirmWorkspace(session, [], control.signal);
           return;
         }
         // Delivering from a callee scene would drop the caller's retained work: return first; complete is not executed.
@@ -1427,6 +1429,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           const { secret, ...publicResult } = outcome;
           emit("tool_end", { call: calls[i], outcome: publicResult });
         });
+        // 工具批次已经结束（含暂停、等待、审批）。只确认文件基线，不切换执行权，也不据此续做。
+        await this.confirmWorkspace(session, outcomes, control.signal);
         if (session.employeeId && session.taskId && session.scene !== "coding" && reply.calls.some(call => ["write", "edit", "bash"].includes(call.name))) (await this.employeeFor(session)).releaseWorkspace(session.taskId, true);
         let stop = false;
         for (const [i, outcome] of outcomes.entries()) {
@@ -1719,6 +1723,13 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       const reason = String(error?.message || error || "分身异常退出");
       finishAgent(parentId, child.path, status, last?.text ? `${reason}\n\n[分身最后输出]\n${last.text}` : reason);
     }
+  }
+  /** 一批工具已经返回、且没有写到一半的命令时，确认本机文件基线。失败不打断这一轮，也不改变执行权。 */
+  private async confirmWorkspace(session: Session | undefined, outcomes: Outcome[], signal: AbortSignal) {
+    if (!session?.employeeId || !session.taskId || !session.localAgent || session.agentChild) return;
+    if (signal.aborted || outcomes.some((outcome) => outcome?.pause) || bashRunning(session.id)) return;
+    try { await this.handoffs.checkpoint(session.employeeId, session.taskId); }
+    catch { /* 没确认成功就保持上一份基线 */ }
   }
   async batch(tools: Tools, calls: Call[], model: Model, offered: ReadonlySet<string>, onSettled?: (index: number, outcome: Outcome) => void): Promise<Outcome[]> {
     const output: Outcome[] = new Array(calls.length);

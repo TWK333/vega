@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -12,7 +13,8 @@ import (
 )
 
 // 任务工作区清单：只列业务文件，依赖/构建产物/凭据不参与交接。
-// 与服务端 shared/workspace-sync.mjs 的排除规则保持一致；超限明确失败，不静默裁剪。
+// 与服务端 shared/workspace-sync.mjs 的排除规则保持一致。
+// 超限文件放进 skipped（单个过大或总量放不下），其余文件照常返回；整次交接仍由服务端拒绝带 skipped 的清单。
 const (
 	maxSyncFiles    = 2000
 	maxSyncFileSize = 4 << 20
@@ -44,8 +46,6 @@ func skipSyncPath(name, rel string) bool {
 	}
 	return false
 }
-
-var errWorkspaceTooLarge = errors.New("workspace exceeds the handoff limit")
 
 // shortcut: another local process can race these checks; use handle-relative writes on hostile shared machines.
 func writeWorkspace(root, relative string, data []byte, expected string) (string, error) {
@@ -109,7 +109,13 @@ func writeWorkspace(root, relative string, data []byte, expected string) (string
 	return target, nil
 }
 
-// listWorkspace 返回相对 root 的文件清单（路径统一用 /），供服务端比较与增量同步。
+type workspaceCandidate struct {
+	rel   string
+	size  int64
+	mtime int64
+}
+
+// listWorkspace 返回相对 root 的文件清单（路径统一用 /，含内容摘要），供服务端做增量检查点。
 func listWorkspace(root string) map[string]any {
 	abs, err := filepath.Abs(root)
 	if err != nil {
@@ -119,8 +125,8 @@ func listWorkspace(root string) map[string]any {
 	if err != nil || !st.IsDir() {
 		return failure("cwd must be an existing directory on this machine")
 	}
-	files := make([]map[string]any, 0, 128)
-	var total int64
+	candidates := make([]workspaceCandidate, 0, 128)
+	skipped := make([]map[string]any, 0)
 	err = filepath.WalkDir(abs, func(path string, entry fs.DirEntry, walk error) error {
 		if walk != nil {
 			return nil // 无权限的条目跳过，不让整次清单失败
@@ -147,21 +153,45 @@ func listWorkspace(root string) map[string]any {
 			return nil
 		}
 		if info.Size() > maxSyncFileSize {
-			return errors.New("文件过大，无法交接：" + rel)
+			skipped = append(skipped, map[string]any{"path": rel, "size": info.Size(), "reason": "文件过大"})
+			return nil
 		}
-		if len(files) >= maxSyncFiles || total+info.Size() > maxSyncBytes {
-			return errWorkspaceTooLarge
-		}
-		total += info.Size()
-		files = append(files, map[string]any{"path": rel, "size": info.Size(), "mtime": info.ModTime().UnixMilli()})
+		candidates = append(candidates, workspaceCandidate{rel: rel, size: info.Size(), mtime: info.ModTime().UnixMilli()})
 		return nil
 	})
 	if err != nil {
-		if errors.Is(err, errWorkspaceTooLarge) {
-			return failure("工作区超过交接上限（2000 文件 / 16MiB），请缩小范围后再交接")
-		}
 		return failure(err.Error())
 	}
-	sort.Slice(files, func(i, j int) bool { return files[i]["path"].(string) < files[j]["path"].(string) })
-	return map[string]any{"root": abs, "files": files, "bytes": total}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].rel < candidates[j].rel })
+	files := make([]map[string]any, 0, len(candidates))
+	var total int64
+	for _, candidate := range candidates {
+		if len(files) >= maxSyncFiles || total+candidate.size > maxSyncBytes {
+			skipped = append(skipped, map[string]any{"path": candidate.rel, "size": candidate.size, "reason": "超出交接总量上限"})
+			continue
+		}
+		data, readErr := os.ReadFile(filepath.Join(abs, filepath.FromSlash(candidate.rel)))
+		if readErr != nil {
+			skipped = append(skipped, map[string]any{"path": candidate.rel, "size": candidate.size, "reason": "无法读取"})
+			continue
+		}
+		if int64(len(data)) > maxSyncFileSize {
+			skipped = append(skipped, map[string]any{"path": candidate.rel, "size": len(data), "reason": "文件过大"})
+			continue
+		}
+		if len(files) >= maxSyncFiles || total+int64(len(data)) > maxSyncBytes {
+			skipped = append(skipped, map[string]any{"path": candidate.rel, "size": len(data), "reason": "超出交接总量上限"})
+			continue
+		}
+		sum := sha256.Sum256(data)
+		total += int64(len(data))
+		files = append(files, map[string]any{"path": candidate.rel, "size": len(data), "mtime": candidate.mtime, "hash": hex.EncodeToString(sum[:])})
+	}
+	sort.Slice(skipped, func(i, j int) bool { return skipped[i]["path"].(string) < skipped[j]["path"].(string) })
+	truncated := false
+	if len(skipped) > maxSyncFiles {
+		truncated = true
+		skipped = skipped[:maxSyncFiles]
+	}
+	return map[string]any{"root": abs, "files": files, "bytes": total, "skipped": skipped, "truncated": truncated}
 }

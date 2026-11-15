@@ -412,6 +412,8 @@ export type EmployeeRuntime = {
   presence?: () => Promise<Presence>;
   /** 已连接的客户端。 */
   client?: (ownerId: string, clientId?: string) => { clientId: string; clientName?: string; localPlatform?: string; cwd: string; browser?: "local" | "cloud"; prefer?: "client" | "cloud" } | undefined;
+  /** 安全点确认本机工作区的文件基线。不切换执行权，也不让任务继续往下做。 */
+  checkpointWorkspace?: (employeeId: string, taskId: string) => Promise<void>;
   /** Group chats (groups.ts): task notices of tasks started in a group go back there; false when the group is gone. */
   groups?: {
     post: (group: NonNullable<Task["group"]>, employeeId: string, message: Message, wake: boolean) => Promise<boolean>;
@@ -1808,10 +1810,16 @@ export class Employee {
       const task = this.task(await this.state(), a.id);
       const sessions = [this.busy.get(task.id)?.session, task.workSession, task.computerSession].filter(Boolean);
       const stopped = () => !this.busy.has(task.id) && !sessions.some((session) => this.runtime.isRunning(session));
+      const idle = stopped();
       const deadline = Date.now() + 1500;
       while (!stopped() && Date.now() < deadline) await sleep(25);
       const current = this.task(await this.state(), a.id);
       const executionStopped = stopped() && ended(current.status);
+      // 停在两步之间才做文件检查点。这一轮还在跑就被打断时，不把写到一半的结果当成已确认基线。
+      if (idle && executionStopped) {
+        try { await this.runtime.checkpointWorkspace?.(this.employeeId, task.id); }
+        catch { /* 检查点失败不改变已经停住的任务 */ }
+      }
       return { ...value, id: task.id, status: !executionStopped && current.status === "stopped" ? "stopping" : current.status, executionStopped, next: executionStopped ? "任务执行已结束；已提交的外部作业或已发生的操作不代表已撤销，不能承诺回滚" : "停止请求已发出，但当前尚不能确认执行已结束；不能宣称已经停止，也不要循环查询" };
     }
     // A reply typed in the chat window is already visible there; only replies made elsewhere (task detail, work panel) are echoed as a quoted bubble.
