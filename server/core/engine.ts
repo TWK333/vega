@@ -350,6 +350,7 @@ export class Engine {
       run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal),
       cancel: (s) => this.cancel(s),
       isRunning: (s) => this.active.has(s),
+      steer: (session, message) => this.steer(session, message),
       taskFinished: (id) => this.taskTabs.finish(id),
       holdTaskCleanup: (id) => this.taskTabs.hold(id),
       emit: (type, data, session?) => this.emit({ type, data, session }),
@@ -545,6 +546,46 @@ export class Engine {
     assert(run, "Session not running");
     assert(run.steer.length < 16, "Steer queue full");
     run.steer.push({ ...m, role: "user" });
+  }
+  /** A work supplement already present in a persisted taskInput must not be steered again. */
+  private async admitWorkSteer(session: Session, message: Message) {
+    if (!session.taskId || !message.taskInput?.answer) return true;
+    const snapshot = message.taskInput.answer;
+    const delivered = (await this.store.messages(session.id)).findLast((row) => row.taskInput?.answer !== undefined)?.taskInput?.answer;
+    return !(delivered !== undefined && (delivered === snapshot || delivered.startsWith(snapshot)));
+  }
+  /** Clear the completion guard once this run's transcript actually carries the supplement. */
+  private async consumeWorkSteer(session: Session, message: Message) {
+    if (!session.taskId || !session.employeeId || message.taskInput?.answer === undefined) return;
+    const snapshot = message.taskInput.answer;
+    const employee = await this.employeeFor(session);
+    await employee.update((state) => {
+      const task = state.tasks.find((item) => item.id === session.taskId);
+      if (task?.supplementPending && (task.answer || "") === snapshot) task.supplementPending = false;
+    });
+  }
+  /**
+   * Pull a supplement that was saved before this session was active into the steer queue.
+   * Control() steers when it can; this covers the gap and does not enqueue a second copy.
+   */
+  private async queuePendingSupplement(session: Session, steer: Message[]) {
+    if (!session.taskId || !session.employeeId || steer.length >= 16) return;
+    const employee = await this.employeeFor(session);
+    const task = await employee.findTask(session.taskId);
+    const snapshot = task?.answer || "";
+    if (!task?.supplementPending || !snapshot) return;
+    if (steer.some((message) => message.taskInput?.answer === snapshot)) return;
+    const delivered = (await this.store.messages(session.id)).findLast((row) => row.taskInput?.answer !== undefined)?.taskInput?.answer;
+    if (delivered !== undefined && (delivered === snapshot || delivered.startsWith(snapshot))) {
+      await employee.update((state) => {
+        const current = state.tasks.find((item) => item.id === session.taskId);
+        if (current?.supplementPending && (current.answer || "") === snapshot) current.supplementPending = false;
+      });
+      return;
+    }
+    if (steer.some((message) => message.taskInput?.answer === snapshot)) return;
+    const delta = delivered !== undefined && snapshot.startsWith(delivered) ? snapshot.slice(delivered.length).trim() : snapshot.trim();
+    if (delta) steer.push({ role: "user", text: delta, taskInput: { answer: snapshot } });
   }
   async submitChat(session: string, message: Message) {
     const send = async () => {
@@ -1078,11 +1119,14 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         (await this.store.messages(key)).findLast((m) => m.role === "user")?.seq || 0;
       while (true) {
         control.signal.throwIfAborted();
+        await this.queuePendingSupplement(session, state.steer);
         for (const m of state.steer.splice(0)) {
+          if (!(await this.admitWorkSteer(session, m))) continue;
           hop = Math.max(hop, m.hop || 0);
           answered = false;
           tools.actorId = m.actorId;
           await this.store.append(key, redactMessage({ ...m, runtime: "steer" }, redact));
+          await this.consumeWorkSteer(session, m);
           memoryQuery = await recentAsk();
           await reinforceMemory();
           emit("steer", m);
@@ -1537,6 +1581,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         while (state.steer.length) {
           for (const m of state.steer.splice(0)) {
             try {
+              // Work supplements stay on the task. Relaunching here would race employee.run, which still owns this turn.
+              if (session?.taskId && m.taskInput?.answer !== undefined) continue;
               await this.store.append(key, redactMessage({ ...m, runtime: "steer" }, redact));
               emit("steer", m);
               continued.push(m);
