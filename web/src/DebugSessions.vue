@@ -4,12 +4,15 @@ import EmployeeSessionView from "./EmployeeSessionView.vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
 import { formatBeijing } from "../../shared/time";
+import { taskLabel, taskTone } from "./task-status";
+import { groupDebugSessions, visibleDebugSessions } from "./debug-sessions.js";
 const props = defineProps({ api: Function, revision: Number, tab: String });
 const emit = defineEmits(["tab"]);
 const sessions = ref([]), selected = ref(""), employee = ref(""), search = ref(""), busy = ref(false), error = ref("");
 const labels = { chat: "沟通会话", group: "群聊会话", narrator: "旁白会话", work: "主执行会话", computer: "浏览器会话" };
-const employees = computed(() => [...new Map(sessions.value.map((session) => [session.employeeId, session.employeeName])).entries()]);
-const visible = computed(() => sessions.value.filter((session) => (!employee.value || session.employeeId === employee.value) && (!search.value || [session.id, session.title, session.taskText, session.employeeName].join(" ").toLowerCase().includes(search.value.toLowerCase()))));
+const employees = computed(() => [...new Map(sessions.value.filter((session) => session.employeeId).map((session) => [session.employeeId, session.employeeName])).entries()]);
+const visible = computed(() => visibleDebugSessions(sessions.value, { employeeId: employee.value, query: search.value }));
+const groups = computed(() => groupDebugSessions(visible.value));
 let disposed = false, version = 0;
 async function refresh() {
   const current = ++version; busy.value = true; error.value = "";
@@ -32,18 +35,29 @@ onBeforeUnmount(() => { disposed = true; version++; });
       </PageHeader>
       <div class="debug-filters">
         <select v-model="employee" aria-label="牛马"><option value="">全部牛马</option><option v-for="[id, name] in employees" :key="id" :value="id">{{ name }}</option></select>
-        <label class="search"><Icon name="search" :size="14" /><input v-model="search" aria-label="查找会话" placeholder="会话 ID、标题或任务" /></label>
+        <label class="search"><Icon name="search" :size="14" /><input v-model="search" aria-label="按任务 ID、任务内容、会话 ID、标题或牛马查找" placeholder="任务 ID、任务内容或会话" /></label>
       </div>
       <p class="debug-count">{{ visible.length }} 个真实会话</p>
       <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span></p>
       <div class="debug-list">
-        <p v-if="!visible.length" class="empty-state">{{ busy ? '正在读取…' : '没有匹配的牛马会话' }}</p>
-        <button v-for="session in visible" :key="session.id" type="button" class="debug-session" :class="{ selected: selected === session.id }" :aria-current="selected === session.id ? 'true' : undefined" @click="selected = session.id">
-          <span class="debug-row"><strong>{{ session.employeeName }}</strong><span :class="['badge', session.kind === 'work' ? 'info' : '']">{{ labels[session.kind] }}</span><span v-if="session.running" class="badge ok"><span class="dot ok pulse"></span>执行中</span><time>{{ formatBeijing(session.createdAt) }}</time></span>
-          <span class="debug-title">{{ session.title }}</span>
-          <span v-if="session.taskText" class="debug-task">{{ session.taskText }}</span>
-          <span class="debug-row debug-secondary"><code>{{ session.id }}</code><span>{{ session.scene || 'lightweight' }} · {{ session.model || '默认模型' }}</span><span>{{ session.localAgent ? '客户端 · ' + (session.clientName || session.clientId) : '服务端' }}</span></span>
-        </button>
+        <p v-if="!groups.length" class="empty-state">{{ busy ? '正在读取…' : '没有匹配的牛马会话' }}</p>
+        <section v-for="group in groups" :key="group.key" class="debug-group" :class="{ loose: !group.taskId }" :aria-label="group.taskId ? '任务 ' + group.taskId : group.label">
+          <header class="debug-group-head">
+            <span class="debug-group-title"><strong :title="group.taskText || undefined">{{ group.taskId ? (group.taskText || '（无任务内容）') : group.label }}</strong><span class="count" :aria-label="group.sessions.length + ' 个会话'">{{ group.sessions.length }}</span></span>
+            <span class="debug-group-meta">
+              <template v-if="group.taskId">
+                <code>{{ group.taskId }}</code>
+                <span v-if="group.taskStatus" :class="['badge', taskTone(group.taskStatus)]"><span :class="['dot', taskTone(group.taskStatus), { pulse: group.taskStatus === 'running' }]" aria-hidden="true"></span>{{ taskLabel(group.taskStatus) }}</span>
+              </template>
+              <span v-else>未关联任务</span>
+            </span>
+          </header>
+          <button v-for="session in group.sessions" :key="session.id" type="button" class="debug-session" :class="{ selected: selected === session.id }" :aria-current="selected === session.id ? 'true' : undefined" @click="selected = session.id">
+            <span class="debug-row"><strong>{{ session.employeeName }}</strong><span :class="['badge', session.kind === 'work' ? 'info' : '']">{{ labels[session.kind] }}</span><span v-if="session.running" class="badge ok"><span class="dot ok pulse"></span>执行中</span><time>{{ formatBeijing(session.createdAt) }}</time></span>
+            <span class="debug-title">{{ session.title }}</span>
+            <span class="debug-row debug-secondary"><code>{{ session.id }}</code><span>{{ session.scene || 'lightweight' }} · {{ session.model || '默认模型' }}</span><span>{{ session.localAgent ? '客户端 · ' + (session.clientName || session.clientId) : '服务端' }}</span></span>
+          </button>
+        </section>
       </div>
     </section>
     <section class="debug-detail-pane" aria-label="会话记录">
@@ -63,7 +77,16 @@ onBeforeUnmount(() => { disposed = true; version++; });
 .search input { width: 100%; padding-left: 28px; }
 .debug-count { flex: none; padding: 8px 14px 4px; color: var(--muted); font-size: 11px; }
 .debug-list-pane > .banner { flex: none; }
-.debug-list { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 8px 16px; scrollbar-width: thin; }
+.debug-list { flex: 1; min-height: 0; overflow-y: auto; padding: 0 0 16px; scrollbar-width: thin; }
+.debug-group { padding: 4px 8px 2px; }
+.debug-group + .debug-group { margin-top: 14px; padding-top: 8px; border-top: 1px solid var(--border-strong); }
+.debug-group-head { position: sticky; top: 0; z-index: 1; display: grid; gap: 3px; margin: 0 -8px 4px; padding: 8px 20px 8px 17px; border-bottom: 1px solid var(--border); border-left: 3px solid var(--accent); background: var(--surface); box-shadow: var(--sh-xs); }
+.debug-group.loose .debug-group-head { border-left-color: var(--muted); }
+.debug-group-title { display: flex; align-items: flex-start; gap: 8px; min-width: 0; }
+.debug-group-title strong { display: -webkit-box; overflow: hidden; flex: 1; min-width: 0; color: var(--text); font-size: 13px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.debug-group-title .count { margin-top: 1px; }
+.debug-group-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; min-width: 0; color: var(--muted); font-size: 11px; }
+.debug-group-meta code { font-size: 10px; overflow-wrap: anywhere; user-select: text; }
 .debug-session { display: grid; justify-content: stretch; gap: 4px; width: 100%; height: auto; margin-bottom: 4px; padding: 10px 12px; border: 1px solid transparent; border-radius: var(--r-md); background: transparent; font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .debug-session:hover:not(:disabled) { background: var(--surface); border-color: var(--border); }
 .debug-session.selected { background: var(--surface); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
@@ -71,7 +94,6 @@ onBeforeUnmount(() => { disposed = true; version++; });
 .debug-row strong { font-weight: 600; }
 .debug-row time { margin-left: auto; color: var(--muted); font-size: 11px; }
 .debug-title { color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.45; }
-.debug-task { display: -webkit-box; overflow: hidden; color: var(--text-2); font-size: 12px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .debug-secondary { gap: 4px 10px; color: var(--muted); font-size: 11px; }
 .debug-secondary code { font-size: 10px; user-select: text; }
 .debug-placeholder { display: grid; align-content: center; justify-items: center; gap: 6px; flex: 1; color: var(--muted); font-size: 12px; }
