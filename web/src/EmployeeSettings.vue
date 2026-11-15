@@ -8,10 +8,10 @@ const emit = defineEmits(["save", "delete", "reset", "avatar", "cancel"]);
   <div class="page-scroll settings-page">
     <div class="settings-grid">
       <form class="card profile" @submit.prevent="emit('save')">
-        <div class="card-head"><h3>牛马资料</h3><p class="hint">保存后，新任务会使用更新的工作原则。</p></div>
+        <div class="card-head"><h3>牛马资料</h3><p class="hint">私有工作原则只属于这只牛马，会接在公共工作原则之后，不会替换或隐藏公共内容。保存后，新任务会使用更新后的原则。</p></div>
         <div class="form-grid">
           <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
-          <label>工作原则<textarea v-model="employee.instruction" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
+          <label>私有工作原则<textarea v-model="employee.instruction" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
         </div>
         <div class="actions end form-actions"><button type="button" class="ghost" @click="emit('cancel')">返回对话</button><button class="primary" :disabled="saving">{{ saving ? '保存中…' : '保存修改' }}</button></div>
       </form>

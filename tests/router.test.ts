@@ -10,7 +10,7 @@ test("router: paths round-trip through parse and format, tabs and selected items
   const paths = [
     "/employees/e1", "/employees/e1/tasks", "/employees/e1/tasks/t1", "/employees/e1/sessions/s1", "/employees/e1/settings",
     "/employees/e1/memories", "/employees/new", "/groups/g1", "/groups/new",
-    "/groups/new", "/chat", "/chat/s1", "/resources", "/settings", "/settings/scenes", "/settings/external-mcp", "/debug", "/debug/s9", "/experiences/r1", "/account",
+    "/groups/new", "/chat", "/chat/s1", "/resources", "/settings", "/settings/scenes", "/settings/external-mcp", "/settings/principles", "/debug", "/debug/s9", "/experiences/r1", "/account",
     "/employees/%E7%89%9B%20%2F1",
   ];
   for (const path of paths) assert.equal(formatRoute(parseRoute(path)), path, path);
@@ -105,7 +105,7 @@ test("App routing: refresh restores page and tab; tab and page switches push; ba
 
 test("App routing: unknown or forbidden ids and pages fall back to the default view with replaceState; old links normalize", async () => {
   for (const [href, path] of [
-    ["https://vega.test/groups/gone", "/employees/ea"], ["https://vega.test/settings/scenes", "/settings"],
+    ["https://vega.test/groups/gone", "/employees/ea"], ["https://vega.test/settings/scenes", "/settings"], ["https://vega.test/settings/principles", "/settings"],
     ["https://vega.test/employees/hidden/tasks", "/employees/ea/tasks"], ["https://vega.test/employees/ea/vault", "/employees/ea"],
     ["https://vega.test/?employee=eb", "/employees/eb"], ["https://vega.test/nope", "/employees/ea"], ["https://vega.test/", "/employees/ea"],
   ]) {
@@ -115,4 +115,6 @@ test("App routing: unknown or forbidden ids and pages fall back to the default v
   const own = await boot("https://vega.test/settings/external-mcp");
   assert.deepEqual([own.c.view.value, own.c.pageSub.value, own.location.pathname], ["settings", "external-mcp", "/settings/external-mcp"]);
   assert.deepEqual(own.history, [], "a non-admin keeps their own 对外 MCP settings address");
+  const adminPrinciples = await boot("https://vega.test/settings/principles", { admin: true });
+  assert.deepEqual([adminPrinciples.c.view.value, adminPrinciples.c.pageSub.value, adminPrinciples.location.pathname], ["settings", "principles", "/settings/principles"]);
 });

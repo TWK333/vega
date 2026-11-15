@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import ProviderSettings from "./ProviderSettings.vue";
 import SceneSettings from "./SceneSettings.vue";
 import SchedulerSettings from "./SchedulerSettings.vue";
+import WorkPrinciplesSettings from "./WorkPrinciplesSettings.vue";
 import ExternalMcpSettings from "./ExternalMcpSettings.vue";
 import VaultSettings from "./VaultSettings.vue";
 import PageHeader from "./PageHeader.vue";
@@ -17,8 +18,8 @@ const props = defineProps({
   employees: Array,
 });
 const emit = defineEmits(["saved", "error", "notice", "tab"]);
-// 每个账号都有自己的设置页（密码本、对外 MCP）；模型服务商、场景模型和任务调度只有管理员能改。
-const ADMIN_SECTIONS = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["scheduler", "任务调度", "tasks", "全站与单牛马并发上限"], ["external-mcp", "对外 MCP", "plug", "把外部客户端接到你自己的牛马和群聊"], ["vault", "密码本", "key", "加密保存的账号、密钥和 SSH 私钥，可指定适用的牛马"]];
+// 每个账号都有自己的设置页（密码本、对外 MCP）；模型服务商、场景模型、任务调度和公共工作原则只有管理员能改。
+const ADMIN_SECTIONS = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["scheduler", "任务调度", "tasks", "全站与单牛马并发上限"], ["principles", "公共工作原则", "scroll", "全局公共工作原则，对所有牛马生效"], ["external-mcp", "对外 MCP", "plug", "把外部客户端接到你自己的牛马和群聊"], ["vault", "密码本", "key", "加密保存的账号、密钥和 SSH 私钥，可指定适用的牛马"]];
 const PERSONAL_SECTIONS = [["vault", "密码本", "key", "加密保存的账号、密钥和 SSH 私钥，可指定适用的牛马"], ["external-mcp", "对外 MCP", "plug", "把外部客户端接到你自己的牛马和群聊"]];
 const sections = computed(() => props.admin ? ADMIN_SECTIONS : PERSONAL_SECTIONS);
 const first = computed(() => props.admin ? "providers" : "vault");
@@ -40,6 +41,7 @@ watch(section, (id) => { if (id !== (props.tab || first.value)) emit("tab", id =
         <div :hidden="section !== 'providers'"><ProviderSettings :api="api" :config="config" :user-id="userId" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
         <div :hidden="section !== 'scenes'"><SceneSettings :api="api" :config="config" :models="models" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
         <div :hidden="section !== 'scheduler'"><SchedulerSettings :api="api" :config="config" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
+        <div :hidden="section !== 'principles'"><WorkPrinciplesSettings :api="api" :config="config" @saved="emit('saved', $event)" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
       </template>
       <div :hidden="section !== 'external-mcp'"><ExternalMcpSettings :api="api" :employees="employees || []" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
       <div :hidden="section !== 'vault'"><VaultSettings :api="api" :user-id="userId" :employees="employees || []" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
