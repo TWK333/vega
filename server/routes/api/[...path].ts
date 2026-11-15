@@ -1,6 +1,5 @@
 import { updateEmployeeAvatar, updateUserAvatar } from "../../core/employee-avatar";
 import { chatHistory } from "../../core/chat-page";
-import { prepareDutyInput } from "../../core/duty-condition";
 import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
 import {
   browserTabs,
@@ -328,7 +327,8 @@ export default defineEventHandler(async (event) => {
         check(false, 404, "Browser route not found");
       }
       if (path[2] === "control" && method === "POST") {
-        if (["settings", "fire"].includes(a.action)) check(await employee.manageable(user), 403, "只有牛马管理者可以修改设置或触发职责");
+        if (a.action === "settings") check(await employee.manageable(user), 403, "只有牛马管理者可以修改设置");
+        if (a.action === "fire") check(false, 400, "职责配置已移除");
         return employee.control(a);
       }
       if (path[2] === "transcript" && method === "POST") return await employee.transcript(a.threadId);
@@ -337,10 +337,10 @@ export default defineEventHandler(async (event) => {
         return { ...visible, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
-        if (!await employee.manageable(user)) check(a.action === "list" || a.action === "memory_search" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改职责、记忆和凭据");
+        if (!await employee.manageable(user)) check(a.action === "list" || a.action === "memory_search" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改记忆和凭据");
         // Same owner-only rule as the vault page: managing an employee does not open its vault.
         if (typeof a.action === "string" && a.action.startsWith("vault_")) check(await canConfigureEmployee(employee, user), 403, "只有牛马创建者可以使用它的密码本条目");
-        const result = await employee.execute("", await prepareDutyInput(engine, employee, a));
+        const result = await employee.execute("", a);
         return result.secret ? JSON.parse(result.secret) : result.value;
       }
       check(false, 404, "Employee route not found");

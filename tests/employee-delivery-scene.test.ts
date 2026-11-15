@@ -58,7 +58,7 @@ test("replanned task checks the original outline, waits for clarification, then 
     { content: "开发并验证", status: "pending" },
   ];
   try {
-    await employee.execute("", { action: "add", kind: "duty", text: "需求有疑问先在对应单中联系创建人", manual: true });
+    await employee.control({ action: "settings", instruction: "需求有疑问先在对应单中联系创建人" });
     const job = await add("澄清需求后开发并验证");
     engine.providers.chat = async (_model, _system, messages) => {
       phase++;

@@ -29,7 +29,7 @@ async function running(employee: Employee, id: string) {
 test("计划可删改和合并，但不能通过删掉未完成步骤直接交付", async () => {
   const { store, employee, id } = await fixture();
   try {
-    await employee.execute("", { action: "add", kind: "duty", text: "疑问先在需求单澄清", manual: true });
+    await employee.control({ action: "settings", instruction: "疑问先在需求单澄清" });
     await running(employee, id);
     await employee.execute(id, { action: "progress", text: "已读需求", plan });
     const changed = [plan[0], { content: "建议用户澄清", status: "completed" }];
@@ -38,7 +38,7 @@ test("计划可删改和合并，但不能通过删掉未完成步骤直接交�
     const reminder = await employee.execute(id, delivery);
     assert.equal(reminder.value.code, "outline_review_required");
     assert.match(reminder.value.task, /先在需求单联系创建人/);
-    assert(reminder.value.duties.some((d: any) => d.text.includes("需求单澄清")));
+    assert.match(reminder.value.principles, /需求单澄清/);
     assert.deepEqual(reminder.value.changedSteps, plan.slice(1).map(step => step.content));
     const incomplete = await employee.execute(id, { ...delivery, outlineReview: unmet(plan[1]) });
     assert.equal(incomplete.value.code, "outline_review_incomplete");
@@ -210,11 +210,11 @@ test("部分交付走待批准通知，不能作为已完成发送", async () =>
   } finally { employee.close(); await store.close(); }
 });
 
-test("澄清等待多次续做保留原任务、职责和外部回执，不重新提交", async () => {
+test("澄清等待多次续做保留原任务、工作原则和外部回执，不重新提交", async () => {
   const { store, employee, runtime, id } = await fixture();
   let phase = 0;
   try {
-    await employee.execute("", { action: "add", kind: "duty", text: "需求有疑问时在原单联系创建人，多轮澄清后开发", manual: true });
+    await employee.control({ action: "settings", instruction: "需求有疑问时在原单联系创建人，多轮澄清后开发" });
     runtime.run = async (session, prompt, _signal, input) => {
       phase++;
       assert.match(prompt, /原始任务/);
