@@ -1389,11 +1389,42 @@ export class Chrome {
       return this.feedback(owner, tag, a, op, signal);
     const script = op === "evaluate";
     assert(script || op === "act", "Unknown Chrome operation");
+    let actions: Obj[] = [];
+    const settleMs = a.settleMs ?? 1500;
+    try {
+      assert(Number.isInteger(settleMs) && settleMs >= 0 && settleMs <= 4000, "settleMs must be 0–4000");
+      if (!script) {
+        assert(!(a.action && a.actions), "Use action or actions, not both");
+        const raw = a.actions || [a.action];
+        assert(Array.isArray(raw) && raw.length >= 1 && raw.length <= 16, "Use1–16 actions");
+        actions = raw.map((v: any) => normalizeAction(typeof v === "string" ? JSON.parse(v.replace(/^```(?:json)?\s*|```$/g, "")) : v));
+        for (const action of actions) if (["fill", "type"].includes(action.action)) assertCredentialInput(action.text);
+      }
+    } catch (e: any) {
+      return { status: "not_executed", inputAttempted: false, completedActions: 0, reason: e.message, tabTag: tag, snapshotId: latest()?.id };
+    }
+    // Waiting sends no input and must work before a document or observation exists.
+    if (actions.length && actions.every(action => action.action === "wait")) {
+      const { tabs } = await this.bridge.request("tabs", {}, signal);
+      assert(tabs?.some((tab: Obj) => tab.tag === tag && tab.controllable && tab.allowed !== false), "Unknown or uncontrollable tab");
+      for (const action of actions) await sleep(action.ms, signal);
+      const result: Obj = { status: "executed", inputAttempted: false, completedActions: actions.length, tabTag: tag, verification: "unverified" };
+      try {
+        const feedback: Obj = { ...a, fullPage: false };
+        for (const key of ["ref", "frame", "region", "expandScroll", "tileOffset"]) delete feedback[key];
+        Object.assign(result, await this.feedback(owner, tag, feedback, "inspect", signal));
+      } catch (e: any) { result.observationError = e.message; }
+      return result;
+    }
     let o = latest();
     const automatic = !o;
     if (!o) {
       const tabs = await this.settleNavigation(tag, undefined, signal);
-      assert(!tabs?.some((tab: Obj) => tab.tag === tag && tab.loading), "页面仍在加载，本次操作未执行；请在加载完成后重试");
+      if (tabs?.some((tab: Obj) => tab.tag === tag && tab.loading)) return {
+        status: "not_executed", inputAttempted: false, completedActions: 0, loading: true, tabTag: tag,
+        reason: "页面仍在加载，本次操作未执行",
+        next: "请先用 chrome_inspect 观察当前页面，或用仅含 wait 的 chrome_act 等待后观察；不要盲目重放输入或反复刷新页面。",
+      };
       o = await this.observe(tag, "all", signal);
     }
     if (script) {
@@ -1401,28 +1432,11 @@ export class Chrome {
       assert(Number.isInteger(a.frame ?? 0) && o.frames[a.frame ?? 0], "Unknown frame");
       await this.credentialInput(tag, o.frames[a.frame ?? 0], a.expression, credentials, signal);
     }
-    let actions: Obj[] = [];
-    const settleMs = a.settleMs ?? 1500;
     try {
-      assert(Number.isInteger(settleMs) && settleMs >= 0 && settleMs <= 4000, "settleMs must be 0–4000");
       if (!script) {
-      assert(!(a.action && a.actions), "Use action or actions, not both");
-      const raw = a.actions || [a.action];
-      assert(
-        Array.isArray(raw) && raw.length >= 1 && raw.length <= 16,
-        "Use1–16 actions",
-      );
-      actions = raw.map((v: any) =>
-        normalizeAction(
-          typeof v === "string"
-            ? JSON.parse(v.replace(/^```(?:json)?\s*|```$/g, ""))
-            : v,
-        ),
-      );
-      for (const action of actions) if (["fill", "type"].includes(action.action)) assertCredentialInput(action.text);
-      if (automatic && a.imageId && actions.some((action) => ["click_at", "move", "drag", "scroll_at"].includes(action.action) || (action.action === "pointer" && action.x !== undefined)))
-        throw Error("当前页面没有可用的原截图，旧图片坐标未执行；请按当前页面截图重新定位");
-      await this.preflight(o, actions, a, cwd);
+        if (automatic && a.imageId && actions.some((action) => ["click_at", "move", "drag", "scroll_at"].includes(action.action) || (action.action === "pointer" && action.x !== undefined)))
+          throw Error("当前页面没有可用的原截图，旧图片坐标未执行；请按当前页面截图重新定位");
+        await this.preflight(o, actions, a, cwd);
       }
     } catch (e: any) {
       return {

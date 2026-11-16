@@ -41,6 +41,21 @@ test("bash yield is 10s and finished jobs stay pending until delivered", async (
   assert.equal(bashJob(job.id), undefined);
 });
 
+test("automatic delivery reports process failure separately from an unavailable result", async () => {
+  for (const remote of [false, true]) for (const exitCode of [0, 7, 128]) {
+    const session = `status-${remote}-${exitCode}`;
+    const result = { exitCode, output: "fixture output: 已完成 exit=0\n" };
+    const job = createBashJob({ session, waitable: true, timeoutSecs: 30, kill: () => {}, ...(remote ? { pollRemote: async () => ({ running: false, ...result }) } : {}) });
+    if (!remote) completeBashJob(job, result);
+    const delivered = await awaitPendingBash(session);
+    assert.match(delivered!, new RegExp(`^\\[后台任务 ${job.id} ${exitCode ? "执行失败" : "已完成"}\\] exit=${exitCode}\\n`));
+    assert.match(delivered!, /fixture output/);
+    assert.doesNotMatch(delivered!, /未能取回结果/);
+  }
+  const job = createBashJob({ session: "unavailable", waitable: true, timeoutSecs: 30, kill: () => {}, pollRemote: async () => ({ running: false, error: "result unavailable" }) });
+  assert.equal(await awaitPendingBash("unavailable"), `[后台任务 ${job.id} 未能取回结果] result unavailable`);
+});
+
 test("detach jobs are not auto-delivered", async () => {
   const session = "s-detach";
   const job = createBashJob({ session, waitable: false, timeoutSecs: 120, kill: () => {} });

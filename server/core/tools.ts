@@ -476,6 +476,7 @@ export class Tools {
   }
   private async executeInner(call: Call, model: Model): Promise<Outcome> {
     this.signal.throwIfAborted();
+    assert(!Object.hasOwn(call.arguments || {}, "__invalidJson"), "工具参数不是合法 JSON 对象，本次调用未执行。请修正 __invalidJson 中的原始参数后重新调用；字符串值必须加双引号（如 \"none\"），不要重放已成功的工具调用。");
     const definition = (await this.definitions(model)).find((t) => t.name === call.name);
     assert(definition, "Tool unavailable in this scene");
     if (CHROME_TOOLS.has(call.name)) this.assertBrowserScene(call.name);
@@ -694,12 +695,16 @@ export class Tools {
     this.refuseSecrets(tool, { text: a.text, condition: a.condition, summary: a.summary, note: a.note, plan: a.plan, stepOutput: a.stepOutput, outlineReview: a.outlineReview }, publicArgs);
     const employee = await this.engine.employeeFor(this.session);
     const source = this.session.employeeId && !this.session.taskId ? (await this.engine.store.messages(this.session.id)).findLast((message) => message.role === "user") : undefined;
-    const taskLink = async (id: string, replace = false) => {
-      if (source?.seq) await employee.update((state) => {
+    const taskLink = async (id: string, replace = false, existing = false) => {
+      if (existing && source?.group && !source.group.byOwner) {
+        const task = employee.task(await employee.state(), id);
+        assert(task.group?.groupId === source.group.groupId, "已有任务不属于本群，不能通过去重键接管或公开");
+      }
+      if (source?.seq && !existing) await employee.update((state) => {
               const task = employee.task(state, id);
               if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
-              // Work started from a group message reports back to that group (Employee.toChat), as asked by its sender.
-              if (source.group && (replace || !task.group)) task.group = { groupId: source.group.groupId, name: source.group.name, hop: source.hop || 0, requester: source.group.from, byOwner: source.group.byOwner };
+              // A follow-up changes its source message, not the original task requester's authority.
+              if (source.group && !task.group) task.group = { groupId: source.group.groupId, name: source.group.name, hop: source.hop || 0, requester: source.group.from, byOwner: source.group.byOwner };
               // The message's images and files go with the work (its next run receives the ones it has not seen).
               const images = (source.images || []).filter((x) => x.blobId), files = source.files || [];
               if (images.length || files.length) {
@@ -717,6 +722,16 @@ export class Tools {
     if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；长期记忆只有主人能用`);
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
       const task = employee.task(await employee.state(), a.id);
+      if (source?.group && !source.group.byOwner) {
+        const requester = source.group.from;
+        if (requester.kind === "user") {
+          const access = await this.engine.groups.task({ id: requester.id, role: "operator" }, source.group.groupId, employee.employeeId, task.id);
+          assert(access.canControl, "只有任务发起人和牛马归属人可以操作此任务");
+        } else {
+          const group = await this.engine.groups.get(source.group.groupId);
+          assert(group?.employees.some((member) => member.id === requester.id) && task.group?.groupId === source.group.groupId && task.group.requester.id === requester.id && task.group.requester.kind === "employee", "牛马只能操作自己发起的群任务");
+        }
+      }
       // shortcut: 没有客户端消息ID时用序号与毫秒时间区分清空后的消息；需严格跨清空幂等时改用持久消息ID。
       const sourceId = source?.seq ? `${this.session.id}:${source.clientMessageId ? `${source.actorId || ""}:${source.clientMessageId}` : `${source.seq}:${source.at || 0}`}` : undefined;
       const value = await employee.control(a, undefined, false, sourceId);
@@ -741,7 +756,7 @@ export class Tools {
       if (credential.type === "ssh_key") return { value: await this.sshKey(credential) };
       result.secret = JSON.stringify({ ...credential, scopeSite: scope });
     }
-    return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? await taskLink(result.value.id) : undefined };
+    return { value: result.value, stop: result.stop, secret: result.secret, task: source && a.action === "add" && a.kind === "todo" ? await taskLink(result.value.id, false, result.value.exists === true) : undefined };
   }
   /** Chrome tools are listed in every scene but only run in the computer scene; no automatic switch or relay. */
   private assertBrowserScene(tool = "chrome_*") {

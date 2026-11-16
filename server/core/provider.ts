@@ -518,8 +518,8 @@ export class Providers {
     emit: Emit = () => {},
     session = "",
     cacheKey?: string,
-    // Only conversation turns can return an error receipt; one-shot model judges stay strict.
-    deferUndeclared = false,
+    // Only conversation turns can return tool-error receipts; one-shot model judges stay strict.
+    deferToolErrors = false,
   ): Promise<Message> {
     const promptCacheKey = cacheKey || session;
     const { path, body } = await bodyFor(
@@ -537,7 +537,7 @@ export class Providers {
         model.options.__devinVersion || "3000.11.228",
         signal,
         emit,
-        deferUndeclared,
+        deferToolErrors,
       ));
     const headers: Obj = {
       "Content-Type": "application/json",
@@ -729,7 +729,7 @@ export class Providers {
     };
     if (!response.headers.get("content-type")?.includes("text/event-stream")) {
       const data = JSON.parse((await bounded(response)).toString());
-      result = this.jsonResult(model, data);
+      result = this.jsonResult(model, data, deferToolErrors);
       complete = true;
     } else {
       for await (const frame of sse(response, signal)) {
@@ -918,13 +918,13 @@ export class Providers {
           f.id = callID("duplicate|" + f.id + "|" + index);
         assert(!seen.has(f.id), "Duplicate tool call");
         seen.add(f.id);
-        const args = nativeArguments(f.args);
+        const args = nativeArguments(f.args, deferToolErrors);
         assert(
           args && typeof args === "object" && !Array.isArray(args),
           "Tool arguments must be a complete JSON object",
         );
         assert(
-          deferUndeclared || tools.some((t) => t.name === f.name),
+          deferToolErrors || tools.some((t) => t.name === f.name),
           "Provider returned undeclared tool",
         );
         calls.push({ id: f.id, name: f.name, arguments: args });
@@ -947,7 +947,7 @@ export class Providers {
         typeof call.id === "string" && call.id &&
           typeof call.name === "string" && call.name && call.name.length <= 256 &&
           call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments) &&
-          (deferUndeclared || tools.some((t) => t.name === call.name)) &&
+          (deferToolErrors || tools.some((t) => t.name === call.name)) &&
           !seenCalls.has(call.id),
         "Invalid/duplicate/undeclared tool call",
       );
@@ -967,7 +967,7 @@ export class Providers {
     }
     return result;
   }
-  jsonResult(model: Model, data: Obj): Message {
+  jsonResult(model: Model, data: Obj, deferToolErrors = false): Message {
     const r: Message = {
       role: "assistant",
       text: "",
@@ -1010,7 +1010,7 @@ export class Providers {
           r.calls!.push({
             id: p.call_id,
             name: p.name,
-            arguments: JSON.parse(p.arguments),
+            arguments: nativeArguments(p.arguments, deferToolErrors),
           });
         for (const c of p.content || [])
           if (c.type === "output_text") r.text += c.text;
@@ -1027,10 +1027,12 @@ export class Providers {
       r.calls = (m.tool_calls || []).map((c: Obj) => ({
         id: c.id,
         name: c.function.name,
-        arguments: JSON.parse(c.function.arguments),
+        arguments: nativeArguments(c.function.arguments, deferToolErrors),
       }));
     }
-    for (const call of r.calls!)
+    for (const call of r.calls!) {
+      if (deferToolErrors && (!call.arguments || typeof call.arguments !== "object" || Array.isArray(call.arguments)))
+        call.arguments = { __invalidJson: JSON.stringify(call.arguments) ?? "" };
       assert(
         call.id &&
           call.name &&
@@ -1038,6 +1040,7 @@ export class Providers {
           !Array.isArray(call.arguments),
         "Invalid tool call",
       );
+    }
     return r;
   }
 }

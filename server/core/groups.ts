@@ -1,5 +1,6 @@
 import type { Engine } from "./engine";
-import { ended, type Employee, type GroupAuthor, type TaskGroup } from "./employee";
+import { ended, type Employee, type GroupAuthor, type Task, type TaskGroup } from "./employee";
+import { check } from "./auth";
 import type { Message, Session } from "./store";
 import { nameKey, parseMentions } from "./names";
 import { assert, id, type Obj } from "./util";
@@ -371,27 +372,51 @@ export class Groups {
     if (!message.stepOutput) this.store.afterCommit(() => void this.dispatch(group.id, saved, extra).catch((error) => this.report(group.id, error)));
     return true;
   }
-  /**
-   * The group's 工作面板: tasks started from this group, by current member employee. Each member's list puts what needs
-   * someone first (waiting/approval), then running, queued, and the most recent ended ones. The owner of an employee
-   * gets the full task (and opens it in the employee view); other members see what the group may see: no execution
-   * sessions, location or memory suggestions.
-   */
+  private canControlTask(viewer: Viewer, ownerId: string, task: Task) {
+    return viewer.role !== "viewer" && (ownerId === viewer.id ||
+      (task.group?.requester.kind === "user" && task.group.requester.id === viewer.id));
+  }
+  private taskView(task: Task, mine: boolean, canControl: boolean): Obj & { canControl: boolean } {
+    const shared = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "partialDelivery", "progress", "plan", "result", "completion", "summary", "checkpoint", "error"];
+    return {
+      ...(mine ? task : Object.fromEntries(shared.filter((key) => key in task).map((key) => [key, task[key]]))),
+      ...(!mine && task.stepOutputs ? { stepOutputs: task.stepOutputs.map(({ step, label, text, files, at }: Obj) => ({ step, label, text, files, at })) } : {}),
+      requester: task.group!.requester,
+      canControl,
+    };
+  }
+  private async taskAccess(viewer: Viewer, groupId: string, employeeId: string, taskId: string) {
+    const group = await this.mine(viewer, groupId);
+    check(group.employees.some((person) => person.id === employeeId), 404, "群任务不存在");
+    const employee = await this.employee(employeeId);
+    check(employee, 404, "群任务不存在");
+    const task = await employee.findTask(taskId);
+    check(task?.group?.groupId === group.id, 404, "群任务不存在");
+    const ownerId = (await employee.profile()).ownerId;
+    return { employee, task: task!, mine: ownerId === viewer.id, canControl: this.canControlTask(viewer, ownerId, task!) };
+  }
+  async task(viewer: Viewer, groupId: string, employeeId: string, taskId: string) {
+    const access = await this.taskAccess(viewer, groupId, employeeId, taskId);
+    return this.taskView(access.task, access.mine, access.canControl);
+  }
+  async controlTask(viewer: Viewer, groupId: string, employeeId: string, taskId: string, input: Obj) {
+    const { employee, canControl } = await this.taskAccess(viewer, groupId, employeeId, taskId);
+    check(canControl, 403, "只有任务发起人和牛马归属人可以操作此任务");
+    check(["stop", "resume", "answer", "approve", "redispatch", "seal", "remove"].includes(input.action), 400, "不支持的群任务操作");
+    const name = (await this.userRows([viewer.id])).get(viewer.id)?.name || "用户";
+    return await employee.control({ id: taskId, action: input.action, text: input.text, approved: input.approved, confirmed: input.confirmed, manual: input.manual }, { token: "", name }, false);
+  }
+  /** Group members read shared task details; only the original requester and employee owner may operate them. */
   async tasks(viewer: Viewer, groupId: string) {
     const group = await this.mine(viewer, groupId);
     const rank = (status: string) => ["waiting", "approval"].includes(status) ? 0 : ["running", "recovering"].includes(status) ? 1 : ended(status) ? 3 : 2;
-    const SHARED = ["id", "text", "status", "createdAt", "finishedAt", "queueReason", "approval", "waiting", "progress", "plan", "result", "completion", "summary", "checkpoint", "error"];
     const members = [];
     for (const person of (await this.people(group)).filter((p) => p.kind === "employee")) {
       const employee = (await this.employee(person.id))!, mine = person.ownerId === viewer.id;
       const all = (await employee.state()).tasks.filter((t) => t.group?.groupId === group.id)
         .sort((a, b) => rank(a.status) - rank(b.status) || (b.finishedAt || b.createdAt || 0) - (a.finishedAt || a.createdAt || 0));
       const open = all.filter((t) => !ended(t.status)), done = all.filter((t) => ended(t.status));
-      const tasks = [...open, ...done.slice(0, GROUP_TASKS_ENDED)].map((t) => ({
-        ...(mine ? t : Object.fromEntries(SHARED.filter((k) => k in t).map((k) => [k, t[k]]))),
-        ...(!mine && t.stepOutputs ? { stepOutputs: t.stepOutputs.map(({ step, label, text, files, at }: Obj) => ({ step, label, text, files, at })) } : {}),
-        requester: t.group!.requester,
-      }));
+      const tasks = [...open, ...done.slice(0, GROUP_TASKS_ENDED)].map((task) => this.taskView(task, mine, this.canControlTask(viewer, person.ownerId!, task)));
       members.push({ id: person.id, name: person.name, avatar: person.avatar, mine, tasks, endedHidden: Math.max(0, done.length - GROUP_TASKS_ENDED) });
     }
     return { members };

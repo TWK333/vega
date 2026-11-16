@@ -879,6 +879,10 @@ async function groupRoute(path: string[], method: string, a: Obj, user: { id: st
     if (path.length === 4 && method === "DELETE") return await groups.removeEmployee(user, id, path[3]);
   }
   if (path[2] === "tasks" && path.length === 3 && method === "GET") return await groups.tasks(user, id);
+  if (path[2] === "tasks" && path.length === 5) {
+    if (method === "GET") return await groups.task(user, id, path[3], path[4]);
+    if (method === "POST") return await groups.controlTask(user, id, path[3], path[4], a);
+  }
   if (path[2] === "cancel" && method === "POST") return await groups.cancel(user, id, String(a.employeeId || ""));
   throw createError({ statusCode: 404, statusMessage: "Group route not found" });
 }

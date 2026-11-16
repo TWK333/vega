@@ -1,30 +1,70 @@
 <script setup vapor>
-import { computed, ref } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import TaskDetail from "./TaskDetail.vue";
 import { taskLabel, taskTone, planProgress, shortTime } from "./task-status";
 // The group's 工作面板: tasks started from this group, by member employee (GET /groups/:id/tasks, already ordered).
-// The owner opens a task in the employee view; other members read it here.
-const props = defineProps({ members: Array, loading: Boolean });
-const emit = defineEmits(["open", "close"]);
-const selectedKey = ref(null);
-const selected = computed(() => props.members?.find((member) => member.id === selectedKey.value?.member)?.tasks.find((task) => task.id === selectedKey.value?.task));
+// Owners keep their employee workspace; everyone else opens a task-scoped group view.
+const props = defineProps({ members: Array, loading: Boolean, api: Function, groupId: String, focus: Object });
+const emit = defineEmits(["open", "close", "changed"]);
+const selectedKey = ref(null), selected = ref(null), detailLoading = ref(false), error = ref("");
 const requester = (task) => task.requester ? `${task.requester.kind === "employee" ? "牛马" : ""}${task.requester.name}` : "";
 const note = (task) => task.status === "waiting" ? task.waiting : task.status === "approval" ? task.approval : task.progress?.at(-1)?.text || task.queueReason || "";
+let version = 0;
+const taskPath = (key) => `/groups/${encodeURIComponent(props.groupId)}/tasks/${encodeURIComponent(key.member)}/${encodeURIComponent(key.task)}`;
+async function loadDetail() {
+  const current = ++version, key = selectedKey.value;
+  if (!key) { selected.value = null; detailLoading.value = false; return; }
+  detailLoading.value = true; error.value = "";
+  try {
+    const task = await props.api(taskPath(key));
+    if (current === version) selected.value = task;
+  } catch (e) { if (current === version) { selected.value = null; error.value = e.message; } }
+  finally { if (current === version) detailLoading.value = false; }
+}
 function open(member, task) {
   if (member.mine) emit("open", { employeeId: member.id, taskId: task.id });
   else selectedKey.value = { member: member.id, task: task.id };
 }
+async function control(action, text) {
+  const key = selectedKey.value;
+  if (!key || !selected.value?.canControl) return false;
+  if (action === "remove" && !confirm("永久删除此任务记录？")) return false;
+  if (action === "redispatch" && !confirm("重新派发为新任务？此前外部操作不会回滚。")) return false;
+  if (action === "seal" && !confirm("封存此任务？封存后不能再恢复、续做或重新派发，只能查看或删除。")) return false;
+  error.value = "";
+  try {
+    const result = await props.api(taskPath(key), "POST", { action: action === "reject" ? "approve" : action, ...(action === "approve" || action === "reject" ? { approved: action === "approve" } : {}), ...(text ? { text } : {}), ...(action === "redispatch" ? { confirmed: true } : {}), ...(action === "seal" ? { manual: true } : {}) });
+    if (selectedKey.value === key) {
+      if (action === "remove") selectedKey.value = null;
+      else if (action === "redispatch" && result.id) selectedKey.value = { ...key, task: result.id };
+      else await loadDetail();
+    }
+    emit("changed");
+    return true;
+  } catch (e) { if (selectedKey.value === key) error.value = e.message; return false; }
+}
+watch(() => props.focus, (key) => { if (key) selectedKey.value = key; }, { immediate: true });
+watch(selectedKey, (key, previous) => { if (key?.task !== previous?.task || key?.member !== previous?.member) selected.value = null; void loadDetail(); }, { immediate: true });
+watch(() => props.members, () => { if (selectedKey.value) void loadDetail(); });
+onBeforeUnmount(() => { version++; });
 </script>
 <template>
   <aside class="group-work" aria-label="工作面板">
     <header class="panel-head">
-      <button v-if="selected" type="button" class="icon sm" aria-label="返回任务列表" @click="selectedKey = null"><Icon name="back" :size="16" /></button>
+      <button v-if="selectedKey" type="button" class="icon sm" aria-label="返回任务列表" @click="selectedKey = null"><Icon name="back" :size="16" /></button>
       <h3>工作面板</h3>
       <button type="button" class="icon sm" aria-label="收起工作面板" @click="emit('close')"><Icon name="close" :size="16" /></button>
     </header>
-    <div v-if="selected" class="panel-scroll detail"><TaskDetail :task="selected" readonly :act="async () => false" /></div>
+    <p v-if="error" class="banner error" role="alert">{{ error }}</p>
+    <div v-if="selectedKey" class="panel-scroll detail" :aria-busy="detailLoading">
+      <p v-if="detailLoading && !selected" class="panel-empty">正在读取任务…</p>
+      <template v-if="selected">
+        <p class="panel-empty access-note"><Icon name="lock" :size="12" />{{ selected.canControl ? '你可以操作此任务' : '只读 · 仅发起人和牛马归属人可操作' }}</p>
+        <TaskDetail :key="selected.id" :task="selected" :employee-id="selectedKey.member" :readonly="!selected.canControl" :act="control" />
+      </template>
+    </div>
     <div v-else class="panel-scroll">
       <p v-if="loading && !members?.length" class="panel-empty"><span class="spinner" aria-hidden="true"></span>加载中…</p>
       <p v-else-if="!members?.length" class="panel-empty">群里还没有牛马。</p>
@@ -62,5 +102,8 @@ function open(member, task) {
 .mini-progress { display: block; height: 3px; margin-top: 2px; overflow: hidden; border-radius: 2px; background: var(--surface-3); }
 .mini-progress span { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
 .panel-empty { display: flex; gap: 8px; padding: 8px 4px; color: var(--muted); font-size: 12px; line-height: 1.55; }
-@media (max-width: 767px) { .group-work { position: absolute; z-index: 20; top: 52px; right: 0; bottom: 0; width: min(340px, 100%); box-shadow: var(--sh-lg); } }
+.group-work:has(.detail) { width: min(460px, 48%); }
+.panel-scroll.detail :deep(.task-detail) { padding: 12px 16px 20px; min-height: 0; }
+.access-note { align-items: center; margin: 0; padding: 10px 16px 0; }
+@media (max-width: 767px) { .group-work, .group-work:has(.detail) { position: absolute; z-index: 20; top: 52px; right: 0; bottom: 0; width: min(460px, 100%); box-shadow: var(--sh-lg); } }
 </style>

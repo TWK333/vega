@@ -1375,7 +1375,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           return;
         }
         // Delivering from a callee scene would drop the caller's retained work: return first; complete is not executed.
-        if (mainTask && offered.has("task_complete") && reply.calls.length === 1 && reply.calls[0].name === "task_complete") {
+        if (mainTask && offered.has("task_complete") && reply.calls.length === 1 && reply.calls[0].name === "task_complete" && !Object.hasOwn(reply.calls[0].arguments, "__invalidJson")) {
           const caller = frames.findLastIndex((f) => f.resume);
           if (caller >= 0) {
             const [f] = frames.splice(caller);
@@ -1387,7 +1387,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         if (
           offered.has("switch_scene") &&
           reply.calls.length === 1 &&
-          reply.calls[0].name === "switch_scene"
+          reply.calls[0].name === "switch_scene" &&
+          !Object.hasOwn(reply.calls[0].arguments, "__invalidJson")
         ) {
           const call = reply.calls[0],
             a = call.arguments;

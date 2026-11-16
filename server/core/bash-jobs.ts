@@ -299,9 +299,9 @@ export async function awaitPendingBash(
     }
     if (signal?.aborted) return;
     if (done.status === "finished") {
-      return done.error && !/已完成|exit=/.test(done.text)
+      return done.error && done.exitCode === undefined
         ? `[后台任务 ${id} 未能取回结果] ${done.text}`
-        : `[后台任务 ${id} 已完成] exit=${done.exitCode ?? (done.error ? -1 : 0)}${note}\n${done.text}`;
+        : `[后台任务 ${id} ${done.error ? "执行失败" : "已完成"}] exit=${done.exitCode ?? (done.error ? -1 : 0)}${note}\n${done.text}`;
     }
   }
 }

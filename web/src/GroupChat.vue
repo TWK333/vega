@@ -19,6 +19,7 @@ const emit = defineEmits(["changed", "created", "closed", "open-employee", "open
 // Work panel: side-by-side from 768px (GroupWork stops overlaying); drawers stay closed until opened.
 const roomy = () => typeof matchMedia === "function" && matchMedia("(min-width: 768px)").matches;
 const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
+const taskFocus = ref(null);
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
 const members = computed(() => groupMembers(group.value, props.user?.id));
@@ -135,8 +136,9 @@ async function create() {
 }
 function openTask(message, taskId) {
   const author = group.value?.employees.find((e) => e.id === message.author?.id);
-  if (author?.mine) emit("open-task", { employeeId: author.id, taskId });
-  else error.value = "这是其他用户的牛马的任务，只有它的主人能查看详情";
+  if (!author) { error.value = "该牛马已离开群聊，任务请联系它的归属人"; return; }
+  if (author.mine) emit("open-task", { employeeId: author.id, taskId });
+  else { panel.value = false; work.value = true; taskFocus.value = { member: author.id, task: taskId }; }
 }
 // 工作面板: the group's tasks by member, reloaded with the group (task status changes bump the revision too).
 async function loadWork() {
@@ -149,7 +151,7 @@ async function loadWork() {
 function toggleWork() { work.value = !work.value; if (work.value) panel.value = false; }
 watch(panel, (open) => { if (open) work.value = false; });
 watch([work, () => props.groupId], () => { if (work.value) void run(loadWork); }, { immediate: true });
-watch(() => props.groupId, () => { readSeq = 0; group.value = null; messages.value = []; panel.value = false; work.value = roomy(); workMembers.value = []; draft.value = ""; void run(() => load(true)); });
+watch(() => props.groupId, () => { readSeq = 0; group.value = null; messages.value = []; panel.value = false; work.value = roomy(); workMembers.value = []; taskFocus.value = null; draft.value = ""; void run(() => load(true)); });
 watch(() => props.revision, () => { void run(() => load()); void run(loadWork); });
 watch(panel, (open) => { if (open && !directory.value.length) void loadDirectory(); });
 onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadDirectory(); });
@@ -210,7 +212,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
             <p class="composer-hint">@ 牛马让它回复，不 @ 时旁白判断交给谁 · /new 开启新会话 · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
-        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" @open="emit('open-task', $event)" @close="work = false" />
+        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @open="emit('open-task', $event)" @changed="run(loadWork)" @close="work = false" />
         <aside v-if="panel && group" class="group-panel" aria-label="群成员与公告">
           <section>
             <h3>群公告</h3>

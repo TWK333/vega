@@ -345,8 +345,12 @@ test("工作面板 UI: a header button opens it beside the chat; owners open tas
   assert.match(chat, /matchMedia\("\(min-width: 768px\)"\)/, "work panel defaults open when it sits beside the chat");
   assert(!/emit\(["']tab["']\)|:tab=|props\.tab/.test(chat) && !/GROUP_PANELS/.test(await readFile("web/src/router.js", "utf8")), "panels stay local; not in the route");
   assert.match(panel, /if \(member\.mine\) emit\("open", \{ employeeId: member\.id, taskId: task\.id \}\);\r?\n  else selectedKey\.value = \{ member: member\.id, task: task\.id \};/);
-  assert.match(panel, /const selected = computed\(\(\) => props\.members\?\.find/, "open guest detail follows live task updates");
-  assert.match(panel, /<TaskDetail :task="selected" readonly/);
+  assert.match(panel, /watch\(\(\) => props\.members/, "open detail reloads with live task updates");
+  assert.match(panel, /<TaskDetail[^>]*:readonly="!selected\.canControl"/);
+  assert.match(chat, /taskFocus\.value = \{ member: author\.id, task: taskId \}/);
+  assert.doesNotMatch(chat, /只有它的主人能查看详情/);
+  assert.match(panel, /props\.api\(taskPath\(key\), "POST"/);
+  assert.match(panel, /action === "redispatch" && !confirm/);
   assert.match(panel, /\{\{ requester\(task\) \}\} 发起/);
 });
 
@@ -634,6 +638,6 @@ test("旁白 (reported: 「牛马们 起床啦」 got no reply): greetings go to
     assert.match(String(rows[0].text), /牛马们 起床啦/);
     assert.deepEqual(rows.map((m) => m.role), ["user", "assistant", "tool"]);
     const route = readFileSync("server/routes/api/[...path].ts", "utf8");
-    assert(route.includes('kind: "narrator"') && readFileSync("web/src/DebugSessions.vue", "utf8").includes('narrator: "旁白会话"'), "调试会话 lists the 旁白 session");
+    assert(route.includes('kind: "narrator"') && readFileSync("web/src/DebugSessions.vue", "utf8").includes('narrator: "旁白"'), "调试会话 lists the 旁白 session");
   } finally { await close(); }
 });

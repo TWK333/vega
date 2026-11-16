@@ -394,7 +394,13 @@ export class Auth {
   /** A file under Files.root by its path segments (employees/<id>/…, users/<id>/<session>/…, views/<user>/…). */
   async canFile(user: User, parts: string[]) {
     const [kind, owner, bucket] = parts;
-    if (kind === "employees") return await this.canRead(user, { employeeId: owner } as Session);
+    if (kind === "employees") {
+      if (await this.canRead(user, { employeeId: owner } as Session)) return true;
+      const linked = bucket && await this.store.employeeTask(bucket);
+      if (!linked || linked.employee !== owner || !linked.task.group?.groupId) return false;
+      const group = await this.store.object<{ users: string[]; employees: { id: string }[] }>("group", linked.task.group.groupId);
+      return !!group?.users.includes(user.id) && group.employees.some((employee) => employee.id === owner);
+    }
     if (kind === "views") return owner === user.id;
     if (kind !== "users") return false;
     try { return await this.canRead(user, await this.store.session(bucket)); } catch { return false; }

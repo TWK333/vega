@@ -1644,6 +1644,7 @@ export class Employee {
                 createdAt: Date.now(),
                 plan: [],
                 progress: [],
+                group: t.group ? clone(t.group) : undefined,
                 origin: t.id,
               };
               s.tasks.push(copy);

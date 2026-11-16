@@ -114,15 +114,21 @@ export async function jsonRequest(
   assert(r.ok, `HTTP ${r.status} from ${new URL(url).origin}`);
   return JSON.parse((await bounded(r)).toString("utf8"));
 }
-export function nativeArguments(text: string) {
-  let value: any = text ? JSON.parse(text) : {};
-  for (let depth = 0; typeof value === "string" && depth < 3; depth++)
-    value = JSON.parse(value);
-  assert(
-    value && typeof value === "object" && !Array.isArray(value),
-    "Tool arguments must be a complete JSON object",
-  );
-  return value as Obj;
+export function nativeArguments(text: string, deferInvalid = false): Obj {
+  try {
+    let value: any = text ? JSON.parse(text) : {};
+    for (let depth = 0; typeof value === "string" && depth < 3; depth++)
+      value = JSON.parse(value);
+    assert(
+      value && typeof value === "object" && !Array.isArray(value),
+      "Tool arguments must be a complete JSON object",
+    );
+    return value as Obj;
+  } catch (error) {
+    // Like Nova, conversation turns retain bad arguments for a failed tool receipt, never for execution.
+    if (deferInvalid) return { __invalidJson: text };
+    throw error;
+  }
 }
 export function localJSON(file: string, optional = false, max = 4 << 20): Obj {
   try {

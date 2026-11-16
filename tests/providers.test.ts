@@ -202,7 +202,6 @@ test("session turns can report undeclared calls while one-shot provider users st
     { id: 1, function: { name: "unknown", arguments: "{}" } },
     { id: "c", function: { name: 1, arguments: "{}" } },
     { id: "c", function: { name: "x".repeat(257), arguments: "{}" } },
-    { id: "c", function: { name: "unknown", arguments: "42" } },
   ]) {
     const body = JSON.stringify({ choices: [{ message: { tool_calls: [call] }, finish_reason: "tool_calls" }] });
     await assert.rejects(new Providers().chat(model("openai-completions", await http(body, "application/json")), "sys", [], [tool], new AbortController().signal, undefined, "", undefined, true), /Invalid/);

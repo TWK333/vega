@@ -128,7 +128,11 @@ test("a still-loading page and stale refs or screenshot coordinates never send i
   assert.equal(oldImage.status, "not_executed"); assert.match(oldImage.reason, /旧图片坐标未执行/);
   assert(!f.sent.some((item) => item.action === "click" || item.method?.startsWith("Input.")));
   f.chrome.settleNavigation = async () => [{ tag: "tab", loading: true }];
-  await assert.rejects(f.act({ operation: "evaluate", expression: "1", feedback: "none" }), /仍在加载.*未执行/);
+  const loading = await f.act({ operation: "evaluate", expression: "1", feedback: "none" });
+  assert.equal(loading.status, "not_executed");
+  assert.equal(loading.inputAttempted, false);
+  assert.match(loading.reason, /仍在加载.*未执行/);
+  assert.match(loading.next, /chrome_inspect/);
 });
 
 test("automatic reading refuses incomplete documents even when the tab reports loaded", async (t) => {
@@ -146,7 +150,12 @@ test("automatic reading refuses incomplete documents even when the tab reports l
     const observe = f.chrome.observe.bind(f.chrome);
     f.chrome.observe = async (...args) => { observations++; return observe(...args); };
     const args = { operation, expression: "1", actions: [{ action: "press", key: "Enter" }], feedback: "none" };
-    await assert.rejects(f.act(args), /仍在加载.*未执行/, operation + ": " + state);
+    const loading = await f.act(args);
+    assert.equal(loading.status, "not_executed", operation + ": " + state);
+    assert.equal(loading.inputAttempted, false);
+    assert.equal(loading.completedActions, 0);
+    assert.equal(loading.loading, true);
+    assert.match(loading.next, /chrome_inspect/);
     assert(probes > 0, "document readiness was checked");
     assert.equal(observations, 0, "an incomplete document is not used as an automatic observation");
     assert.equal(f.sent.length, 0, "no input is sent");
@@ -157,6 +166,78 @@ test("automatic reading refuses incomplete documents even when the tab reports l
     if (operation === "act") assert.equal(f.sent.filter((item) => item.action === "press").length, 1, "the input is sent once after readiness");
     else assert.equal(f.calls.filter((call) => call.expression?.startsWith("__novaWebview.evaluate(")).length, 1, "the script is evaluated once after readiness");
   }
+});
+
+test("pure waits work while navigation is loading and observe only after waiting", async (t) => {
+  const f = await fixture(t), old = await f.observe();
+  await f.chrome.execute("owner", ".", { operation: "reload", tabTag: "tab", observe: "none" });
+  f.tabs[0].loading = true;
+  f.page.document = "new-document"; f.page.readyState = "loading";
+  f.chrome.settleNavigation = async () => { throw Error("a pure wait must not require a loaded page"); };
+  const observe = f.chrome.observe.bind(f.chrome), started = Date.now();
+  const observed = t.mock.method(f.chrome, "observe", async (...args: Parameters<Chrome["observe"]>) => {
+    assert(Date.now() - started >= 20, "the requested wait precedes observation");
+    return observe(...args);
+  });
+  const result = await f.act({ actions: [{ action: "wait", ms: 30 }, { action: "wait", ms: 0 }] });
+  assert.equal(result.status, "executed");
+  assert.equal(result.completedActions, 2);
+  assert.equal(result.inputAttempted, false);
+  assert.equal(observed.mock.callCount(), 1);
+  assert.equal(f.sent.length, 0);
+  assert.notEqual(result.snapshotId, old.id);
+  assert.equal(f.chrome.observations.get("owner:tab")!.id, result.snapshotId);
+  assert.equal(result.pages[0].document, "new-document");
+  assert.equal(result.pages[0].readyState, "loading", "waiting does not claim the page finished loading");
+});
+
+test("pure waits validate the entire batch and target before waiting or observing", async (t) => {
+  const f = await fixture(t), observe = t.mock.method(f.chrome, "observe");
+  for (const actions of [[], [{ action: "wait", ms: -1 }], [{ action: "wait", ms: 0 }, { action: "wait", ms: 10001 }], [{ action: "wait", ms: 0, unexpected: true }], Array.from({ length: 17 }, () => ({ action: "wait", ms: 0 }))]) {
+    const result = await f.act({ actions });
+    assert.equal(result.status, "not_executed");
+    assert.equal(result.completedActions, 0);
+    assert.equal(result.inputAttempted, false);
+  }
+  assert.equal(f.calls.length, 0);
+  assert.equal(observe.mock.callCount(), 0);
+  for (const blocked of [{ allowed: false }, { controllable: false }, { tag: "other" }]) {
+    const tab = { ...f.tabs[0] }; Object.assign(f.tabs[0], blocked);
+    await assert.rejects(f.act({ action: { action: "wait", ms: 0 } }), /Unknown or uncontrollable tab/);
+    Object.assign(f.tabs[0], tab);
+    delete f.tabs[0].allowed;
+  }
+  assert.equal(observe.mock.callCount(), 0);
+  assert.equal(f.sent.length, 0);
+});
+
+test("wait-plus-input batches still require a ready page and execute no prefix", async (t) => {
+  const f = await fixture(t), observe = t.mock.method(f.chrome, "observe");
+  f.chrome.settleNavigation = async () => [{ tag: "tab", loading: true }];
+  const result = await f.act({ actions: [{ action: "wait", ms: 0 }, { action: "press", key: "Enter" }] });
+  assert.equal(result.status, "not_executed");
+  assert.equal(result.completedActions, 0);
+  assert.equal(result.inputAttempted, false);
+  assert.match(result.next, /chrome_inspect/);
+  assert.equal(observe.mock.callCount(), 0);
+  assert.equal(f.sent.length, 0);
+});
+
+test("pure waits preserve cancellation and distinguish failed observation from failed input", async (t) => {
+  const f = await fixture(t), control = new AbortController();
+  const timer = setTimeout(() => control.abort(), 20);
+  t.after(() => clearTimeout(timer));
+  const observe = t.mock.method(f.chrome, "observe");
+  await assert.rejects(f.chrome.execute("owner", ".", { operation: "act", tabTag: "tab", actions: [{ action: "wait", ms: 1000 }] }, control.signal), /abort/i);
+  assert.equal(observe.mock.callCount(), 0);
+  f.chrome.observe = async () => { throw Error("fixture observation failed"); };
+  const result = await f.act({ action: { action: "wait", ms: 0 } });
+  assert.equal(result.status, "executed");
+  assert.equal(result.completedActions, 1);
+  assert.equal(result.inputAttempted, false);
+  assert.equal(result.observationError, "fixture observation failed");
+  assert.equal(result.snapshotId, undefined);
+  assert.equal(f.sent.length, 0);
 });
 
 test("actions can start without an existing observation", async (t) => {
