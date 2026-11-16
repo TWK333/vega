@@ -13,7 +13,7 @@ onBeforeUnmount(() => media.removeEventListener("change", sync));
 const filters = computed(() => [["active", "进行中", props.active.length], ["attention", "待我处理", props.attention.length], ["history", "已结束", props.history.length]]);
 const visible = computed(() => props.filter === "history" ? props.history : props.filter === "attention" ? props.attention : props.active);
 const all = computed(() => [...props.active, ...props.history]);
-const selected = computed(() => all.value.find((task) => task.id === props.focus) || (twoPane.value ? visible.value[0] : null));
+const selected = computed(() => props.focus ? all.value.find((task) => task.id === props.focus) : (twoPane.value ? visible.value[0] : null));
 watch(() => props.focus, async (id) => {
   if (!id) return;
   await nextTick();

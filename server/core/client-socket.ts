@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
-import { Auth, digest } from "./auth";
+import { createHash, randomBytes } from "node:crypto";
+import { Auth, digest, equal, type Principal } from "./auth";
 import type { Store } from "./store";
 import { CLIENT_HEARTBEAT_TIMEOUT, LocalAgents, validateClient, type Agent } from "./local-agent";
 import { SseChannels, type Request, type Wire } from "./sse";
@@ -9,7 +9,7 @@ import type { NetworkRelay } from "./network-relay";
 /** Large results are posted over HTTP (up to CLIENT_BODY_LIMIT); socket messages stay small so heartbeats never queue behind them. */
 export const CLIENT_BODY_LIMIT = 48 << 20, CLIENT_SOCKET_LIMIT = 1 << 20;
 /** Node-level compatibility gate: this deployment refuses older clients instead of failing mid-job. */
-// 与 local/VERSION 同步：发布新客户端时一并抬高。环境变量覆盖；设成空串表示不限制。
+// 与客户端兼容版本同步：新功能仍兼容已授权的旧客户端时无需提高门槛。环境变量可覆盖；设成空串表示不限制。
 // 0.5.0：下线改为软交接，服务端需先交接再断开连接，旧客户端会立即拆连接所以必须拒绝。
 // 0.5.6：增加只读控件树与受保护的屏幕坐标输入，旧客户端不能执行新协议。
 export const MIN_CLIENT_VERSION = "0.5.6";
@@ -26,11 +26,13 @@ export function clientOutdated(minimum: string, actual?: string) {
   return false;
 }
 type Socket = Wire;
-type Grant = { hash: string; userId: string; clientId: string; createdAt: number };
+type Grant = { hash: string; userId: string; clientId: string; createdAt: number; deviceRequest?: string };
+type DeviceRequest = { clientId: string; challenge: string; name: string; platform: string; source: string; until: number; status: "pending" | "approved" | "denied"; userId?: string; sessionHash?: string; tokenHash?: string };
 type Connection = { socket: Socket; grant: Grant; lastAt: number; details?: Obj; transport?: Agent["transport"]; updating?: boolean; tail?: Promise<void> };
 
 export class ClientSockets {
   private connections = new Map<string, Connection>();
+  private deviceRequests = new Map<string, DeviceRequest>();
   /** Channels that extra lanes (queued jobs) may attach to. */
   channels = new SseChannels();
   private timer: ReturnType<typeof setInterval>;
@@ -50,6 +52,66 @@ export class ClientSockets {
       }
     }, 5000);
     this.timer.unref();
+  }
+  /** The native client holds the verifier; the browser receives only this unguessable request ID. */
+  deviceStart(a: Obj, source: string) {
+    assert(typeof a.clientId === "string" && /^[a-f0-9]{32}$/.test(a.clientId), "Invalid client ID");
+    assert(typeof a.challenge === "string" && /^[A-Za-z0-9_-]{43}$/.test(a.challenge), "Invalid verifier challenge");
+    assert(typeof a.name === "string" && a.name.trim() && a.name.length <= 128 && !/[\x00-\x1f]/.test(a.name), "Invalid client name");
+    assert(["windows", "linux", "darwin"].includes(a.platform), "Invalid client platform");
+    const now = Date.now();
+    for (const [key, request] of this.deviceRequests) if (request.until <= now) this.deviceRequests.delete(key);
+    assert(this.deviceRequests.size < 256 && [...this.deviceRequests.values()].filter((request) => request.source === source).length < 32, "Too many pending device authorizations");
+    const requestId = randomBytes(32).toString("base64url"), until = now + 10 * 60 * 1000;
+    this.deviceRequests.set(requestId, { clientId: a.clientId, challenge: a.challenge, name: a.name.trim(), platform: a.platform, source, until, status: "pending" });
+    return { requestId, expiresAt: until };
+  }
+  private deviceRequest(id: unknown) {
+    assert(typeof id === "string" && /^[A-Za-z0-9_-]{43}$/.test(id), "Invalid device request");
+    const request = this.deviceRequests.get(id);
+    if (request && request.until <= Date.now()) this.deviceRequests.delete(id);
+    assert(request && request.until > Date.now(), "Device authorization expired or not found");
+    return request;
+  }
+  deviceInfo(id: unknown) {
+    const request = this.deviceRequest(id);
+    return { name: request.name, platform: request.platform, clientId: request.clientId.slice(-6), expiresAt: request.until, status: request.status };
+  }
+  async deviceDecision(principal: Principal, a: Obj) {
+    assert(typeof a.approved === "boolean", "Approval decision required");
+    const current = await this.auth.resolveHash(principal.hash);
+    assert(current && current.user.id === principal.user.id && current.user.role !== "viewer", "Device authorization requires execution permission");
+    const request = this.deviceRequest(a.requestId);
+    assert(request.status === "pending", "Device request already decided");
+    request.status = a.approved ? "approved" : "denied";
+    if (a.approved) { request.userId = current.user.id; request.sessionHash = current.hash; }
+    return { status: request.status };
+  }
+  /** The client creates its credential; retrying the same proof after a lost response is idempotent. */
+  async deviceToken(a: Obj) {
+    const request = this.deviceRequest(a.requestId);
+    assert(typeof a.verifier === "string" && /^[A-Za-z0-9_-]{43}$/.test(a.verifier) && equal(createHash("sha256").update(a.verifier).digest("base64url"), request.challenge), "Invalid device proof");
+    assert(a.clientId === request.clientId, "Client identity mismatch");
+    assert(typeof a.deviceToken === "string" && /^[A-Za-z0-9_-]{43}$/.test(a.deviceToken) && a.deviceToken !== a.verifier, "Invalid device credential");
+    if (request.status !== "approved") return { status: request.status };
+    const tokenHash = digest(a.deviceToken);
+    return await this.store.transaction(async () => {
+      assert(this.deviceRequests.get(a.requestId) === request && request.until > Date.now(), "Device authorization expired");
+      if (request.tokenHash) {
+        const grant = await this.record(a.deviceToken);
+        assert(request.tokenHash === tokenHash && grant && grant.userId === request.userId && grant.clientId === request.clientId, "Device authorization already claimed");
+        return { status: "authorized", userId: request.userId, clientId: request.clientId };
+      }
+      const principal = request.sessionHash && await this.auth.resolveHash(request.sessionHash);
+      assert(principal && principal.user.id === request.userId && principal.user.role !== "viewer", "Authorization login expired or revoked");
+      const grants = (await this.store.objects<Grant>("client-token")).filter((item) => item.userId === request.userId);
+      assert(grants.filter((item) => item.clientId !== request.clientId).length < 8, "Too many authorized clients");
+      assert(!await this.store.object<Grant>("client-token", tokenHash), "Device credential already exists");
+      await this.revoke(request.userId!, request.clientId);
+      await this.store.save("client-token", tokenHash, { hash: tokenHash, userId: request.userId!, clientId: request.clientId, createdAt: Date.now(), deviceRequest: a.requestId } satisfies Grant);
+      this.store.afterCommit(() => { request.tokenHash = tokenHash; });
+      return { status: "authorized", userId: request.userId, clientId: request.clientId };
+    });
   }
   async pair(a: Obj) {
     assert(typeof a.clientId === "string" && /^[a-f0-9]{32}$/.test(a.clientId), "Invalid client ID");
@@ -86,6 +148,8 @@ export class ClientSockets {
     // The upgrade hook supplies its verified grant so an immediate hello cannot outrun registration.
     grant ||= await this.authorize(socket.request);
     assert(this.connections.size < 128, "Too many native client connections");
+    // Once the native credential is in use, the browser authorization cannot be redeemed again.
+    if (grant.deviceRequest) this.deviceRequests.delete(grant.deviceRequest);
     this.connections.set(socket.id, { socket, grant, lastAt: Date.now() });
   }
   /** One upstream message posted by the device; the channel must belong to the same device grant. */
@@ -281,6 +345,7 @@ export class ClientSockets {
   closeAll() {
     clearInterval(this.timer);
     this.auth.events.off("revoke", this.onRevoke);
+    this.deviceRequests.clear();
     for (const id of this.connections.keys()) this.close(id, true);
   }
 }

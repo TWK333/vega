@@ -55,7 +55,7 @@ export default defineEventHandler(async (event) => {
   if (path[0] === "health")
     return cloudEnabled() ? { connected: false, ready: await cloudHealthy() === true, isolated: true } : { connected: engine.chrome.bridge.status().connected, ready: true };
   if (["auth", "users"].includes(path[0])) return authRoute(event, path);
-  // 安装包下载：公开（和静态的 /clients 一样），不需要登录，但每个站点打出来的 ZIP 只指向自己。
+  // 客户端安装包仅固定站点，首次启动时由用户在站点授权设备。
   if (path[0] === "clients" && path.length === 2) {
     check(method === "GET", 405, "GET required");
     const file = clientBaseName(path[1]), body = await clientPackage(file, publicOrigin(event));
@@ -63,6 +63,14 @@ export default defineEventHandler(async (event) => {
     setHeader(event, "Content-Disposition", `attachment; filename="${file}.zip"`);
     setHeader(event, "Cache-Control", "no-store");
     return send(event, body);
+  }
+  if (path[0] === "local-agent" && path[1] === "device" && ["start", "token"].includes(path[2]) && path.length === 3 && method === "POST") {
+    check(!getRequestHeaders(event).origin && !getRequestURL(event).search, 403, "Native client request required");
+    const body = await bodyJSON(event, 4096);
+    setHeader(event, "Cache-Control", "no-store");
+    try {
+      return path[2] === "start" ? app().clientSockets.deviceStart(body, event.node.req.socket.remoteAddress || "unknown") : await app().clientSockets.deviceToken(body);
+    } catch { throw createError({ statusCode: 401, statusMessage: "Device authorization invalid or expired" }); }
   }
   if (path[0] === "local-agent" && path[1] === "verify" && method === "POST") {
     const body = await bodyJSON(event, 4096);
@@ -111,6 +119,12 @@ export default defineEventHandler(async (event) => {
     a = await bodyJSON(event, 90 << 20);
   if (path[0] === "local-agent") {
     setHeader(event, "Cache-Control", "no-store");
+    if (path[1] === "device" && path.length === 3) {
+      try {
+        if (path[2] === "request" && method === "GET") return app().clientSockets.deviceInfo(getRequestURL(event).searchParams.get("requestId"));
+        if (path[2] === "decision" && method === "POST") return await app().clientSockets.deviceDecision(who, a);
+      } catch (e: any) { throw createError({ statusCode: 400, statusMessage: String(e.message || e).slice(0, 300) }); }
+    }
     check(method === "POST", 405, "POST required");
     if (path[1] === "ticket") return engine.localAgents.ticket(who, a.instance);
     if (path[1] === "revoke") {

@@ -292,10 +292,10 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p>{{if .AssistantURL}}<p><a href="{{.AssistantURL}}">← 回到蝴蝶对话</a></p>{{end}}</div></div>
 
   {{if .Approved}}<div class="flash ok" role="status"><strong>站点权限已保存。</strong>请回到 Vega 查看登录验证与后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输。</div>{{end}}
-  {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销。若 Vega 网站仍开着，新的连接检测会再次申请授权；关闭网站可停止申请。</div>{{end}}
+  {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销，需要重新连接时请重新启动客户端并在站点授权。</div>{{end}}
   {{if .Saved}}<div class="flash ok" role="status">本地配置已保存，将同步到已连接的后端；离线时请等待客户端重新连接。</div>{{end}}
   {{if .Extension}}<div class="flash ok" role="status">{{.Extension}}</div>{{end}}
-  {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本地配对已移除，站点授权不变。若该账户仍在 Vega 网页中登录，网页可能再次发起配对。</div>{{end}}
+  {{if .Unpaired}}<div class="flash warn" role="status">指定账户的本机连接已移除，需要重新连接时请重新启动客户端并在站点授权。</div>{{end}}
 
   <input type="radio" name="tab" id="tab-site" class="tab"{{if eq .Tab "site"}} checked{{end}}>
   <input type="radio" name="tab" id="tab-client" class="tab"{{if eq .Tab "client"}} checked{{end}}>
@@ -314,8 +314,8 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 
   <section class="card">
     <h2>站点连接</h2>
-    {{if .LastSite}}<p>{{.LastSite}}</p>{{else}}<p class="empty">还没有任何站点连到本机客户端。用<b>同一台电脑</b>的浏览器打开 <code>{{.Pin}}</code> 并登录，页面会自动发起配对。</p>{{end}}
-    <small>这个页面只说客户端看到了什么。如果一直为空：浏览器和客户端不在同一台电脑、浏览器在 https 页面上、或者浏览器拦住了到 127.0.0.1 的连接。详细记录在数据目录的 client.log。</small>
+    {{if .LastSite}}<p style="overflow-wrap:anywhere">{{.LastSite}}</p>{{else}}<p class="empty">客户端会直接连接所属站点；首次连接需在打开的站点授权页面确认。</p>{{end}}
+    <small>连接详情记在数据目录的 client.log。网页不需要访问本机客户端。</small>
   </section>
 
   {{if .Trusted}}
@@ -399,11 +399,11 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
       <input type="hidden" name="relayUser" value="{{.UserID}}">
       <details><summary>移除此账户配对</summary>
         <p>仅移除服务器 <code>{{.Origin}}</code> 下账户 <code>{{.UserID}}</code> 的本地配对，并断开其连接；不会删除服务端账户，不影响其他配对或站点授权。</p>
-        <small>网页仍登录此账户时可能再次配对。</small>
+        <small>需要重新连接时，请重新启动客户端并在站点授权。</small>
         <div class="row"><button class="danger" name="removeAccount" value="1" aria-label="确认移除 {{.Origin}} 下账户 {{.UserID}} 的配对">确认移除此账户配对</button></div>
       </details>
     </form>
-    {{else}}<p class="empty">尚无配对账户。允许站点后，请回到 Vega 完成连接。</p>{{end}}
+    {{else}}<p class="empty">尚无连接的账户。首次启动时请在站点打开的授权页面确认。</p>{{end}}
   </section>
 
   </section>

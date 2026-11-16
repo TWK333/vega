@@ -33,7 +33,7 @@ const bodyText = computed(() => legacyOutput.value ? "步骤产物已保存。" 
 const sender = computed(() => props.message.author ? { kind: props.message.author.kind, id: props.message.author.id, name: props.message.author.name, avatar: props.message.author.avatar || "" } : { kind: "employee", id: props.employeeId, name: props.name, avatar: props.avatar });
 // My own bubbles take the color of the 牛马 I am talking to (the chat view passes it); the 牛马's replies stay neutral.
 const tint = computed(() => (mine.value && !props.message.error ? props.selfTint : undefined));
-const statusOf = (task) => props.taskStatus?.[task.id] ?? task.status;
+const statusOf = (task) => props.taskStatus?.[task.id] ?? (props.tasks ? "deleted" : task.status);
 const linkedTask = computed(() => {
   const id = props.message.tasks?.[0]?.id;
   return id ? (props.tasks || []).find((task) => task.id === id) : undefined;
@@ -86,8 +86,8 @@ async function runExport(format) {
         <span v-else>已送达</span>
       </div>
       <div v-if="message.tasks?.length" class="chat-tasks">
-        <button v-for="task in message.tasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :aria-label="'查看任务：' + task.title" @click="emit('task', task.id)">
-          <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span><Icon name="right" :size="14" />
+        <button v-for="task in message.tasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
+          <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span><Icon v-if="statusOf(task) !== 'deleted'" name="right" :size="14" />
         </button>
       </div>
       <div v-if="canExport" class="chat-export">

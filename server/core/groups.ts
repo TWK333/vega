@@ -402,6 +402,7 @@ export class Groups {
     const byEmployee = new Map<string, Set<string>>();
     for (const m of messages) if (m.author?.kind === "employee") for (const t of m.tasks || []) byEmployee.set(m.author.id, (byEmployee.get(m.author.id) || new Set()).add(t.id));
     for (const [employeeId, ids] of byEmployee) {
+      for (const id of ids) status[id] = "deleted";
       const employee = await this.employee(employeeId);
       if (!employee) continue;
       for (const task of (await employee.state()).tasks) if (ids.has(task.id)) status[task.id] = task.status;

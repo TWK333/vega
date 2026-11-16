@@ -33,6 +33,13 @@ const entries = computed(
         })),
       ]) || [],
 );
+function matchingEntries(key, query) {
+  const search = (query || "").trim().toLowerCase();
+  return entries.value.filter((m) => (key !== "computer" || m.images) && (!search || m.name.toLowerCase().includes(search) || m.id.toLowerCase().includes(search)));
+}
+function selectedLabel(key, model) {
+  return entries.value.find((m) => m.id === model && (key !== "computer" || m.images))?.name || model + "（暂不可用）";
+}
 const incomplete = computed(() =>
   scenes.filter(([key]) => !choices.value[key].some((row) => row.model)).map(([, label]) => label),
 );
@@ -99,11 +106,15 @@ async function save() {
         <ol class="scene-rows">
           <li v-for="(selection, n) in choices[key]" :key="n" class="scene-row">
             <span class="scene-rank">{{ n + 1 }}</span>
-            <select :value="selection.model" :aria-label="label + '模型' + (n + 1)" @change="setModel(key, n, $event.target.value)">
-              <option value="">选择模型</option>
-              <option v-if="selection.model && !entries.some((m) => m.id === selection.model)" :value="selection.model">{{ selection.model }}（暂不可用）</option>
-              <option v-for="m in entries.filter((m) => key !== 'computer' || m.images)" :key="m.id" :value="m.id">{{ m.name }}</option>
-            </select>
+            <div class="model-picker">
+              <input v-model="selection.query" type="search" :aria-label="'搜索' + label + '模型' + (n + 1)" placeholder="搜索模型名称或 ID" />
+              <select :value="selection.model" :aria-label="label + '模型' + (n + 1)" @change="setModel(key, n, $event.target.value)">
+                <option value="">选择模型</option>
+                <option v-if="selection.model && !matchingEntries(key, selection.query).some((m) => m.id === selection.model)" :value="selection.model">{{ selectedLabel(key, selection.model) }}</option>
+                <option v-if="selection.query && !matchingEntries(key, selection.query).length" disabled>没有匹配的模型</option>
+                <option v-for="m in matchingEntries(key, selection.query)" :key="m.id" :value="m.id">{{ m.name }}</option>
+              </select>
+            </div>
             <label v-if="key !== 'computer'" class="spawn-toggle"><input type="checkbox" :checked="selection.allowSpawn" @change="setAllowSpawn(key, n, $event.target.checked)" />允许开启分身</label>
             <span class="row-actions">
               <button type="button" class="icon sm" :disabled="n === 0" :aria-label="'上移' + label + '模型'" @click="move(key, n, -1)"><Icon name="down" :size="14" class="flip" /></button>
@@ -126,7 +137,9 @@ async function save() {
 .scene-rows { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .scene-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .scene-rank { display: grid; place-items: center; flex: none; width: 20px; height: 20px; border-radius: 50%; background: var(--surface-3); color: var(--muted); font-size: 11px; font-weight: 600; }
-.scene-row select { flex: 1; min-width: 0; background-color: var(--surface); }
+.model-picker { display: flex; flex: 1 1 250px; gap: 6px; min-width: 0; }
+.model-picker input { flex: 1 1 120px; width: 0; min-width: 0; }
+.model-picker select { flex: 2 1 200px; min-width: 0; background-color: var(--surface); }
 .row-actions { display: flex; flex: none; }
 .row-actions .icon { color: var(--muted); }
 .flip { transform: rotate(180deg); }
@@ -136,6 +149,7 @@ async function save() {
 @media (max-width: 767px) {
   .scene-item { padding: 12px; }
   .scene-row { flex-wrap: wrap; }
+  .model-picker { flex-basis: calc(100% - 26px); }
   .spawn-toggle { margin-left: 26px; }
 }
 </style>

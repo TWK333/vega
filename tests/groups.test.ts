@@ -292,6 +292,12 @@ test("task cards in a group show the live task status, and a status change refre
     assert(!events.slice(count).some((e) => e.type === "group_changed"), "no reload when no group task changed status");
     const card = { ...messages[0], author: { kind: "employee", id: a, name: "小A" }, tasks: [{ id: task.id, title: task.text, status: "queued" }] } as any;
     assert.deepEqual(await engine.groups.taskStatus([card]), { [task.id]: "running" }, "the stored card is a snapshot; the board shows the live status");
+    await employeeA.update((state) => { employeeA.task(state, task.id).status = "done"; });
+    await sleep(10);
+    const beforeRemove = events.length;
+    await employeeA.control({ action: "remove", id: task.id });
+    await until(() => events.slice(beforeRemove).some((e) => e.type === "group_changed" && e.data?.groupId === group.id));
+    assert.deepEqual(await engine.groups.taskStatus([card]), { [task.id]: "deleted" }, "deleted cards do not retain a stale status");
   } finally { await close(); }
 });
 

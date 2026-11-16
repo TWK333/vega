@@ -2,23 +2,25 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { ref } from "vue";
+import { ref, reactive, computed, watch, nextTick } from "vue";
+import { formatRoute } from "../web/src/router.js";
 const source = readFileSync("web/src/App.vue", "utf8");
 const between = (start: string, end: string) => source.slice(source.indexOf(start), source.indexOf(end));
 
 function employeeWorkspace(requested = "", list = [{ id: "ea", activeTasks: 0 }, { id: "eb", activeTasks: 0 }]) {
-  const calls: string[] = [];
+  const calls: string[] = [], notices: string[] = [];
   const context: any = {
     user: ref({ id: "alice" }), selectedEmployee: ref(requested), employees: ref([]), activeTaskCount: ref(0), employee: ref({}),
     employeeSessionVersion: ref(0), pruneChatCache: async () => {},
     employeeSession: ref(""), employeeEvent: ref(null), employeeTab: ref("chat"), employeeExecutionOpen: ref(false),
     employeeTaskFilter: ref("active"), employeeTaskFocus: ref(""), dutyOpen: ref(false), memoryID: ref(""), taskText: ref(""), employeeError: ref(""),
     employeeComposers: ref({}), creatingEmployee: ref(false), view: ref("employee"), closeNavigation() {},
+    ended: (status: string) => ["done", "failed", "stopped", "cancelled", "sealed"].includes(status), toast: (text: string) => notices.push(text),
     api: async (path: string) => { calls.push(path); return path === "/employees" ? list : { id: path.split("/").at(-1) }; },
   };
-  const methods = vm.runInNewContext(between("let employeeLoadVersion =", "function employeeApi(") + between("async function chooseEmployee(", "async function createEmployee(") + "\n({ loadEmployee, chooseEmployee })", context);
+  const methods = vm.runInNewContext(between("let employeeLoadVersion =", "function employeeApi(") + between("async function chooseEmployee(", "async function createEmployee(") + between("async function openEmployeeTask(", "async function employeeTabChanged(") + "\n({ loadEmployee, chooseEmployee, openEmployeeTaskOf })", context);
   context.refreshEmployee = methods.loadEmployee;
-  return { ...context, ...methods, calls, setApi: (api: any) => { context.api = api; }, setPrune: (prune: any) => { context.pruneChatCache = prune; } };
+  return { ...context, ...methods, calls, notices, setApi: (api: any) => { context.api = api; }, setPrune: (prune: any) => { context.pruneChatCache = prune; } };
 }
 
 test("a requested employee (from the address bar) is loaded directly on refresh", async () => {
@@ -109,7 +111,7 @@ test("employee deletion requires confirmation, removes only its own draft and ch
 
 test("chat task links reveal the matching task and refresh stale lists without jumping across employees", async () => {
   const card = { dataset: { taskId: "task" }, scrollIntoView() {}, focus() {} };
-  const context: any = { selectedEmployee: ref("ea"), employee: ref({ tasks: [] }), employeeTaskFilter: ref("active"), employeeTaskFocus: ref(""), employeeTab: ref("chat"), ended: (status: string) => status === "done", nextTick: async () => {}, document: { querySelectorAll: () => [card] }, toast() {} };
+  const context: any = { view: ref("employee"), selectedEmployee: ref("ea"), employee: ref({ tasks: [] }), employeeTaskFilter: ref("active"), employeeTaskFocus: ref(""), employeeTab: ref("chat"), ended: (status: string) => status === "done", nextTick: async () => {}, document: { querySelectorAll: () => [card] }, toast() {} };
   context.refreshEmployee = async () => { context.employee.value = { tasks: [{ id: "task", status: "done" }] }; };
   const open = vm.runInNewContext(between("async function openEmployeeTask(", "async function employeeTabChanged(") + "\nopenEmployeeTask", context);
   await open("task");
@@ -120,6 +122,79 @@ test("chat task links reveal the matching task and refresh stale lists without j
   context.refreshEmployee = async () => { context.selectedEmployee.value = "eb"; };
   await open("task");
   assert.equal(context.employeeTab.value, "chat");
+});
+
+test("group task links open the requested task directly without mounting chat or adding an intermediate route", async () => {
+  const state = employeeWorkspace("ea");
+  await state.loadEmployee();
+  state.view.value = "group";
+  let release!: (value: any) => void;
+  state.setApi((path: string) => path === "/employees" ? new Promise((resolve) => release = resolve) : Promise.resolve({ id: "eb", tasks: [{ id: "t1", status: "done" }] }));
+  const path = computed(() => formatRoute({ view: state.view.value, group: "g1", employee: state.selectedEmployee.value, tab: state.employeeTab.value, task: state.employeeTaskFocus.value }));
+  const routes: string[] = [], stop = watch(path, (value) => routes.push(value));
+  const opening = state.openEmployeeTaskOf({ employeeId: "eb", taskId: "t1" });
+  assert.deepEqual([state.view.value, state.selectedEmployee.value, state.employeeTab.value, state.employeeTaskFocus.value], ["employee", "eb", "tasks", "t1"]);
+  await nextTick();
+  assert.deepEqual(routes, ["/employees/eb/tasks/t1"]);
+  release([{ id: "ea", activeTasks: 0 }, { id: "eb", activeTasks: 0 }]);
+  await opening; await nextTick();
+  assert.deepEqual([state.employeeTab.value, state.employeeTaskFocus.value, state.employeeTaskFilter.value], ["tasks", "t1", "history"]);
+  assert.deepEqual(routes, ["/employees/eb/tasks/t1"]);
+  stop();
+});
+
+test("group task navigation respects later user navigation and still reports missing or forbidden tasks", async () => {
+  const state = employeeWorkspace("ea");
+  await state.loadEmployee();
+  state.view.value = "group";
+  let release!: (value: any) => void;
+  state.setApi((path: string) => path === "/employees" ? new Promise((resolve) => release = resolve) : Promise.resolve({ id: "eb", tasks: [{ id: "t1", status: "done" }] }));
+  const opening = state.openEmployeeTaskOf({ employeeId: "eb", taskId: "t1" });
+  state.employeeTab.value = "chat";
+  release([{ id: "ea", activeTasks: 0 }, { id: "eb", activeTasks: 0 }]);
+  await opening;
+  assert.equal(state.employeeTab.value, "chat", "a delayed response must not undo the user's navigation");
+
+  state.view.value = "group";
+  state.setApi(async (path: string) => path === "/employees" ? [{ id: "eb", activeTasks: 0 }] : { id: "eb", tasks: [] });
+  await state.openEmployeeTaskOf({ employeeId: "eb", taskId: "gone" });
+  assert.equal(state.notices.at(-1), "这条任务记录已不存在");
+  assert.equal(state.employeeTaskFocus.value, "");
+  state.view.value = "group";
+  await state.openEmployeeTaskOf({ employeeId: "unknown", taskId: "t1" });
+  assert.equal(state.notices.at(-1), "你没有权限查看这个牛马");
+  assert.equal(state.view.value, "group");
+});
+
+test("a delayed missing-task refresh cannot reopen a task after leaving the page", async () => {
+  const state = employeeWorkspace("ea");
+  await state.loadEmployee();
+  state.view.value = "group";
+  let lists = 0, release!: (value: any) => void, started!: () => void;
+  const waiting = new Promise<void>((resolve) => started = resolve);
+  state.setApi((path: string) => {
+    if (path !== "/employees") return Promise.resolve({ id: "eb", tasks: [] });
+    if (++lists === 2) return new Promise((resolve) => { release = resolve; started(); });
+    return Promise.resolve([{ id: "ea", activeTasks: 0 }, { id: "eb", activeTasks: 0 }]);
+  });
+  const opening = state.openEmployeeTaskOf({ employeeId: "eb", taskId: "t1" });
+  await waiting;
+  state.view.value = "group"; state.employeeTab.value = "chat";
+  release([{ id: "ea", activeTasks: 0 }, { id: "eb", activeTasks: 0 }]);
+  await opening;
+  assert.equal(state.view.value, "group");
+  assert.equal(state.employeeTab.value, "chat");
+  assert.deepEqual(state.notices, []);
+});
+
+test("an explicit task focus never falls back to an unrelated task while loading", () => {
+  const component = readFileSync("web/src/EmployeeTasks.vue", "utf8");
+  const line = component.match(/const selected = computed\(.*\);/)![0];
+  const context: any = { computed, props: reactive({ focus: "pending" }), all: ref([{ id: "other" }]), visible: ref([{ id: "other" }]), twoPane: ref(true) };
+  const selected = vm.runInNewContext(line + "\nselected", context);
+  assert.equal(selected.value, undefined);
+  context.props.focus = "";
+  assert.equal(selected.value.id, "other");
 });
 
 test("employee task lists direct new work to chat without a separate creation form", () => {

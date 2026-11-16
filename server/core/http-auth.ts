@@ -72,7 +72,7 @@ export async function gate(event: H3Event, path: string) {
   // OAuth returns cross-site without a website cookie; callback validates its one-time state.
   if (path === "/api/providers/callback/devin" && event.method === "GET")
     return;
-  if (path === "/api/local-agent/verify" && event.method === "POST") return;
+  if ((path === "/api/local-agent/verify" || path === "/api/local-agent/device/start" || path === "/api/local-agent/device/token") && event.method === "POST") return;
   if ((path === "/api/local-agent/socket" || path === "/api/local-agent/relay") && ["GET", "POST"].includes(event.method)) return;
   // These native endpoints authenticate the device credential themselves (no website cookie).
   if ((path === "/api/local-agent/result" || path === "/api/local-agent/extension") && event.method === "POST") return;
@@ -110,6 +110,8 @@ export async function gate(event: H3Event, path: string) {
     );
   if (path.startsWith("/api/auth/")) return;
   if (/^\/api\/local-agent\/(ticket|revoke)$/.test(path) && event.method === "POST") return;
+  if (/^\/api\/clients\/[^/]+$/.test(path) && event.method === "GET") return;
+  if ((path === "/api/local-agent/device/request" && event.method === "GET") || (path === "/api/local-agent/device/decision" && event.method === "POST")) return;
   const role = session.user.role;
   if (role === "admin") return;
   if (/^\/api\/employees(?:\/|$)/.test(path) && (role === "operator" || event.method === "GET")) return;

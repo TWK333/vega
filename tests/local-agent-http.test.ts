@@ -8,7 +8,6 @@ import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomBytes } from "node:crypto";
-import { LocalAgentPairing } from "../web/src/local-agent.js";
 import { sleep } from "../server/core/util";
 
 /**
@@ -56,10 +55,10 @@ async function readEvents(
   }
 }
 
-test("native client pairs once, runs with every webpage closed, survives restarts and never replays lost operations", {
+test("native client authorizes at the website, then runs directly without a webpage and never replays lost operations", {
   skip: process.env.VEGA_TEST_LOCAL_AGENT !== "1", timeout: 90000,
 }, async (t) => {
-  const binary = resolve("local", process.platform === "win32" ? "vega-local.exe" : "vega-local");
+  const binary = process.env.VEGA_TEST_CLIENT_BINARY || resolve("local", process.platform === "win32" ? "vega-local.exe" : "vega-local");
   assert(existsSync(binary), "Build the updated native client first");
   const reserved = tcpServer();
   try { await new Promise<void>((yes, no) => { reserved.once("error", no); reserved.listen(47673, "127.0.0.1", yes); }); }
@@ -81,7 +80,8 @@ test("native client pairs once, runs with every webpage closed, survives restart
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
     modelCalls++;
-    const latest = [...body.messages].reverse().find((m: any) => m.role === "user")?.content;
+    // Runtime inserts synthetic user snapshots after the actual turn; find the fixture message rather than that snapshot.
+    const latest = [...body.messages].reverse().find((m: any) => m.role === "user" && typeof m.content === "string" && /^(?:write (?:server )?fixture|large fixture|loss fixture|continue after repair)/.test(m.content))?.content;
     const hasTool = body.messages.at(-1)?.role === "tool", loss = String(latest).includes("loss fixture");
     const command = process.platform === "win32"
       ? (loss ? "Add-Content -LiteralPath loss.txt -Value once; Start-Sleep -Seconds 10" : "Set-Content -LiteralPath from-client.txt -Value local-success")
@@ -108,7 +108,7 @@ test("native client pairs once, runs with every webpage closed, survives restart
   await copyFile(binary, clientExe);
   await writeFile(join(clientDir, "instance.json"), JSON.stringify({ origin: base }));
   const startClient = () => {
-    const child = spawn(clientExe, [], { cwd: clientDir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, APPDATA: configDir, XDG_CONFIG_HOME: configDir } });
+    const child = spawn(clientExe, process.env.VEGA_TEST_CLIENT_HELPER === "1" ? ["-test.run=^TestDeviceClientFixture$"] : [], { cwd: clientDir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, APPDATA: configDir, XDG_CONFIG_HOME: configDir, VEGA_DEVICE_E2E_HELPER: process.env.VEGA_TEST_CLIENT_HELPER } });
     child.stdout!.on("data", (b) => logs += b); child.stderr!.on("data", (b) => logs += b);
     children.push(child); return child;
   };
@@ -131,13 +131,23 @@ test("native client pairs once, runs with every webpage closed, survives restart
     await until(async () => { const value = await api("/sessions/" + id); return !value.running && value.messages.length > before && value.messages.at(-1)?.role === "assistant"; });
     return api("/sessions/" + id);
   };
-  // 本机配对现在是「网页一次 POST + 客户端 SSE 回报」：浏览器会自动带上本站 Origin，Node 的 fetch 不会，这里替它补上。
-  const original = globalThis.fetch;
-  globalThis.fetch = (async (input: any, init: any = {}) =>
-    String(input?.url ?? input).startsWith("http://127.0.0.1:47673/agent")
-      ? original(input, { ...init, headers: { ...init.headers, origin: base } })
-      : original(input, init)) as any;
-  let pairing: LocalAgentPairing | undefined;
+  const usedRequests = new Set<string>();
+  const authorizeClient = async () => {
+    await until(() => [...logs.matchAll(/client_authorization=([A-Za-z0-9_-]{43})/g)].some((match) => !usedRequests.has(match[1])));
+    const requestId = [...logs.matchAll(/client_authorization=([A-Za-z0-9_-]{43})/g)].map((match) => match[1]).find((id) => !usedRequests.has(id))!;
+    usedRequests.add(requestId);
+    const info = await api("/local-agent/device/request?requestId=" + requestId);
+    assert.equal(info.status, "pending");
+    const anonymous = await fetch(base + "/api/local-agent/device/request?requestId=" + requestId);
+    assert.equal(anonymous.status, 401, "device details require a website login");
+    const withoutCsrf = await fetch(base + "/api/local-agent/device/decision", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ requestId, approved: true }) });
+    assert.equal(withoutCsrf.status, 403, "website consent requires CSRF protection");
+    const forgedBrowser = await fetch(base + "/api/local-agent/device/token", { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: "{}" });
+    assert.equal(forgedBrowser.status, 403, "browser origins cannot impersonate the native token exchange");
+    assert.equal((await api("/bootstrap")).clients.length, 0, "the client is offline until a user approves");
+    await api("/local-agent/device/decision", "POST", { requestId, approved: true });
+    await until(async () => (await api("/bootstrap")).clients.length === 1);
+  };
   try {
     await until(async () => { try { return (await fetch(base + "/api/auth/me")).ok; } catch { return false; } });
     const setup = await fetch(base + "/api/auth/setup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ setupToken, username: "native-fixture", password: "a-long-native-fixture-password" }) });
@@ -155,19 +165,11 @@ test("native client pairs once, runs with every webpage closed, survives restart
     webpageRead = readEvents(eventsResponse, (value) => { events.push(value); }, webpage.signal);
     await until(() => events.some((event) => event.type === "ready"));
     const serverSession = await api("/sessions", "POST", { cwd: serverDir });
-    const pairingStates: any[] = [];
-    pairing = new LocalAgentPairing(api, login.user.id, (status) => pairingStates.push(status));
-    await pairing.connect(); await until(() => !!(pairing as any).paired);
-    assert.equal(pairingStates.at(-1).code, "connected", JSON.stringify(pairingStates));
-    assert(pairingStates.some((status) => status.code === "authorizing"));
-    assert(pairingStates.some((status) => status.code === "backend_connecting"));
-    await until(async () => (await api("/bootstrap")).clients.length === 1);
+    await authorizeClient();
     const device = (await api("/bootstrap")).clients[0];
     assert.equal((await api("/sessions/" + serverSession.id)).session.localAgent, false);
-    pairing.close(); webpage.abort(); await webpageRead;
-    // 没有 WebSocket 了：关掉配对照它的下行 SSE 读流，网页那条 events 流也应该已经结束。
-    assert.equal((pairing as any).stream.signal.aborted, true, "配对的下行流随配对一起关闭");
-    assert.equal(webpage.signal.aborted, true, "网页那条 events 流也已关闭");
+    webpage.abort(); await webpageRead;
+    assert.equal(webpage.signal.aborted, true, "closing the webpage does not disconnect the client");
     await api("/config", "PUT", { model: "test/m", scenes: { lightweight: ["test/m"], coding: ["test/m"] }, provider: { test: { api: "openai-completions", baseURL: "http://127.0.0.1:" + (mock.address() as any).port, models: { m: { limit: { context: 128000, output: 1000 } } } } } });
     await run(serverSession.id, "write server fixture");
     assert.match(await readFile(join(serverDir, "from-client.txt"), "utf8"), /local-success/);
@@ -176,7 +178,7 @@ test("native client pairs once, runs with every webpage closed, survives restart
     await run(session.id, "write fixture with the webpage closed");
     assert.match(await readFile(join(clientDir, "from-client.txt"), "utf8"), /local-success/);
     const large = await run(session.id, "large fixture with the webpage closed");
-    assert(large.messages.some((item: any) => item.name === "read" && !item.error), "direct socket supports file results larger than the website RPC limit");
+    assert(large.messages.some((item: any) => item.name === "read" && !item.error), "direct socket supports file results larger than the website RPC limit: " + JSON.stringify(large.messages.map((item: any) => ({ role: item.role, name: item.name, error: item.error, text: String(item.text || "").slice(0, 200) }))));
     assert.equal(events.some((event) => event.type === "local_agent_request"), false);
     await stop(client); client = startClient();
     await until(async () => (await api("/bootstrap")).clients.some((item: any) => item.id === device.id));
@@ -194,14 +196,14 @@ test("native client pairs once, runs with every webpage closed, survives restart
     await sleep(100);
     assert.equal(modelCalls, callsAtPause);
     await until(async () => (await api("/bootstrap")).clients.length === 0);
-    pairing = new LocalAgentPairing(api, login.user.id);
-    await pairing.connect(); await until(() => !!(pairing as any).paired);
-    await until(async () => (await api("/bootstrap")).clients.some((item: any) => item.id === device.id));
-    pairing.close();
+    const clientConfig = join(configDir, "vega-local", `http-127.0.0.1_${port}`, "trusted-sites.json");
+    await until(async () => { try { return !(JSON.parse(await readFile(clientConfig, "utf8")).servers || []).length; } catch { return false; } });
+    await stop(client); client = startClient();
+    await authorizeClient();
+    assert((await api("/bootstrap")).clients.some((item: any) => item.id === device.id));
     await run(session.id, "continue after repair");
     assert.equal((await readFile(join(clientDir, "loss.txt"), "utf8")).trim(), "once", "a renewed device credential must never replay the old mutation");
   } finally {
-    pairing?.close(); globalThis.fetch = original;
     webpage?.abort(); await webpageRead?.catch(() => {});
     for (const child of children) await stop(child);
     await new Promise<void>((yes) => mock.close(() => yes()));

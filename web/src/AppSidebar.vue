@@ -18,13 +18,11 @@ const props = defineProps({
   clientReady: Boolean,
   clientStatus: String,
   clients: Array,
-  pairingText: String,
-  pairingCode: String,
   sessions: Array,
   running: Object,
   currentRoot: String,
 });
-const emit = defineEmits(["choose", "open-group", "create", "navigate", "logout", "close", "expand", "retry-pairing", "select-session", "remove-session"]);
+const emit = defineEmits(["choose", "open-group", "create", "navigate", "logout", "close", "expand", "select-session", "remove-session"]);
 const clientOpen = ref(false);
 const roleLabel = { admin: "管理员", operator: "操作用户", viewer: "只读用户" };
 const adminNav = [["experiences", "经验图谱", "graph"], ["debug", "调试会话", "code"]];
@@ -115,9 +113,8 @@ const unreadLabel = (n) => n > 99 ? "99+" : String(n);
         <div v-if="clientOpen" class="client-popover" role="dialog" aria-label="本机客户端">
           <strong>本机客户端</strong>
           <ul v-if="clients?.length"><li v-for="client in clients" :key="client.id"><span class="dot ok" aria-hidden="true"></span>{{ client.name }}<small>{{ client.platform }} · {{ client.id.slice(0, 6) }}</small></li></ul>
-          <p v-else class="hint">没有在线客户端。新任务会在服务端执行；启动 vega-local 并在本机网页授权后即可选择。</p>
-          <p v-if="pairingText" class="hint pairing">{{ pairingText }}</p>
-          <div class="actions"><button v-if="pairingCode && pairingCode !== 'connected'" type="button" class="sm" @click="emit('retry-pairing')"><Icon name="refresh" :size="14" />重新检测</button><button type="button" class="sm ghost" @click="clientOpen = false">关闭</button></div>
+          <p v-else class="hint">没有在线客户端。首次启动客户端后，请在本站打开的授权页面确认。</p>
+          <div class="actions"><button type="button" class="sm ghost" @click="clientOpen = false">关闭</button></div>
         </div>
       </div>
       <div class="account-row">

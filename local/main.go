@@ -1,4 +1,4 @@
-// Vega local execution agent. The website is used only for initial authorization.
+// Vega local execution agent. It connects directly to its bound website.
 package main
 
 import (
@@ -136,16 +136,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "vega-local browser:", browserErr)
 	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/agent", a.serveWS)
 	mux.HandleFunc("/config/"+a.configToken, a.configure)
 	a.assistantMount(mux) // 蝴蝶面板的本地页面与数据接口
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(lis) }()
 	ctx, cancel := context.WithCancel(context.Background())
 	must(notifyUpdateReady())
-	// 第一次打开且还没配对：直接打开本安装包的站点，浏览器已登录就会自动开始配对。
-	needsPairing := len(a.config.Servers) == 0
+	// 客户端主动发起站点授权，获准后直接连接；网页不访问本机。
+	a.mu.Lock()
+	needsAuthorization := len(a.config.Servers) == 0
+	a.mu.Unlock()
 	a.startConnections(ctx)
+	if needsAuthorization {
+		go a.authorizeDevice(ctx)
+	}
 	setSiteLabel(a.siteLabel())
 	butterflySetEnabled(a.config.Butterfly)
 	setAppuseConfirmSeconds(a.config.ConfirmSeconds)
@@ -153,12 +157,6 @@ func main() {
 	// 默认用客户端自己的无头 Chrome；设置里选「我自己的 Chrome」就不拉起。
 	a.applyBrowserMode()
 	go headlessReclaim(ctx)
-	if needsPairing {
-		go func() {
-			time.Sleep(1 * time.Second)
-			openBrowser(a.pinnedOrigin)
-		}()
-	}
 	configure := func() {
 		url := "http://" + localAddress + "/config/" + a.configToken
 		// 设置也在蝴蝶窗口里开：先把目标页写给面板，面板不在时退回系统浏览器。

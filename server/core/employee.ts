@@ -531,11 +531,11 @@ export class Employee {
       const base = baseRecord(s);
       if (this.employeeId === "default") await this.store.put("employee", base);
       else await this.store.save("employee", this.employeeId, base);
-      const moved = await saveRows(this.store, this.employeeId, s, (task) => !ended(task.status));
+      const { moved, removed } = await saveRows(this.store, this.employeeId, s, (task) => !ended(task.status));
       const finished = moved.filter((task) => taskTabsFinished(task.status));
       if (finished.length) this.store.afterCommit(() => { for (const task of finished) this.runtime.taskFinished?.(task.id); });
-      // Task cards in a group show the live status: the group view reloads when one of its tasks changes status.
-      const groups = new Set(moved.map((task) => task.group?.groupId).filter(Boolean) as string[]);
+      // Task cards in a group refresh when a task changes status or is removed.
+      const groups = new Set([...moved, ...removed].map((task) => task.group?.groupId).filter(Boolean) as string[]);
       if (groups.size) this.store.afterCommit(() => { for (const id of groups) this.runtime.groups?.changed(id); });
     });
   }

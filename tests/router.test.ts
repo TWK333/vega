@@ -59,17 +59,18 @@ function app(href: string, { admin = false, employees = ["ea", "eb"], groups = [
   const c: any = {
     ref, computed, watch, nextTick, window, ADMIN_PAGES, parseRoute, formatRoute,
     user: ref({ id: "alice" }), isAdmin: ref(admin), canExecute: ref(true), view: ref("employee"),
+    clientAuthorization: ref(location.searchParams.get("client_authorization") || ""),
     selectedEmployee: ref("ea"), creatingEmployee: ref(false), employeeTab: ref("chat"), employeeTaskFocus: ref(""), employeeSession: ref(""),
     selectedGroup: ref(""), current: ref(null), sessions: ref([{ id: "s1" }]), employee: ref({ id: "ea" }),
     employees: ref(employees.map((id) => ({ id }))), groups: ref(groups.map((id) => ({ id }))),
     employeeTabs: ref([["chat"], ["tasks"], ["memories"], ["settings"]]),
     attempt: (fn: any) => fn(), selectSession: async (s: any) => { c.current.value = s; c.view.value = "chat"; },
     openGroup: (id: string) => { c.selectedGroup.value = id; c.view.value = "group"; },
-    chooseEmployee: async (id: string) => { c.selectedEmployee.value = id; c.employee.value = { id }; c.employeeTab.value = "chat"; c.employeeSession.value = ""; c.employeeTaskFocus.value = ""; c.creatingEmployee.value = false; c.view.value = "employee"; },
+    chooseEmployee: async (id: string, taskId = "") => { c.selectedEmployee.value = id; c.employee.value = { id }; c.employeeTab.value = taskId ? "tasks" : "chat"; c.employeeSession.value = ""; c.employeeTaskFocus.value = taskId; c.creatingEmployee.value = false; c.view.value = "employee"; },
     openEmployee: (session = "") => { c.employeeSession.value = session; c.view.value = "employee"; },
     openEmployeeTask: async (id: string) => { if (id === "t1") { c.employeeTab.value = "tasks"; c.employeeTaskFocus.value = id; } },
   };
-  Object.assign(c, vm.runInNewContext(block + "\n({ applyRoute, routeChanged, syncRoute, setPageTab, pageSub, routePath, start() { routeReady = true; } })", c));
+  Object.assign(c, vm.runInNewContext(block + "\n({ applyRoute, routeChanged, syncRoute, closeClientAuthorization, setPageTab, pageSub, routePath, start() { routeReady = true; } })", c));
   return { c, history, location };
 }
 async function boot(href: string, options?: any) {
@@ -102,6 +103,33 @@ test("App routing: refresh restores page and tab; tab and page switches push; ba
   settings.c.view.value = "settings"; await nextTick();
   assert.equal(settings.c.pageSub.value, "scenes", "each page keeps its own tab when you come back");
   assert.equal(settings.location.pathname, "/settings/scenes");
+});
+
+test("client authorization survives login route initialization until the user closes it", async () => {
+  const id = "a".repeat(43), s = await boot("https://vega.test/?client_authorization=" + id);
+  assert.equal(s.location.searchParams.get("client_authorization"), id);
+  assert.deepEqual(s.history, [], "route normalization must not discard the pending request");
+  s.c.closeClientAuthorization();
+  assert.equal(s.location.search, "");
+  assert.deepEqual(s.history, ["replace /employees/ea"]);
+});
+
+test("task deep links enter the task view before employee loading finishes", async () => {
+  const s = app("https://vega.test/groups/g1");
+  s.c.view.value = "group";
+  let release!: () => void;
+  s.c.chooseEmployee = async (id: string, taskId: string) => {
+    assert.equal(taskId, "t1");
+    s.c.selectedEmployee.value = id; s.c.employeeTab.value = "tasks"; s.c.employeeTaskFocus.value = taskId; s.c.view.value = "employee";
+    await new Promise<void>((resolve) => release = resolve);
+    s.c.employee.value = { id };
+  };
+  const opening = s.c.applyRoute({ view: "employee", employee: "eb", tab: "tasks", task: "t1" });
+  assert.deepEqual([s.c.view.value, s.c.employeeTab.value, s.c.employeeTaskFocus.value], ["employee", "tasks", "t1"]);
+  release(); await opening;
+  s.c.view.value = "group";
+  await s.c.applyRoute({ view: "employee", employee: "eb", tab: "tasks", task: "t1" });
+  assert.deepEqual([s.c.view.value, s.c.employeeTab.value, s.c.employeeTaskFocus.value], ["employee", "tasks", "t1"]);
 });
 
 test("App routing: unknown or forbidden ids and pages fall back to the default view with replaceState; old links normalize", async () => {

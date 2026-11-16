@@ -37,11 +37,11 @@ export function baseRecord(state: Obj) {
   return Object.fromEntries(Object.keys(state).filter((key) => key !== "tasks" && key !== "runs").map((key) => [key, state[key]]));
 }
 
-/** Returns the tasks whose status changed (or that were added). */
+/** Returns the tasks whose status changed (or that were added), and the removed tasks. */
 export async function saveRows(store: Store, employee: string, state: Obj, active: (task: Obj) => boolean) {
   const rows: Rows | undefined = (state as any)[ROWS];
-  const moved: Obj[] = [];
-  if (!rows) return moved;
+  const moved: Obj[] = [], removed: Obj[] = [];
+  if (!rows) return { moved, removed };
   const kept = new Set<string>();
   for (const task of state.tasks as Obj[]) {
     const data = JSON.stringify(task), before = rows.tasks.get(task.id);
@@ -52,7 +52,7 @@ export async function saveRows(store: Store, employee: string, state: Obj, activ
     }
     rows.tasks.set(task.id, data);
   }
-  for (const id of [...rows.tasks.keys()]) if (!kept.has(id)) { await store.deleteEmployeeTask(id); rows.tasks.delete(id); }
+  for (const id of [...rows.tasks.keys()]) if (!kept.has(id)) { removed.push(JSON.parse(rows.tasks.get(id)!)); await store.deleteEmployeeTask(id); rows.tasks.delete(id); }
   const keptRuns = new Set<number>();
   for (const run of state.runs as Obj[]) {
     const data = JSON.stringify(run);
@@ -63,5 +63,5 @@ export async function saveRows(store: Store, employee: string, state: Obj, activ
     keptRuns.add(id);
   }
   for (const id of [...rows.runs.keys()]) if (!keptRuns.has(id)) { await store.deleteEmployeeRun(id); rows.runs.delete(id); }
-  return moved;
+  return { moved, removed };
 }

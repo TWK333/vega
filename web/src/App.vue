@@ -1,8 +1,8 @@
 <script setup vapor>
 import SettingsView from "./SettingsView.vue";
 import ResourcesView from "./ResourcesView.vue";
+import ClientAuthorization from "./ClientAuthorization.vue";
 import TokenStatsView from "./TokenStatsView.vue";
-import { LocalAgentPairing, canBridgeLocal, pairingStatusText } from "./local-agent";
 import { SseSocket } from "./sse-socket.js";
 import ConversationTimeline from "./ConversationTimeline.vue";
 import ExperiencesView from "./ExperiencesView.vue";
@@ -38,6 +38,8 @@ import {
   watch,
 } from "vue";
 const confirm = window.confirm.bind(window);
+// Keep the request in the URL across login and reload; the verifier remains exclusively in the client.
+const clientAuthorization = ref(new URL(window.location.href).searchParams.get("client_authorization") || "");
 const narrow = ref(false),
   wide = ref(false),
   workPanelHidden = ref(false),
@@ -47,32 +49,9 @@ const narrow = ref(false),
   imageInput = ref(null),
   uploading = ref(false),
   onlineClients = ref([]),
-  clientListReady = ref(false),
-  localPairing = ref(null);
+  clientListReady = ref(false);
 const localConnected = computed(() => onlineClients.value.length > 0);
 const clientStatus = computed(() => !clientListReady.value ? "客户端状态同步中" : localConnected.value ? `客户端在线 · ${onlineClients.value.length} 台` : "无在线客户端");
-const localPairingText = computed(() => pairingStatusText(localPairing.value));
-let localBridge;
-function startLocalPairing() {
-  // 客户端自己有凭据，连上站点的就是直连；网页再拨 127.0.0.1 只会在前端与安装站点不同源时反复失败。
-  if (!localBridge && canBridgeLocal() && canExecute.value && !localConnected.value) {
-    const bridge = new LocalAgentPairing(httpApi, user.value.id, (status) => {
-      if (localBridge !== bridge) return;
-      localPairing.value = status;
-      if (status.code === "connected") void attempt(bootstrap);
-    });
-    localBridge = bridge;
-    void bridge.connect();
-  }
-}
-function retryLocalPairing() {
-  localBridge?.close();
-  localBridge = null;
-  localPairing.value = null;
-  startLocalPairing();
-}
-// 客户端自己连上站点（clients_changed → bootstrap）就可以收掉网页这次握手。
-watch(localConnected, (online) => { if (online) retryLocalPairing(); });
 const mobileTitles = {
   chat: "对话",
   employee: "数字牛马",
@@ -610,7 +589,6 @@ async function enter(result) {
   authenticated.value = true;
   void connectEvents();
   await bootstrap();
-  startLocalPairing();
   if (isAdmin.value) startPresence();
   // Open the page in the address bar: an employee link is checked against the visible list by loadEmployee.
   const route = parseRoute(window.location.href);
@@ -656,9 +634,6 @@ function resetLogin() {
     sessionStorage.removeItem("vega:session:" + user.value?.id);
   } catch {}
   closeNavigation();
-  localBridge?.close();
-  localBridge = null;
-  localPairing.value = null;
   clientListReady.value = false;
   stopPresence();
   clearTimeout(employeeRefreshTimer);
@@ -1133,7 +1108,7 @@ function prepareEmployee(id) {
   if (!entry) return;
   employeeComposers.value[id] ||= { text: "", attachments: [] };
   if (employee.value.id !== id)
-    employee.value = { ...entry, canManage: false, tasks: [], memories: [], runs: [] };
+    employee.value = { ...entry, canManage: false, tasks: undefined, memories: [], runs: [] };
 }
 async function loadEmployee() {
   if (!user.value) return;
@@ -1165,14 +1140,15 @@ function employeeApi(path, method = "GET", data) {
 function employeeBrowserApi(path, method = "GET", data) {
   return api(path.replace(/^\/chrome/, `/employees/${selectedEmployee.value}/chrome`), method, data);
 }
-async function chooseEmployee(id) {
+async function chooseEmployee(id, taskId = "") {
   selectedEmployee.value = id;
   prepareEmployee(id);
   employeeSession.value = "";
   employeeEvent.value = null;
-  employeeTab.value = "chat";
-  employeeTaskFilter.value = "active";
-  employeeTaskFocus.value = "";
+  employeeTab.value = taskId ? "tasks" : "chat";
+  const task = taskId && employee.value.tasks?.find((entry) => entry.id === taskId);
+  employeeTaskFilter.value = task && ended(task.status) ? "history" : "active";
+  employeeTaskFocus.value = taskId;
   memoryID.value = "";
   taskText.value = "";
   employeeError.value = "";
@@ -1250,14 +1226,18 @@ async function handoffTask(task, clientId) {
   });
 }
 async function openEmployeeTask(id) {
-  const owner = selectedEmployee.value;
+  const owner = selectedEmployee.value, fromView = view.value, fromTab = employeeTab.value, fromFocus = employeeTaskFocus.value;
   let task = employee.value.tasks?.find((entry) => entry.id === id);
   if (!task) {
     await refreshEmployee();
-    if (selectedEmployee.value !== owner) return;
+    if (selectedEmployee.value !== owner || view.value !== fromView || employeeTab.value !== fromTab || employeeTaskFocus.value !== fromFocus) return;
     task = employee.value.tasks?.find((entry) => entry.id === id);
   }
-  if (!task) { toast("这条任务记录已不存在"); return; }
+  if (!task) {
+    if (employeeTaskFocus.value === id) employeeTaskFocus.value = "";
+    toast("这条任务记录已不存在");
+    return;
+  }
   employeeTaskFilter.value = ended(task.status) ? "history" : "active";
   employeeTaskFocus.value = id;
   employeeTab.value = "tasks";
@@ -1265,7 +1245,10 @@ async function openEmployeeTask(id) {
 /** A task link in a group chat: open it on the (own) employee that runs it. */
 async function openEmployeeTaskOf({ employeeId, taskId }) {
   if (!employees.value.some((entry) => entry.id === employeeId)) { toast("你没有权限查看这个牛马"); return; }
-  if (selectedEmployee.value !== employeeId || view.value !== "employee") await chooseEmployee(employeeId);
+  if (selectedEmployee.value !== employeeId || view.value !== "employee") {
+    await chooseEmployee(employeeId, taskId);
+    if (view.value !== "employee" || employeeTab.value !== "tasks" || employeeTaskFocus.value !== taskId) return;
+  }
   if (selectedEmployee.value === employeeId) await openEmployeeTask(taskId);
 }
 function openGroupEmployee(id) {
@@ -1345,7 +1328,6 @@ onBeforeUnmount(() => {
   clearTimeout(eventReconnect);
   clearTimeout(eventsWatchdog);
   eventsSocket?.close();
-  localBridge?.close();
 });
 // 路由: the address bar mirrors the open page and its tab (router.js); refresh, links and back/forward restore it.
 // User navigation pushes; restoring a route and falling back from unknown or forbidden ids replace.
@@ -1361,10 +1343,15 @@ const routePath = computed(() => user.value ? formatRoute({
 }) : "");
 let routeReady = false, routing = 0;
 function syncRoute(replace) {
+  if (clientAuthorization.value) return;
   const path = routePath.value;
   if (routeReady && path && path !== window.location.pathname + window.location.search) window.history[replace ? "replaceState" : "pushState"](null, "", path);
 }
 watch(routePath, () => syncRoute(routing > 0));
+function closeClientAuthorization() {
+  clientAuthorization.value = "";
+  window.history.replaceState(null, "", routePath.value || "/");
+}
 async function applyRoute(route) {
   routing++;
   try {
@@ -1381,8 +1368,9 @@ async function applyRoute(route) {
     else if (route.creating && canExecute.value) { creatingEmployee.value = true; openEmployee(); }
     else {
       const id = employees.value.some((e) => e.id === route.employee) ? route.employee : selectedEmployee.value;
-      if (id && (id !== selectedEmployee.value || creatingEmployee.value || employee.value.id !== id)) await chooseEmployee(id);
-      else { creatingEmployee.value = false; employeeSession.value = ""; employeeTaskFocus.value = ""; employeeTab.value = "chat"; view.value = "employee"; }
+      const taskId = route.session ? "" : route.task || "";
+      if (id && (id !== selectedEmployee.value || creatingEmployee.value || employee.value.id !== id)) await chooseEmployee(id, taskId);
+      else { creatingEmployee.value = false; employeeSession.value = ""; employeeTaskFocus.value = taskId; employeeTab.value = taskId ? "tasks" : "chat"; view.value = "employee"; }
       if (id && selectedEmployee.value === id) {
         if (route.session) openEmployee(route.session);
         else if (route.task) await openEmployeeTask(route.task);
@@ -1432,6 +1420,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       </form>
     </div>
   </main>
+  <ClientAuthorization v-else-if="clientAuthorization" :request-id="clientAuthorization" :api="api" :user="user" @done="closeClientAuthorization" @switch-account="logout" />
   <div v-else class="shell">
     <button v-if="navigationOpen" class="navigation-backdrop" aria-label="关闭导航" tabindex="-1" @click="closeNavigation"></button>
     <aside
@@ -1458,8 +1447,6 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
         :client-ready="clientListReady"
         :client-status="clientStatus"
         :clients="onlineClients"
-        :pairing-text="localPairing ? localPairingText : ''"
-        :pairing-code="localPairing?.code"
         :sessions="rootSessions"
         :running="running"
         :current-root="rootSession?.id"
@@ -1470,7 +1457,6 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
         @logout="logout"
         @close="closeNavigation"
         @expand="openNavigation"
-        @retry-pairing="retryLocalPairing"
         @select-session="(s) => { closeNavigation(); attempt(() => selectSession(s)); }"
         @remove-session="removeSession"
       />
@@ -1485,7 +1471,6 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
           </select>
           <button v-if="canExecute" class="primary sm" @click="openEmployee()"><Icon name="users" :size="15" /><span class="hide-mobile">交给牛马</span></button>
         </PageHeader>
-        <div v-if="localPairing && localPairing.code !== 'connected'" class="banner notice" role="status"><span>{{ localPairingText }}</span><button type="button" class="sm" @click="retryLocalPairing">重新检测</button></div>
         <div ref="transcript" :key="current?.id ?? 'none'" class="transcript" aria-live="polite">
           <div v-if="sessionLoading" class="context-note">正在加载会话…</div>
           <div v-if="!sessionLoading && !messages.length && !live" class="welcome">
