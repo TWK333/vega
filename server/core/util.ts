@@ -20,7 +20,7 @@ export function assert(condition: unknown, message: string): asserts condition {
 export const clip = (value: string, n = 32768) =>
   [...value].length > n
     ? [...value].slice(0, n).join("") +
-      "\n[truncated; original archived in SQLite]"
+      "\n[truncated]"
     : value;
 export const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((yes, no) => {

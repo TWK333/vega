@@ -891,6 +891,8 @@ export class Tools {
       const blob = await this.engine.store.blobData(match[1]);
       assert(blob, "Archived blob missing");
       await this.engine.store.grantBlob(match[1], this.session.id);
+      if (blob.mime === "application/json")
+        return { value: { path: `/api/blobs/${match[1]}`, ...archiveSlice(JSON.parse(Buffer.from(blob.data).toString("utf8")), a.offset, a.limit) } };
       return {
         value: { path: a.path, url: `/api/blobs/${match[1]}` },
         images: [{ mime: blob.mime, blobId: match[1] }],

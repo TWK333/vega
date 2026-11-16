@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import sharp from "sharp";
 import { Store } from "../server/core/store";
 import { Engine } from "../server/core/engine";
@@ -10,7 +10,7 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Tools } from "../server/core/tools";
-import { Redactor } from "../server/core/util";
+import { clip, Redactor } from "../server/core/util";
 import type { Session } from "../server/core/store";
 
 async function fixture() {
@@ -47,10 +47,103 @@ test("archived files are written per employee task or user session and read back
     // An oversized result becomes a file in the task directory; history keeps a preview and its path.
     await engine.outcome(work.id, { id: "call-1", name: "bash", arguments: {} }, { value: { out: "x".repeat(40000) } }, () => {}, new Redactor());
     const archived = JSON.parse((await store.messages(work.id)).at(-1)!.text!);
-    assert.equal(archived.archivePath, join(store.files.dir(work), "output-call-1.json"));
+    assert.equal(dirname(archived.archivePath), store.files.dir(work));
+    assert.match(basename(archived.archivePath), /^output-[a-f\d]{64}\.json$/);
     assert(archived.preview.length < 33000);
     const page = await (await tools(work)).read({ path: archived.archivePath, offset: 1, limit: 3 });
     assert.match(page.value.text, /^1\|\{/);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("oversized tool results use bounded, distinct archive names and preserve the original call IDs", async () => {
+  const { store, engine, a } = await fixture();
+  try {
+    const work = await store.newSession({ cwd: process.cwd(), taskId: "t-long-id", employeeId: a.employeeId });
+    const prefix = "call_123__thought__" + "x".repeat(800);
+    const ids = [prefix + "a", prefix + "b", "call/a", "call?a", "调用-" + "长".repeat(300)];
+    const paths = new Set<string>();
+    for (const [index, id] of ids.entries()) {
+      const value = { out: String(index).repeat(40000) };
+      await engine.outcome(work.id, { id, name: "bash", arguments: {} }, { value }, () => {}, new Redactor());
+      const receipt = (await store.messages(work.id)).at(-1)!;
+      assert.equal(receipt.callId, id);
+      const archived = JSON.parse(receipt.text!);
+      assert.equal(dirname(archived.archivePath), store.files.dir(work));
+      assert.match(basename(archived.archivePath), /^output-[a-f\d]{64}\.json$/);
+      assert(!paths.has(archived.archivePath), "different call IDs must not overwrite each other's results");
+      paths.add(archived.archivePath);
+      assert.deepEqual(JSON.parse((await store.files.read(archived.archivePath)).toString("utf8")), value);
+    }
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("clipping reports truncation without claiming a database type or successful archiving", () => {
+  assert.equal(clip("完整文本", 4), "完整文本");
+  assert.equal(clip("😀😀😀", 2), "😀😀\n[truncated]");
+});
+
+test("failed file archiving saves the full redacted result in the database with a readable, access-controlled reference", async (t) => {
+  const { store, engine, a, tools } = await fixture();
+  try {
+    const work = await store.newSession({ cwd: process.cwd(), taskId: "t-fallback", employeeId: a.employeeId, ownerId: "owner" });
+    const other = await store.newSession({ cwd: process.cwd(), ownerId: "other" });
+    const redact = new Redactor();
+    redact.add("private-token");
+    t.mock.method(store.files, "write", async () => { throw Object.assign(new Error("private-token: disk full"), { code: "ENOSPC" }); });
+    const value = { out: "x".repeat(40000), secret: "private-token" };
+    await engine.outcome(work.id, { id: "completed-call", name: "bash", arguments: {} }, { value }, () => {}, redact);
+    const receipt = (await store.messages(work.id)).at(-1)!;
+    assert(!receipt.error, "a failed archive must not change the tool's successful outcome");
+    const archived = JSON.parse(receipt.text!);
+    assert.match(archived.archiveWarning, /disk full/);
+    assert(!receipt.text!.includes("private-token"));
+    assert.match(archived.archivePath, /^\/api\/blobs\/blob-[a-f\d]{32}$/);
+    const blob = await store.blobData(archived.archivePath.split("/").at(-1));
+    assert.equal(blob!.mime, "application/json");
+    assert.deepEqual(JSON.parse(Buffer.from(blob!.data).toString("utf8")), redact.value(value));
+    const page = await (await tools(work)).read({ path: archived.archivePath, limit: 3 });
+    assert.equal(page.value.path, archived.archivePath);
+    assert.match(page.value.text, /^1\|\{/);
+    assert.equal(page.value.hasMore, true);
+    assert(!page.images, "JSON archives must be paged as text, not treated as images");
+    await assert.rejects((await tools(other)).read({ path: archived.archivePath }), /not accessible/);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("archive failure never claims success when the database fallback also fails", async (t) => {
+  const { store, engine } = await fixture();
+  try {
+    const session = await store.newSession({ cwd: process.cwd() });
+    t.mock.method(store.files, "write", async () => { throw Error("disk unavailable"); });
+    t.mock.method(store, "blob", async () => { throw Error("database unavailable"); });
+    await assert.rejects(engine.outcome(session.id, { id: "once", name: "bash", arguments: {} }, { value: { out: "x".repeat(40000) } }, () => {}, new Redactor()), /database unavailable/);
+    assert.equal((await store.messages(session.id)).length, 0, "no false successful receipt is saved");
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("archive failures preserve completed tool receipts and continue the same turn without replay", async (t) => {
+  const { store, engine } = await fixture();
+  try {
+    const session = await store.newSession({ cwd: process.cwd(), scene: "lightweight", ownerId: "owner" });
+    let executions = 0, turns = 0;
+    t.mock.method(store.files, "write", async () => { throw Object.assign(new Error("archive unavailable"), { code: "EACCES" }); });
+    t.mock.method(engine, "batch", async () => {
+      executions++;
+      return [{ value: { completed: true, out: "x".repeat(40000) } }];
+    });
+    engine.providers.chat = async (_model, _system, messages) => {
+      if (turns++ === 0) return { role: "assistant", calls: [{ id: "once", name: "read", arguments: { path: "proof.txt" } }] };
+      const receipt = messages.find((message) => message.role === "tool" && message.callId === "once");
+      assert(receipt && !receipt.error);
+      assert.match(receipt.text!, /archiveWarning/);
+      return { role: "assistant", text: "原操作已经完成，归档已降级，无需重做。" };
+    };
+    await engine.run(session.id, { role: "user", text: "读取已有结果" });
+    assert.equal(executions, 1);
+    assert.equal(turns, 2);
+    const rows = await store.messages(session.id);
+    assert.equal(rows.filter((message) => message.role === "tool" && message.callId === "once").length, 1);
+    assert(!rows.some((message) => message.runtime === "turn_aborted"));
   } finally { await engine.close(); await store.close(); }
 });
 

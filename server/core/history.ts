@@ -115,8 +115,8 @@ export function promptHistory(
 }
 
 /** Text kept in context for an oversized result. Chrome results keep the fields history pruning relies on. */
-export function archivedResult(name: string, value: Obj, raw: string, archivePath: string) {
-  const tail = { archivePath, truncated: true, next: "完整结果存为文件 archivePath，用 read 按 offset/limit 分页读，hasMore 时从 nextOffset 继续" };
+export function archivedResult(name: string, value: Obj, raw: string, archivePath: string, warning?: string) {
+  const tail = { archivePath, truncated: true, ...(warning ? { archiveWarning: warning } : {}), next: "完整结果已保存于 archivePath，用 read 按 offset/limit 分页读，hasMore 时从 nextOffset 继续" };
   if (!CHROME_TOOLS.has(name) || !value || typeof value !== "object") return JSON.stringify({ preview: clip(raw, 32000), ...tail });
   const { tabTag, snapshotId, images, documentPath, ...rest } = value,
     head = { tabTag, snapshotId, images, documentPath };
@@ -155,7 +155,7 @@ export function historyImages(
     const omitted = m.images.filter((_, j) => !keep[j]).map((image) => image.path).filter((path, j, all) => path && all.indexOf(path) === j);
     const notice = chrome
       ? `[截图已移出上下文：${omitted.join("，")}，需要时用 read 读回；看页面现状请重新截图]`
-      : "Older tool images omitted from model view; original images/metadata remain archived in SQLite.";
+      : "Older tool images omitted from model view; original images/metadata remain archived.";
     rows[i] = {
       ...m,
       images: m.images.filter((_, j) => keep[j]),
