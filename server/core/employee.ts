@@ -1508,8 +1508,9 @@ export class Employee {
               t.answer = (t.answer || "") + "\n用户补充：" + a.text;
               t.supplementPending = true;
               t.revision = (t.revision || 0) + 1;
+              // New details do not reset failed attempts; only a delivered task's follow-up starts fresh.
+              if (reopening) t.recovery = undefined;
               if (wantsSettle(t)) t.settlePreferred = true;
-              else t.recovery = undefined;
               t.lastSupplementSource = supplementSource;
             }
             t.lastSupplement = text;

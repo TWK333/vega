@@ -250,6 +250,31 @@ test("generic recovery diagnoses in the original task/session, requires verified
     assert.equal(current.status, "done");
     assert.equal(current.workSession, originalSession);
     assert.equal((await store.sessions()).length, 1);
+    await employee.control({ action: "resume", id: job.id, text: "在已交付结果上补充新要求" });
+    assert.equal(employee.task(await employee.state(), job.id).recovery, undefined, "a delivered follow-up starts a fresh recovery budget");
+  } finally { employee.close(); await store.close(); }
+});
+
+test("new supplements cannot reset a failing task's durable recovery budget", async () => {
+  const { store, employee, runtime } = await fixture();
+  try {
+    const job = await task(employee);
+    runtime.run = async () => { throw Error("persistent service failure"); };
+    let current = await segment(employee, job);
+    const startedAt = current.recovery.startedAt, session = current.workSession;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await employee.control({ action: "resume", id: job.id, text: "补充要求 " + attempt });
+      const supplemented = employee.task(await employee.state(), job.id);
+      assert.equal(supplemented.recovery?.attempts, attempt);
+      assert.equal(supplemented.recovery?.startedAt, startedAt);
+      current = await segment(employee, supplemented);
+    }
+    assert.equal(current.status, "waiting");
+    assert.equal(current.recovery.attempts, 4);
+    assert.equal(current.workSession, session);
+    assert.match(current.waiting, /自动恢复已达上限/);
+    const reopened = new Employee(store, employee.vault, runtime);
+    assert.equal((await reopened.state()).tasks[0].recovery.attempts, 4);
   } finally { employee.close(); await store.close(); }
 });
 
