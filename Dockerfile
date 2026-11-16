@@ -30,14 +30,18 @@ RUN node scripts/client-manifest.mjs web/public/clients
 RUN npm run build
 
 FROM node:24-bookworm-slim AS runtime
+COPY --from=golang:1.26-bookworm /usr/local/go /usr/local/go
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        ca-certificates chromium chromium-sandbox git openssh-client ripgrep tini util-linux passwd \
+        ca-certificates chromium chromium-sandbox git openssh-client ripgrep tini util-linux passwd python3 \
         fontconfig fonts-liberation fonts-croscore fonts-crosextra-carlito \
         fonts-crosextra-caladea fonts-dejavu-core fonts-noto-core fonts-noto-mono \
         fonts-noto-cjk fonts-wqy-microhei fonts-wqy-zenhei \
         fonts-noto-color-emoji fonts-symbola \
     && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/local/go/bin/go /usr/local/go/bin/gofmt /usr/local/bin/ \
+    && go version \
+    && python3 --version \
     && mkdir -p /data/chromium /data/downloads /workspace \
     && chown -R node:node /data /workspace
 ENV NODE_ENV=production \

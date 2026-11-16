@@ -1,6 +1,6 @@
 # Docker：自动加载容器内 Chromium 扩展
 
-镜像包含 Nitro、Linux 原生构建的前端/`sharp`、Debian Chromium 和现有 Vega Chrome 扩展。只运行一个容器：受信启动器管理系统身份，网站服务降权为 UID 1000，云端文件工具、shell、技能、MCP 子进程和 Chromium 使用所属用户的独立 UID/GID。浏览器按需启动并自动加载扩展，不要求先启动公共浏览器。
+镜像包含 Nitro、Linux 原生构建的前端/`sharp`、Go 1.26、Python 3、Debian Chromium 和现有 Vega Chrome 扩展。只运行一个容器：受信启动器管理系统身份，网站服务降权为 UID 1000，云端文件工具、shell、技能、MCP 子进程和 Chromium 使用所属用户的独立 UID/GID。浏览器按需启动并自动加载扩展，不要求先启动公共浏览器。
 
 **这是容器里的专用浏览器，不是给宿主机或访问网页的客户端浏览器静默安装扩展。** 使用 Debian Chromium 而不是受近年扩展命令行限制影响的品牌版 Google Chrome，不篡改用户 Preferences，也不需要签名私钥或 Web Store 发布。
 
@@ -44,7 +44,7 @@ docker inspect --format '{{.State.Health.Status}}' vega
 
 ## 客户端下载
 
-镜像构建会在独立 Go 阶段交叉编译 Windows x64、Linux x64/ARM64、macOS Intel/Apple Silicon 五个客户端，并在前端构建前放入 `web/public/clients/`，最终随 Nitro 静态资源发布。登录后打开主导航「资源」即可下载；文件来自当前部署，与镜像内服务使用同一份源码，不依赖 GitHub Release，也不复制宿主机已编译的客户端。Windows 保留系统托盘和无控制台窗口，Linux/macOS 为命令行版本。Go 编译器不会进入运行镜像。
+镜像构建会在独立 Go 阶段交叉编译 Windows x64、Linux x64/ARM64、macOS Intel/Apple Silicon 五个客户端，并在前端构建前放入 `web/public/clients/`，最终随 Nitro 静态资源发布。登录后打开主导航「资源」即可下载；文件来自当前部署，与镜像内服务使用同一份源码，不依赖 GitHub Release，也不复制宿主机已编译的客户端。Windows 保留系统托盘和无控制台窗口，Linux/macOS 为命令行版本。`go`、`gofmt` 和 `python3` 也可在容器内的隔离任务环境中直接调用；Go 工具链使用运行镜像的目标架构，不复用构建机架构的编译器。
 
 升级客户端前先退出旧进程。Linux/macOS 下载后需 `chmod +x 文件名` 再执行 `./文件名`；文件未签名，Windows/macOS 可能要求用户确认来源。首次在同一台电脑打开网站登录并确认本地站点授权，之后保持客户端运行即可。
 

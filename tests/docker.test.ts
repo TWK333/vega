@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { chromiumArguments } from "../docker/start.mjs";
 import { connected, apiAddress } from "../docker/healthcheck.mjs";
+import { tenantEnvironment } from "../docker/cloud-supervisor.mjs";
 import { HeadlessBrowser } from "../server/core/headless";
 import { isolatedBrowserPresence } from "../server/core/presence";
 import { Store } from "../server/core/store";
@@ -177,6 +178,22 @@ test("Docker image builds Linux-native artifacts, uses a restricted identity lau
       .DownloadDirectory,
     "${user_home}/Downloads",
   );
+});
+
+test("Docker runtime provides target-platform Go and Python 3 on the isolated task PATH", () => {
+  const paths = tenantEnvironment({ home: "/private/home", name: "vega_u10001", tmp: "/private/tmp" }).PATH.split(":");
+  assert(paths.includes("/usr/local/bin"));
+  assert(paths.includes("/usr/bin"));
+  for (const file of ["Dockerfile", "Dockerfile.mysql"]) {
+    const runtime = readFileSync(file, "utf8").split("FROM node:24-bookworm-slim AS runtime")[1];
+    assert(runtime, `${file} must have a runtime stage`);
+    assert.match(runtime, /COPY --from=golang:1\.26-bookworm \/usr\/local\/go \/usr\/local\/go/);
+    const packages = runtime.match(/apt-get install -y --no-install-recommends\s+\\([\s\S]*?)&&/)?.[1] || "";
+    assert.match(packages, /\bpython3\b/);
+    assert.match(runtime, /ln -s \/usr\/local\/go\/bin\/go \/usr\/local\/go\/bin\/gofmt \/usr\/local\/bin\//);
+    assert.match(runtime, /&& go version/);
+    assert.match(runtime, /&& python3 --version/);
+  }
 });
 
 test("Dockerfile.mysql differs from Dockerfile only by its header comment and MySQL ENV defaults", () => {
