@@ -1,4 +1,5 @@
 import { updateEmployeeAvatar, updateUserAvatar } from "../../core/employee-avatar";
+import { userExperienceGraph } from "../../core/experience-access";
 import { chatHistory, withoutStepOutputs } from "../../core/chat-page";
 import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
 import {
@@ -731,10 +732,10 @@ export default defineEventHandler(async (event) => {
       await browser.bridge.start();
       return browser.bridge.status();
     }
-    if (path[0] === "experiences" && method === "GET")
-      return engine.chrome.experiences.graph(
-        (await engine.chrome.experiences.all()).filter((e) => !e.disabled),
-      );
+    if (path[0] === "experiences" && method === "GET") {
+      const employees = await filterAsync(await engine.employee.all(), async (employee) => (await employee.profile()).ownerId === user.id);
+      return userExperienceGraph(store, user.id, employees.map((employee) => employee.employeeId));
+    }
     throw createError({
       statusCode: 404,
       statusMessage: "API route not found",

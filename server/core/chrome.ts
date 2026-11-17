@@ -5,6 +5,7 @@ import sharp from "sharp";
 import type { Store } from "./store";
 import { ChromeBridge } from "./chrome-bridge";
 import { Experiences } from "./experiences";
+import { restoreGlobalExperiences } from "./experience-access";
 import {
   assert,
   clip,
@@ -58,6 +59,7 @@ export class Chrome {
   holds = new Map<string, { x: number; y: number }>();
   cancelled = new Map<string, AbortController>();
   experiences: Experiences;
+  private personalExperiences = new Map<string, Promise<Experiences>>();
   /** A person using a task-created page takes it out of automatic cleanup. */
   protectTab?: (tag: string) => Promise<void>;
   workspaceFile = workspaceFile;
@@ -68,6 +70,18 @@ export class Chrome {
     experienceKind = "experience",
   ) {
     this.experiences = new Experiences(store, experienceKind);
+  }
+  async experiencesFor(owner: string) {
+    if (this.experiences.kind !== "experience") return this.experiences;
+    const userId = owner.startsWith("browser-view:") ? owner.slice("browser-view:".length) : (await this.store.session(owner)).ownerId;
+    if (!userId) return this.experiences;
+    let pending = this.personalExperiences.get(userId);
+    if (!pending) {
+      pending = restoreGlobalExperiences(this.store, userId).then(() => new Experiences(this.store, "experience:user_" + userId));
+      this.personalExperiences.set(userId, pending);
+      pending.catch(() => this.personalExperiences.delete(userId));
+    }
+    return pending;
   }
   cdp(
     tag: string,
@@ -532,7 +546,7 @@ export class Chrome {
       ...shot,
       documentPath: o.documentPath,
       coverageGaps: o.coverageGaps,
-      experienceHint: await this.experiences.hint(owner, origin),
+      experienceHint: await (await this.experiencesFor(owner)).hint(owner, origin),
       pages: this.summarize(o, a),
     };
   }
@@ -1300,7 +1314,7 @@ export class Chrome {
     if (op.startsWith("experience_")) {
       const o = latest(),
         origin = o ? new URL(o.pages[0].url).origin : undefined;
-      return await this.experiences.execute(
+      return await (await this.experiencesFor(owner)).execute(
               owner,
               a,
               o && origin ? { id: o.id, origin } : undefined,
@@ -1529,7 +1543,7 @@ export class Chrome {
       } catch (e: any) { result.observationError = e.message; }
     }
     if (!script && !error && result.pages?.length)
-      this.experiences.record(
+      (await this.experiencesFor(owner)).record(
         owner,
         o.pages[0].url,
         result.pages[0].url,

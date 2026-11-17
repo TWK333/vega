@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Chrome } from "./chrome";
 import { ChromeBridge } from "./chrome-bridge";
+import { clientExperienceKind, restoreClientExperiences } from "./experience-access";
 import { LocalAgentUnavailable, type Agent, type LocalAgents } from "./local-agent";
 import type { Store, Session } from "./store";
 import type { Obj } from "./util";
@@ -27,7 +28,7 @@ class LocalBridge extends ChromeBridge {
 }
 
 export class LocalBrowsers {
-  private sessions = new Map<string, { agent: Agent; chrome: Chrome; held: boolean }>();
+  private sessions = new Map<string, { agent: Agent; chrome: Chrome; held: boolean; restored: Promise<void> }>();
   constructor(private store: Store, private hub: LocalAgents, private pageScript: string) {}
   async get(session: Session, signal?: AbortSignal) {
     const clientId = session.browserClientId || session.clientId;
@@ -38,7 +39,7 @@ export class LocalBrowsers {
     if (!entry || entry.agent !== agent) {
       if (entry) await this.release(session.id, true);
       const bridge = new LocalBridge(this.hub, agent);
-      const chrome = new Chrome(this.store, bridge, this.pageScript, "experience:client:" + agent.clientId);
+      const chrome = new Chrome(this.store, bridge, this.pageScript, clientExperienceKind(agent.userId, agent.clientId));
       const shared = [...this.sessions.values()].find(value => value.agent === agent);
       // Navigation affects every session on this browser; observation keys still isolate input ownership.
       if (shared) chrome.observations = shared.chrome.observations;
@@ -47,13 +48,26 @@ export class LocalBrowsers {
         if (typeof r.path !== "string") throw Error("Invalid local upload path");
         return r.path;
       };
-      this.sessions.set(session.id, entry = { agent, chrome, held: false });
+      const restored = restoreClientExperiences(this.store, agent.userId, agent.clientId);
+      restored.catch(() => {});
+      this.sessions.set(session.id, entry = { agent, chrome, held: false, restored });
     }
     // The native client owns the lease across accounts, servers and the whole model turn.
     const bridge = entry.chrome.bridge as LocalBridge;
     agent.browserLeases.add(bridge.lease);
-    try { await bridge.claim(signal); }
-    catch (error) { agent.browserLeases.delete(bridge.lease); throw error; }
+    let acquired = false;
+    try {
+      await bridge.claim(signal);
+      acquired = true;
+      await entry.restored;
+    } catch (error) {
+      agent.browserLeases.delete(bridge.lease);
+      if (acquired) {
+        await bridge.release().catch(() => {});
+        if (this.sessions.get(session.id) === entry) this.sessions.delete(session.id);
+      }
+      throw error;
+    }
     entry.held = true;
     return entry.chrome;
   }

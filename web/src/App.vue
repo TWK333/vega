@@ -1598,7 +1598,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       <ResourcesView v-else-if="view === 'resources'" />
       <TokenStatsView v-else-if="view === 'usage'" :api="api" :admin="isAdmin" :self-id="user.id" />
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" :csrf="csrfToken" />
-      <ExperiencesView v-else-if="view === 'experiences' && isAdmin" :api="api" :tab="pageSub" @tab="setPageTab" />
+      <ExperiencesView v-else-if="view === 'experiences'" :api="api" :tab="pageSub" @tab="setPageTab" />
       <SettingsView v-else-if="view === 'settings'" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" :admin="isAdmin" :employees="myEmployees" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
     </section>
     <div class="toasts" aria-live="polite">

@@ -30,6 +30,7 @@ import { Providers, ProviderError, type Emit } from "./provider";
 import { Tools, type Outcome } from "./tools";
 import { Context, estimate, ACP_GUIDE, sinceNewSession } from "./context";
 import { APPUSE_TOOLS } from "./appuse-tools";
+import { DesktopObservations } from "./desktop-observations";
 import { Employee, recallMemory, formatMemoriesForPrompt, ended, taskSummary, followUpOpen, type EmployeeRuntime, type Task } from "./employee";
 import { scheduleDigest } from "./work-intake";
 import { EmployeeBrowsers } from "./employee-browsers";
@@ -172,6 +173,7 @@ export class Engine {
   statusPush?: (userId: string, clientId?: string) => void;
   runtimePush?: (userId: string) => void;
   executionSwitches = new Set<string>();
+  desktopObservations = new DesktopObservations();
   mcpSessions = new Map<string, { key: string; client: MCP }>();
   async mcpFor(session: Session, config: Config) {
     if (session.employeeId) config = await this.config(session);
@@ -265,6 +267,7 @@ export class Engine {
     return { kind: "idle", text: "空闲" };
   }
   async releaseSession(key: string) {
+    this.desktopObservations.forget(key);
     const entry = this.mcpSessions.get(key);
     this.mcpSessions.delete(key);
     await this.localBrowsers.release(key, true);
@@ -1574,7 +1577,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           await this.store.saveSession(session);
         }
         const browser = session?.localBrowser ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
-        await browser?.experiences.finish(key, !error);
+        if (browser) await (await browser.experiencesFor(key)).finish(key, !error);
       } catch (cleanupError: any) {
         cancelSessionAgents(key);
         if (session && turnStarted) {

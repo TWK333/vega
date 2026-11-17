@@ -5,6 +5,7 @@ import { LocalAgents } from "../server/core/local-agent";
 import { Tools } from "../server/core/tools";
 import { Store } from "../server/core/store";
 import { APPUSE_TOOLS, appuseArguments, normalizeDesktopAction } from "../server/core/appuse-tools";
+import { DesktopObservations } from "../server/core/desktop-observations";
 
 const client = { instance: "a".repeat(32), clientId: "b".repeat(32), name: "笔记本", platform: "windows", cwd: "C:\\client" };
 const png = Buffer.from("fake-png");
@@ -14,8 +15,9 @@ async function setup(t: any) {
   hub.connect("alice", client, { send() {}, close() {} });
   t.after(async () => { hub.close(); await store.close(); });
   const session = await store.newSession({ ownerId: "alice", cwd: client.cwd, localAgent: true, localPlatform: "windows", clientId: client.clientId });
-  const tools = await Tools.create({ store, localAgents: hub, mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, new AbortController().signal, () => {});
-  return { store, hub, session, tools };
+  const engine = { store, localAgents: hub, desktopObservations: new DesktopObservations(), mcpFor: () => ({}) };
+  const tools = await Tools.create(engine as any, session, { model: "", provider: {} }, new AbortController().signal, () => {});
+  return { store, hub, session, tools, engine };
 }
 
 test("desktop tools are the nine narrow ones, listed only in a Windows client session", async (t) => {
@@ -143,4 +145,42 @@ test("a stray field is rejected against the narrow schema before any desktop wor
     /不接受字段 observe/,
   );
   assert.equal(called, false);
+});
+
+test("desktop experience save and feedback verify the actual latest session window", async (t) => {
+  const { store, hub, session, tools, engine } = await setup(t);
+  let valid = true, checks = 0;
+  (hub as any).request = async (_agent: unknown, op: string, args: any) => {
+    assert.equal(op, "appuse");
+    assert.equal(args.owner, session.id);
+    if (args.operation === "windows") return {
+      windows: [{ windowId: 42, app: "Editor", title: "Document" }],
+      windowId: 42, historical: false, snapshotId: "snap-1", images: [{ imageId: "monitor-0" }],
+    };
+    if (args.operation === "elements") {
+      checks++;
+      assert.equal(args.windowId, 42);
+      assert.equal(args.snapshotId, "snap-1");
+      return valid ? { windowId: 42, app: "Editor", title: "Document" } : { error: "快照已失效" };
+    }
+    if (args.operation === "act") { valid = false; return { status: "executed", completedActions: 1 }; }
+    throw Error("unexpected desktop request");
+  };
+  const save = { scope: "Editor", task: "Save a document", conditions: ["Document open"], steps: ["Save", "Confirm"], checks: ["Saved"], evidence: "Saved", redacted: true };
+  await assert.rejects(tools.execute({ id: "before", name: "appuse_experience_save", arguments: save }, {} as any), /目标窗口截图/);
+  await tools.execute({ id: "observe", name: "appuse_windows", arguments: { windowId: 42, observe: true } }, {} as any);
+  const saved = await tools.execute({ id: "save", name: "appuse_experience_save", arguments: save }, {} as any);
+  assert.equal(saved.value.saved, true);
+  assert.equal((await store.objects("experience:desktop:alice")).length, 1);
+  assert.equal((await store.objects("experience")).length, 0);
+  const feedback = { snapshotId: "snap-1", routeId: saved.value.experience.id, scope: "Editor", task: save.task, outcome: "success", reason: "confirmed", evidence: "Saved", redacted: true };
+  assert.equal((await tools.execute({ id: "feedback", name: "appuse_experience_feedback", arguments: feedback }, {} as any)).value.saved, true);
+  assert.equal(checks, 2);
+  await assert.rejects(tools.execute({ id: "stale", name: "appuse_experience_save", arguments: { ...save, snapshotId: "old" } }, {} as any), /snapshotId/);
+  await assert.rejects(tools.execute({ id: "wrong-app", name: "appuse_experience_save", arguments: { ...save, scope: "Other" } }, {} as any), /scope/);
+  const otherSession = await store.newSession({ ownerId: "alice", cwd: client.cwd, localAgent: true, localPlatform: "windows", clientId: client.clientId });
+  const other = await Tools.create(engine as any, otherSession, { model: "", provider: {} }, new AbortController().signal, () => {});
+  await assert.rejects(other.execute({ id: "other", name: "appuse_experience_save", arguments: save }, {} as any), /目标窗口截图/);
+  await tools.execute({ id: "input", name: "appuse_act", arguments: { feedback: "none", actions: [{ action: "click", x: 1, y: 1 }] } }, {} as any);
+  await assert.rejects(tools.execute({ id: "invalidated", name: "appuse_experience_save", arguments: save }, {} as any), /快照已失效/);
 });

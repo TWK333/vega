@@ -117,7 +117,7 @@ docker run -d --name vega --shm-size=1g \
 
 ## 配置模型
 
-设置页通过表单管理服务商、接口地址、密钥和模型，支持获取/搜索/手动添加模型与修改能力、长度参数；场景模型通过下拉选择，支持档位和备用顺序，浏览器场景只显示图片模型。高级请求头/厂商参数按需展开。底层仍支持旧`provider.options.baseURL/apiKey/headers`与顶层写法、嵌套分类、`limit.context/output`、`modalities.input`和`variants`。密钥可用`{env:NAME}`/`${NAME}`引用；`__stored_secret__`保留已有密钥。经验图谱独立导航，设置排在最后；界面不再提供目录配置或技术机制说明。
+设置页通过表单管理服务商、接口地址、密钥和模型，支持获取/搜索/手动添加模型与修改能力、长度参数；场景模型通过下拉选择，支持档位和备用顺序，浏览器场景只显示图片模型。高级请求头/厂商参数按需展开。底层仍支持旧`provider.options.baseURL/apiKey/headers`与顶层写法、嵌套分类、`limit.context/output`、`modalities.input`和`variants`。密钥可用`{env:NAME}`/`${NAME}`引用；`__stored_secret__`保留已有密钥。经验图谱位于主导航，按账号展示本人的浏览器和电脑操作经验；旧共享记录只有能确认属于该账号时才显示。设置排在最后；界面不再提供目录配置或技术机制说明。
 
 ```json
 {

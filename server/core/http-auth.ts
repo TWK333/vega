@@ -115,6 +115,7 @@ export async function gate(event: H3Event, path: string) {
   const role = session.user.role;
   if (role === "admin") return;
   if (/^\/api\/employees(?:\/|$)/.test(path) && (role === "operator" || event.method === "GET")) return;
+  if (path === "/api/experiences" && event.method === "GET") return;
   if (
     (path === "/api/bootstrap" && event.method === "GET") ||
     (/^\/api\/events(?:\/|$)/.test(path) && ["GET", "POST"].includes(event.method))

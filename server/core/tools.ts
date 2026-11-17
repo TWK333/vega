@@ -509,12 +509,16 @@ export class Tools {
       const agent = this.agent();
       assert(agent, "桌面工具只能在本机客户端会话执行；当前会话没有绑定客户端，本步未执行任何操作。");
       const args = appuseArgs || { ...a, owner: this.session.id };
-      // 经验图谱与浏览器路径共用同一套存储与评分，只是 scope 是应用名而不是站点 origin。
+      // 经验归账号；写入前由客户端核对同会话最新截图和实际窗口。
       if (String(args.operation || "").startsWith("experience_")) {
-        const experiences = new DesktopExperiences(this.engine.store, "experience");
-        return { value: await experiences.execute(this.session.id, args, undefined) };
+        assert(this.session.ownerId, "桌面经验需要归属账号");
+        const experiences = new DesktopExperiences(this.engine.store, "experience:desktop:" + this.session.ownerId);
+        if (args.operation === "experience_search") return { value: await experiences.execute(this.session.id, args) };
+        const observed = await this.engine.desktopObservations.verify(this.engine.localAgents, agent, this.session.id, args.snapshotId, args.experience?.scope, this.signal);
+        return { value: await experiences.execute(this.session.id, { ...args, snapshotId: observed.id }, observed) };
       }
       const result = await localAppuse(this.engine.localAgents, agent, args, this.signal);
+      this.engine.desktopObservations.record(this.session.id, agent.clientId, result);
       // 客户端在 images[].data 里回传 PNG；落到会话文件后删掉 base64，只留路径和地址。
       const images: Outcome["images"] = [];
       for (const image of result.images || []) {

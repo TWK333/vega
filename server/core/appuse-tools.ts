@@ -136,7 +136,7 @@ export function appuseTools(): Tool[] {
     ),
     def(
       "appuse_experience_save",
-      "未照已有路径、经两步以上完成任务且最新图证明成功时，保存脱敏路径一次；scope 必须来自该观察。普通保存返回 accepted 即收尾。不保存凭据、业务数据、坐标或 ref。",
+      "未照已有路径、经两步以上完成任务且最新图证明成功时，保存脱敏路径一次；先用 appuse_windows 查看目标，最新截图须指定该窗口或包含前台窗口，scope 须与应用名或窗口标题一致。普通保存返回后即收尾。不保存凭据、业务数据、坐标或 ref。",
       {
         scope: { type: "string" }, task: { type: "string" }, conditions: { type: "array", items: { type: "string" } },
         steps: { type: "array", items: { type: "string" } }, checks: { type: "array", items: { type: "string" } },
@@ -147,7 +147,7 @@ export function appuseTools(): Tool[] {
     ),
     def(
       "appuse_experience_feedback",
-      "报告已有桌面路径的本次结果，不重复保存路径。snapshotId/evidence 来自当前观察；outcome 为 success/transient/precondition/invalid，reason 说明依据，redacted=true。",
+      "报告已有桌面路径的本次结果，不重复保存路径。先用 appuse_windows 查看目标，snapshotId 须是指定该窗口或包含前台窗口的最新截图，scope 须与应用名或窗口标题一致；outcome 为 success/transient/precondition/invalid，reason 说明依据，redacted=true。",
       {
         snapshotId: { type: "string" }, routeId: { type: "string" }, scope: { type: "string" }, task: { type: "string" },
         outcome: { type: "string", enum: ["success", "transient", "precondition", "invalid"] },

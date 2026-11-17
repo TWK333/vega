@@ -147,3 +147,16 @@ test("App routing: unknown or forbidden ids and pages fall back to the default v
   const adminPrinciples = await boot("https://vega.test/settings/principles", { admin: true });
   assert.deepEqual([adminPrinciples.c.view.value, adminPrinciples.c.pageSub.value, adminPrinciples.location.pathname], ["settings", "principles", "/settings/principles"]);
 });
+
+test("personal experiences are accessible to every role outside the admin navigation", async () => {
+  assert(!ADMIN_PAGES.includes("experiences"));
+  for (const canExecute of [true, false]) {
+    const s = app("https://vega.test/experiences/r1");
+    s.c.canExecute.value = canExecute;
+    await s.c.applyRoute(parseRoute(s.location.href));
+    assert.deepEqual([s.c.view.value, s.c.pageSub.value], ["experiences", "r1"]);
+  }
+  const sidebar = readFileSync("web/src/AppSidebar.vue", "utf8");
+  assert(sidebar.indexOf('title="经验图谱"') < sidebar.indexOf('<template v-if="isAdmin">'));
+  assert(!source.includes("view === 'experiences' && isAdmin"));
+});
