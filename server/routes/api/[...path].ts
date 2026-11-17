@@ -1,5 +1,5 @@
 import { updateEmployeeAvatar, updateUserAvatar } from "../../core/employee-avatar";
-import { chatHistory } from "../../core/chat-page";
+import { chatHistory, withoutStepOutputs } from "../../core/chat-page";
 import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
 import {
   browserTabs,
@@ -348,7 +348,8 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "transcript" && method === "POST") return await employee.transcript(a.threadId);
       if (path.length === 2 && method === "GET") {
         const { enabled, workStart, workEnd, ...visible } = state;
-        return { ...visible, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
+        const tasks = getRequestURL(event).searchParams.get("stepSummaries") === "1" ? visible.tasks.map(withoutStepOutputs) : visible.tasks;
+        return { ...visible, tasks, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
         if (!await employee.manageable(user)) check(a.action === "list" || a.action === "memory_search" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改记忆和凭据");
@@ -878,7 +879,10 @@ async function groupRoute(path: string[], method: string, a: Obj, user: { id: st
     if (path.length === 3 && method === "POST") { await groups.addEmployee(user, id, a.employeeId); return { ok: true }; }
     if (path.length === 4 && method === "DELETE") return await groups.removeEmployee(user, id, path[3]);
   }
-  if (path[2] === "tasks" && path.length === 3 && method === "GET") return await groups.tasks(user, id);
+  if (path[2] === "tasks" && path.length === 3 && method === "GET") {
+    const result = await groups.tasks(user, id);
+    return query.get("stepSummaries") === "1" ? { ...result, members: result.members.map((member) => ({ ...member, tasks: member.tasks.map(withoutStepOutputs) })) } : result;
+  }
   if (path[2] === "tasks" && path.length === 5) {
     if (method === "GET") return await groups.task(user, id, path[3], path[4]);
     if (method === "POST") return await groups.controlTask(user, id, path[3], path[4], a);

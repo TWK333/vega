@@ -1,5 +1,28 @@
+import { stepSummary } from "../../shared/step-output.js";
+
 // Windowed employee chat history: cached messages render first, then stream events append server deltas.
 export const CHAT_PAGE_SIZE = 60;
+
+/** Fetch a single original artifact only when its task is no longer available. */
+export async function loadStepOutput(api, path, seq, sessionId, expected) {
+  if (!Number.isSafeInteger(seq) || seq < 1 || seq === Number.MAX_SAFE_INTEGER) throw Error("产物消息编号无效");
+  const page = await api(`${path}?before=${seq + 1}&limit=1`);
+  if (sessionId && page.session?.id && page.session.id !== sessionId) throw Error("会话已变化，原产物可能已不可见；请刷新后再试");
+  const message = page.messages?.find((row) => row.seq === seq), output = message?.stepOutput;
+  if (expected) {
+    const actual = message && stepSummary(message);
+    const expectedTask = expected.tasks?.[0]?.id, actualTask = actual?.tasks?.[0]?.id;
+    if (!actual || actual.stepOutput?.step !== expected.stepOutput?.step || actual.stepOutput?.label !== expected.stepOutput?.label || expectedTask !== actualTask)
+      throw Error("原产物已变化或不存在，请刷新会话后再试");
+  }
+  if (output && typeof output === "object" && !output.omitted) return output;
+  const prefix = "**步骤产物（任务未完成）**\n\n", text = String(message?.text || "");
+  if (output === true && text.startsWith(prefix)) {
+    const rest = text.slice(prefix.length), split = rest.indexOf("\n\n");
+    return { label: split < 0 ? "历史步骤产物" : rest.slice(0, split), text: split < 0 ? rest : rest.slice(split + 2) };
+  }
+  throw Error("原产物暂不可见或已不存在");
+}
 
 /** Merge two seq-sorted message lists, preferring the incoming copy of any duplicate. */
 export function mergeMessages(current, incoming) {
@@ -85,6 +108,7 @@ export function createChatHistory({ api, path, messages, running, hasMore, pageS
   }
   return {
     lastSeq,
+    get session() { return session; },
     touch() { stream++; return stream; },
     get stream() { return stream; },
     load(onCached) {

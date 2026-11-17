@@ -5,13 +5,14 @@ import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { employeeChatMessages, continuesPrevious } from "./conversation";
-import { createChatHistory } from "./chat-history.js";
+import { createChatHistory, loadStepOutput } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
 import { markSeen, seenSeq } from "./seen.js";
 import { avatarBubble } from "../../shared/employee-avatars";
 const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
 const emit = defineEmits(["task"]);
 const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
+const artifactSession = ref("");
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
 const files = computed({ get: () => props.composer.attachments, set: (items) => props.composer.attachments = items });
 const quoted = computed({ get: () => props.composer.quote, set: (quote) => props.composer.quote = quote });
@@ -50,7 +51,7 @@ watch(visible, (rows) => markSeen(props.userId, props.employeeId, rows.at(-1)?.s
 const typingContinued = computed(() => continuesPrevious(displayed.value.at(-1)?.message, { role: "assistant" }));
 // My own bubbles wear the color of the employee I am talking to, so each 牛马's chat looks different.
 const selfTint = computed(() => { const color = avatarBubble(props.avatar, props.employeeId); return { background: color.fill, color: color.ink }; });
-const history = createChatHistory({ api: (...args) => props.api(...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
+const history = createChatHistory({ api: (path, ...args) => props.api(path + "&stepSummaries=1", ...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
 
 // Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
 // avatar's last glance and eases into it (in memory only; nothing is persisted).
@@ -112,7 +113,8 @@ function onScroll() {
 async function load() {
   let cached = false;
   try {
-    await history.load(async () => { cached = true; ready = true; await scroll(); });
+    await history.load(async () => { cached = true; artifactSession.value = history.session; ready = true; await scroll(); });
+    artifactSession.value = history.session;
     if (disposed) return;
     if (!cached || nearBottom()) await scroll();
     ready = true;
@@ -125,6 +127,7 @@ async function refresh(apply, syncRunning = true) {
   const atBottom = nearBottom();
   try {
     await history.newer(apply, syncRunning);
+    artifactSession.value = history.session;
     if (!disposed && atBottom) await scroll();
   } catch (e) { if (!disposed && !e.network) { error.value = e.message; apply?.([]); } }
 }
@@ -251,7 +254,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         <template v-for="({ message, continued }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
         <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
-        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :load-step-output="(seq, message) => loadStepOutput(api, `/employees/${employeeId}/chat`, seq, artifactSession, message)" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         </template>
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>

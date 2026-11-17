@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
+import { createChatHistory, loadStepOutput, mergeMessages } from "../web/src/chat-history.js";
 import { createChatCache } from "../web/src/chat-cache.js";
 
 const message = (seq: number, text = "message-" + seq) => ({ seq, role: "user", text });
@@ -21,6 +21,21 @@ function fixture(api: any, cache: any = cacheFixture(), pageSize = 60) {
   const history = createChatHistory({ api, path: () => "/employees/a/chat", messages, running, hasMore, cache, pageSize });
   return { history, messages, running, hasMore, cache };
 }
+
+test("a missing task's original step artifact is fetched one message at a time, including legacy records", async () => {
+  const urls: string[] = [], output = { step: 1, label: "设计", text: "完整正文", files: [{ blobId: "blob-a" }] };
+  const api = async (url: string) => { urls.push(url); return { messages: [{ seq: 4, stepOutput: output }] }; };
+  assert.deepEqual(await loadStepOutput(api, "/employees/a/chat", 4), output);
+  assert.deepEqual(urls, ["/employees/a/chat?before=5&limit=1"]);
+  const legacy = async () => ({ messages: [{ seq: 9, stepOutput: true, text: "**步骤产物（任务未完成）**\n\n旧标题\n\n旧正文" }] });
+  assert.deepEqual(await loadStepOutput(legacy, "/groups/g/messages", 9), { label: "旧标题", text: "旧正文" });
+  await assert.rejects(loadStepOutput(api, "/employees/a/chat", 0), /编号无效/);
+  await assert.rejects(loadStepOutput(api, "/employees/a/chat", 5), /不存在/);
+  await assert.rejects(loadStepOutput(async () => { throw Error("无权查看"); }, "/groups/g/messages", 9), /无权查看/);
+  await assert.rejects(loadStepOutput(async () => ({ session: { id: "new-chat" }, messages: [{ seq: 4, stepOutput: output }] }), "/employees/a/chat", 4, "old-chat"), /会话已变化/);
+  const expected = { tasks: [{ id: "old-task" }], stepOutput: { step: 1, label: "设计", omitted: true } };
+  await assert.rejects(loadStepOutput(async () => ({ messages: [{ seq: 4, tasks: [{ id: "other-task" }], stepOutput: output }] }), "/employees/a/chat", 4, "", expected), /原产物已变化/);
+});
 
 test("cached messages render before network resolution and opening requests only newer sequences", async () => {
   let release!: (value: any) => void;

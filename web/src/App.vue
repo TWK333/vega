@@ -236,6 +236,9 @@ const employee = ref({
   importance = ref(1),
   activeTaskCount = ref(null);
 watch(selectedEmployee, () => { workRailOpen.value = false; });
+watch(employeeTab, (tab, previous) => {
+  if (user.value && selectedEmployee.value && (tab === "tasks") !== (previous === "tasks")) void refreshEmployee();
+});
 
 let eventsSocket,
   eventsReady = false,
@@ -1112,7 +1115,7 @@ function prepareEmployee(id) {
 }
 async function loadEmployee() {
   if (!user.value) return;
-  const owner = user.value.id, request = ++employeeLoadVersion;
+  const owner = user.value.id, request = ++employeeLoadVersion, includeOutputs = employeeTab.value === "tasks";
   const list = await api("/employees");
   if (user.value?.id !== owner || request !== employeeLoadVersion) return;
   void pruneChatCache(owner, list.map((entry) => entry.id));
@@ -1126,8 +1129,8 @@ async function loadEmployee() {
     return;
   }
   prepareEmployee(id);
-  const data = await api(`/employees/${id}`);
-  if (user.value?.id !== owner || selectedEmployee.value !== id || request !== employeeLoadVersion) return;
+  const data = await api(`/employees/${id}${includeOutputs ? "" : "?stepSummaries=1"}`);
+  if (user.value?.id !== owner || selectedEmployee.value !== id || request !== employeeLoadVersion || includeOutputs !== (employeeTab.value === "tasks")) return;
   employeeSessionVersion.value++;
   if (employeeTab.value !== "settings" || employee.value.id !== id) employee.value = data;
   else { employee.value.tasks = data.tasks; employee.value.busy = data.busy; employee.value.chatRunning = data.chatRunning; employee.value.executionClients = data.executionClients; employee.value.execution = data.execution; employee.value.avatar = data.avatar; employee.value.runtime = data.runtime; }
@@ -1317,7 +1320,7 @@ async function saveEmployeeSettings() {
       instruction: employee.value.instruction,
     });
     toast("牛马设置已保存");
-    const updated = await api(`/employees/${id}`);
+    const updated = await api(`/employees/${id}?stepSummaries=1`);
     if (selectedEmployee.value === id) employee.value = updated;
   }); } finally { employeeSaving.value = false; }
 }

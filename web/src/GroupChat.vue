@@ -9,6 +9,7 @@ import MentionTextarea from "./MentionTextarea.vue";
 import Icon from "./Icon.vue";
 import GroupWork from "./GroupWork.vue";
 import { continuesPrevious } from "./conversation";
+import { loadStepOutput } from "./chat-history.js";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
 import { markSeen, seenSeq } from "./seen.js";
@@ -62,7 +63,7 @@ function nearBottom() {
 async function load(scroll = false) {
   if (!props.groupId) return;
   const id = props.groupId, stick = scroll || nearBottom();
-  const result = await props.api(`/groups/${id}/messages?limit=200`);
+  const result = await props.api(`/groups/${id}/messages?limit=200&stepSummaries=1`);
   if (props.groupId !== id) return;
   messages.value = result.messages;
   if (!settled) { settled = true; baseSeq = lastSeq.value; }
@@ -145,7 +146,7 @@ async function loadWork() {
   if (!work.value || !props.groupId) return;
   const id = props.groupId;
   workLoading.value = true;
-  try { const result = await props.api(`/groups/${id}/tasks`); if (props.groupId === id) workMembers.value = result.members; }
+  try { const result = await props.api(`/groups/${id}/tasks?stepSummaries=1`); if (props.groupId === id) workMembers.value = result.members; }
   finally { workLoading.value = false; }
 }
 function toggleWork() { work.value = !work.value; if (work.value) panel.value = false; }
@@ -189,7 +190,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
               <template v-for="({ message, continued }, index) in shown" :key="message.seq">
                 <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
+                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
                 <span class="chat-avatar" aria-hidden="true"><PressMention :name="e.name" :disabled="readonly" @press="mentionMember"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></PressMention></span>

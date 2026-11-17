@@ -1,7 +1,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../server/core/store";
-import { chatHistory } from "../server/core/chat-page";
+import { chatHistory, withoutStepOutputs } from "../server/core/chat-page";
 
 const stores: Store[] = [];
 after(async () => { for (const store of stores) await store.close(); });
@@ -64,6 +64,30 @@ test("chat history appends only messages newer than a known sequence", async () 
   assert.equal(newer.hasMore, true);
   assert.deepEqual((await chatHistory(store, id, q({ after: "30" })) as any).messages, []);
   assert.equal((await chatHistory(store, id, q({ after: "0" })) as any).messages.length, 30);
+});
+
+test("chat can request step summaries without altering the saved artifacts or the full-history API", async () => {
+  const { store, id } = await fixture(0);
+  const body = "报告正文 ".repeat(2000), file = { blobId: "blob-" + "a".repeat(32), name: "report.txt", mime: "text/plain", size: 12 };
+  await store.append(id, { role: "assistant", text: "继续执行", tasks: [{ id: "t1", title: "任务", status: "running" }], stepOutput: { step: 1, label: "设计", text: body, files: [file] } });
+  await store.append(id, { role: "assistant", text: `**步骤产物（任务未完成）**\n\n旧设计\n\n${body}`, displayText: body, stepOutput: true });
+  const original = await store.messages(id);
+  const page = await chatHistory(store, id, q({ limit: "60", stepSummaries: "1" }));
+  assert.deepEqual(page.messages[0].stepOutput, { step: 1, label: "设计", omitted: true });
+  assert.equal(page.messages[0].text, "继续执行");
+  assert.deepEqual(page.messages[1].stepOutput, { step: 0, label: "旧设计", omitted: true, legacy: true });
+  assert.equal(page.messages[1].text, "步骤产物已保存。");
+  assert(!JSON.stringify(page).includes(body) && !JSON.stringify(page).includes(file.blobId));
+  const incremental = await chatHistory(store, id, q({ after: "0", stepSummaries: "1" }));
+  assert.deepEqual(incremental.messages, page.messages);
+  const summaries = page.messages.slice();
+  const full = await chatHistory(store, id, q());
+  assert.deepEqual(full.messages, original);
+  assert.deepEqual(page.messages, summaries, "a later full-history read must not hydrate the cached summary objects");
+  assert.deepEqual(await store.messages(id), original, "summaries never rewrite canonical history");
+  const task = { id: "t1", status: "running", stepOutputs: [{ text: body, files: [file] }] };
+  assert.deepEqual(withoutStepOutputs(task), { id: "t1", status: "running" });
+  assert.equal(task.stepOutputs[0].text, body, "task details remain intact");
 });
 
 test("chat history rejects malformed paging parameters", async () => {

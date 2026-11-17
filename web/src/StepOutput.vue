@@ -5,8 +5,8 @@ import FileCard from "./FileCard.vue";
 import MessageText from "./MessageText.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 
-const props = defineProps({ output: Object, archiveBase: String });
-const exportOpen = ref(false), exporting = ref(false), error = ref("");
+const props = defineProps({ output: Object, archiveBase: String, initiallyOpen: Boolean });
+const exportOpen = ref(false), exporting = ref(false), contentOpen = ref(props.initiallyOpen), error = ref("");
 async function runExport(format) {
   if (exporting.value) return;
   exporting.value = true;
@@ -22,9 +22,9 @@ async function runExport(format) {
   <article class="step-output" :aria-label="output.step ? `第 ${output.step} 步产物` : '步骤产物'">
     <div class="step-output-head"><Icon name="file" :size="16" /><span>步骤产物<template v-if="output.step"> · 第 {{ output.step }} 步</template></span></div>
     <strong class="step-output-title">{{ output.label }}</strong>
-    <details v-if="output.text" class="step-output-content">
+    <details v-if="output.text" class="step-output-content" :open="initiallyOpen" @toggle="contentOpen = $event.target.open">
       <summary>查看内容</summary>
-      <MessageText :text="output.text" :archive-base="archiveBase" />
+      <MessageText v-if="contentOpen" :text="output.text" :archive-base="archiveBase" />
     </details>
     <div v-if="output.files?.length" class="step-output-files"><FileCard v-for="file in output.files" :key="file.blobId" :file="file" /></div>
     <div v-if="output.text" class="step-output-export">

@@ -12,7 +12,7 @@ import { MESSAGE_POSE } from "./bot-avatar.js";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean, selfTint: Object });
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, loadStepOutput: Function, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean, selfTint: Object });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
 // In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
 const pressable = computed(() => props.mentionAuthor && sender.value.kind === "employee");
@@ -28,12 +28,26 @@ const legacyOutput = computed(() => {
   const rest = text.slice(prefix.length), split = rest.indexOf("\n\n");
   return { label: split < 0 ? "历史步骤产物" : rest.slice(0, split), text: split < 0 ? rest : rest.slice(split + 2) };
 });
-const stepOutput = computed(() => typeof props.message.stepOutput === "object" ? props.message.stepOutput : legacyOutput.value);
+const loadedStep = ref(null), stepLoading = ref(false), stepError = ref("");
+const stepOutput = computed(() => loadedStep.value || (typeof props.message.stepOutput === "object" ? props.message.stepOutput : legacyOutput.value));
 const bodyText = computed(() => legacyOutput.value ? "步骤产物已保存。" : props.message.displayText || props.message.text);
 const sender = computed(() => props.message.author ? { kind: props.message.author.kind, id: props.message.author.id, name: props.message.author.name, avatar: props.message.author.avatar || "" } : { kind: "employee", id: props.employeeId, name: props.name, avatar: props.avatar });
 // My own bubbles take the color of the 牛马 I am talking to (the chat view passes it); the 牛马's replies stay neutral.
 const tint = computed(() => (mine.value && !props.message.error ? props.selfTint : undefined));
 const statusOf = (task) => props.taskStatus?.[task.id] ?? (props.tasks ? "deleted" : task.status);
+const stepTask = computed(() => typeof props.message.stepOutput === "object" && !props.message.stepOutput?.legacy ? props.message.tasks?.[0] : undefined);
+const canOpenStep = computed(() => !!stepTask.value && statusOf(stepTask.value) !== "deleted");
+async function openStep() {
+  if (canOpenStep.value) { emit("task", stepTask.value.id); return; }
+  if (!props.loadStepOutput || stepLoading.value) return;
+  stepLoading.value = true; stepError.value = "";
+  try { loadedStep.value = await props.loadStepOutput(props.message.seq, props.message); }
+  catch (error) {
+    if (typeof props.message.stepOutput === "object" && !props.message.stepOutput.omitted) loadedStep.value = props.message.stepOutput;
+    else stepError.value = error?.message || String(error);
+  }
+  finally { stepLoading.value = false; }
+}
 const linkedTask = computed(() => {
   const id = props.message.tasks?.[0]?.id;
   return id ? (props.tasks || []).find((task) => task.id === id) : undefined;
@@ -79,7 +93,13 @@ async function runExport(format) {
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
         <FileCard v-for="(file, index) in message.files || []" :key="'f' + index" :file="file" />
       </div>
-      <StepOutput v-if="stepOutput" :output="stepOutput" :archive-base="archiveBase" />
+      <button v-if="stepOutput && (canOpenStep || (stepOutput.omitted && !loadedStep))" type="button" class="chat-step-output" :aria-label="'查看步骤产物：' + (stepOutput.label || '任务详情')" :disabled="!canOpenStep && (!loadStepOutput || stepLoading)" @click="openStep">
+        <span class="chat-step-head"><Icon name="file" :size="16" />步骤产物<template v-if="stepOutput.step"> · 第 {{ stepOutput.step }} 步</template></span>
+        <strong>{{ stepOutput.label }}</strong>
+        <span class="chat-step-link">{{ canOpenStep ? '在任务详情中查看' : stepLoading ? '正在读取…' : '查看历史产物' }}<Icon name="right" :size="14" /></span>
+      </button>
+      <StepOutput v-else-if="stepOutput" :output="stepOutput" :archive-base="archiveBase" :initially-open="!!loadedStep" />
+      <p v-if="stepError" class="chat-step-error" role="alert">{{ stepError }}</p>
       <div v-if="message.sendStatus" class="chat-send-status" role="status">
         <span v-if="message.sendStatus === 'sending'"><span class="spinner" aria-hidden="true"></span>发送中…</span>
         <button v-else-if="message.sendStatus === 'failed'" type="button" :disabled="!quotable" :title="message.sendError" aria-label="重发这条消息" @click="emit('retry', message)">发送未确认 · 点击重发</button>
@@ -151,6 +171,12 @@ async function runExport(format) {
 /* 深色气泡上的引用加深背景，保留白字对比度。 */
 .chat-bubble.tinted .chat-quote { border-left-color: rgb(255 255 255 / 50%); background: rgb(0 0 0 / 12%); color: inherit; }
 .chat-bubble.tinted .chat-quote:hover:not(:disabled) { background: rgb(0 0 0 / 20%); }
+.chat-step-output { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; gap: 6px; width: 100%; height: auto; min-width: 0; max-width: min(100%, 440px); padding: 12px 14px; border-color: var(--border); border-radius: var(--r-lg); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; }
+.chat-step-output:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); }
+.chat-step-output strong { display: -webkit-box; overflow: hidden; font-size: 13px; font-weight: 600; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.chat-step-head, .chat-step-link { display: flex; align-items: center; gap: 6px; color: var(--accent-text); font-size: 12px; }
+.chat-step-head { font-weight: 600; }
+.chat-step-error { margin: 0; color: var(--danger); font-size: 12px; }
 .chat-tasks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; width: 100%; min-width: 0; }
 .chat-task-link { justify-content: flex-start; gap: 8px; width: 100%; min-width: 0; max-width: min(100%, 440px); height: auto; min-height: 36px; padding: 6px 8px 6px 10px; border-color: var(--border); background: var(--surface); font-weight: 500; text-align: left; }
 .chat-task-link > .icon-svg:first-child { color: var(--accent); }

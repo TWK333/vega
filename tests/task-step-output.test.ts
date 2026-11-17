@@ -1,5 +1,14 @@
 import { test } from "node:test";
+import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { createServer } from "node:http";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import assert from "node:assert/strict";
+import ts from "typescript";
+import { check, Auth } from "../server/core/auth";
+import { chatHistory, withoutStepOutputs } from "../server/core/chat-page";
 import { Store } from "../server/core/store";
 import { Engine } from "../server/core/engine";
 import type { TaskGroup } from "../server/core/employee";
@@ -166,6 +175,50 @@ for (const inGroup of [false, true]) test(`步骤产物与来源${inGroup ? "群
   } finally { await engine.close(); await store.close(); }
 });
 
+test("private employee chat and task-detail endpoints project artifacts only when requested", { skip: process.env.VEGA_TEST_DEPLOYED !== "1", timeout: 30000 }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "vega-step-http-")), db = join(dir, "test.db"), setup = randomBytes(32).toString("base64url");
+  const seeded = await Store.open(db);
+  const auth = new Auth(seeded, setup);
+  const account = await auth.setup({ setupToken: setup, username: "step-owner", password: "only-for-fixture-password" });
+  const engine = await Engine.create(seeded, new Catalog(seeded, new Subscriptions(seeded, "")), new Chrome(seeded, new ChromeBridge(), ""));
+  engine.employee.closed = true;
+  const employee = await engine.employee.for((await engine.employee.create({ name: "私聊牛马" }, account.principal.user.id)).id);
+  const chat = await employee.chat(account.principal.user.id);
+  const created = await employee.execute("", { action: "add", kind: "todo", text: "生成报告" });
+  const body = "PRIVATE_STEP_RESULT_" + "detail".repeat(1000), output = { step: 1, label: "方案", text: body };
+  await employee.update((state) => { employee.task(state, created.value.id).stepOutputs = [output]; });
+  await seeded.append(chat.id, { role: "assistant", text: "已生成", stepOutput: output, tasks: [{ id: created.value.id, title: "生成报告", status: "queued" }] });
+  await engine.close(); await seeded.close();
+  const reserve = createServer(); await new Promise<void>((resolve) => reserve.listen(0, "127.0.0.1", resolve));
+  const port = (reserve.address() as any).port; await new Promise<void>((resolve) => reserve.close(() => resolve()));
+  const base = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, [resolve(".output/server/index.mjs")], { env: { ...process.env, VEGA_DB: db, VEGA_TOKEN: setup, NITRO_HOST: "127.0.0.1", NITRO_PORT: String(port), VEGA_PUBLIC_URL: base, VEGA_BASE_PATH: "" }, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  let logs = "";
+  child.stdout!.on("data", (data) => { logs += data; });
+  child.stderr!.on("data", (data) => { logs += data; });
+  try {
+    let ready = false;
+    for (let i = 0; i < 200 && !ready && child.exitCode === null; i++) { try { ready = (await fetch(base + "/api/auth/me")).ok; } catch {} if (!ready) await new Promise((resolve) => setTimeout(resolve, 50)); }
+    assert(ready, `fixture server did not start: ${logs}`);
+    const login = await fetch(base + "/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json", Origin: base }, body: JSON.stringify({ username: "step-owner", password: "only-for-fixture-password" }) });
+    assert(login.ok); const cookie = login.headers.get("set-cookie")!.split(";")[0];
+    const get = async (path: string) => { const response = await fetch(base + "/api" + path, { headers: { Cookie: cookie } }); assert(response.ok, `${path}: ${response.status}`); return response.json() as Promise<any>; };
+    const summary = await get(`/employees/${employee.employeeId}?stepSummaries=1`);
+    assert.equal(summary.tasks[0].stepOutputs, undefined);
+    const detailed = await get(`/employees/${employee.employeeId}`);
+    assert.equal(detailed.tasks[0].stepOutputs[0].text, body);
+    const page = await get(`/employees/${employee.employeeId}/chat?limit=60&stepSummaries=1`);
+    const card = page.messages.find((message: any) => message.stepOutput);
+    assert.deepEqual(card.stepOutput, { step: 1, label: "方案", omitted: true });
+    assert(!JSON.stringify(page).includes(body));
+    const original = await get(`/employees/${employee.employeeId}/chat?before=${card.seq + 1}&limit=1`);
+    assert.equal(original.messages[0].stepOutput.text, body);
+  } finally {
+    if (child.exitCode === null) { child.kill(); await new Promise<void>((resolve) => child.once("exit", () => resolve())); }
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+});
+
 test("公开工具接收步骤产物参数，缺失步骤或非法引用不会进入执行器", () => {
   const context: any = { kind: "task", taskId: "t" };
   const schema = employeeTools(context).find((tool) => tool.name === "task_progress")!.parameters;
@@ -203,5 +256,23 @@ test("群聊成员能看到步骤产物但不能取得私有会话引用，产�
     assert.equal(shared.stepOutputs[0].session, undefined);
     assert.equal(shared.stepOutputs[0].ref, undefined);
     assert.equal(shared.workSession, undefined);
+    // Exercise the real group HTTP router with the same membership checks as the browser.
+    const source = await readFile("server/routes/api/[...path].ts", "utf8");
+    const fragment = source.slice(source.indexOf("async function groupRoute("));
+    const javascript = ts.transpileModule(fragment, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+    const route = new Function("app", "check", "chatHistory", "withoutStepOutputs", javascript + "\nreturn groupRoute;")(() => ({ engine, store }), check, chatHistory, withoutStepOutputs);
+    const call = (parts: string[], user: any, query = "") => route(["groups", group.id, ...parts], "GET", {}, user, new URLSearchParams(query));
+    const page = await call(["messages"], guest, "limit=200&stepSummaries=1");
+    const card = page.messages.find((row: any) => row.stepOutput);
+    assert.deepEqual(card.stepOutput, { step: 1, label: plan[0].content, omitted: true });
+    assert(!JSON.stringify(page).includes(body.text!));
+    const original = await call(["messages"], guest, `before=${card.seq + 1}&limit=1`);
+    assert.equal(original.messages[0].stepOutput.text, body.text, "an authorized member can fetch the original on demand");
+    const overview = await call(["tasks"], guest, "stepSummaries=1");
+    assert.equal(overview.members[0].tasks[0].stepOutputs, undefined);
+    const detail = await call(["tasks", employee.employeeId, created.value.id], guest);
+    assert.equal(detail.stepOutputs[0].text, body.text);
+    assert.equal((await call(["tasks"], guest)).members[0].tasks[0].stepOutputs[0].text, body.text, "the original API stays compatible");
+    await assert.rejects(call(["messages"], { id: "outsider", role: "operator" }, "stepSummaries=1"));
   } finally { await engine.close(); await store.close(); }
 });

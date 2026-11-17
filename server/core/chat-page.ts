@@ -1,5 +1,12 @@
 import { check } from "./auth";
-import type { Store } from "./store";
+import { stepSummary } from "../../shared/step-output.js";
+import type { Message, Store } from "./store";
+
+/** A task list needs status and progress, not the full step artifacts. */
+export function withoutStepOutputs<T extends Record<string, any>>(task: T) {
+  const { stepOutputs: _stepOutputs, ...summary } = task;
+  return summary;
+}
 
 export const CHAT_PAGE_MAX = 500;
 
@@ -18,10 +25,11 @@ function seqParam(query: URLSearchParams, name: string, min: number, max = Numbe
  */
 export async function chatHistory(store: Store, session: string, query: URLSearchParams) {
   const limit = seqParam(query, "limit", 1, CHAT_PAGE_MAX), before = seqParam(query, "before", 1), after = seqParam(query, "after", 0);
-  if (limit === undefined && before === undefined && after === undefined) return { messages: await store.messages(session) };
+  const messages = (rows: Message[]) => query.get("stepSummaries") === "1" ? rows.map(stepSummary) : rows;
+  if (limit === undefined && before === undefined && after === undefined) return { messages: messages(await store.messages(session)) };
   check(after === undefined || (before === undefined && limit === undefined), 400, "after cannot be combined with before or limit");
   const page = await store.messagePage(session, { before, after, limit: limit ?? 100 });
-  if (after === undefined) return page;
+  if (after === undefined) return { ...page, messages: messages(page.messages) };
   const lastSeq = (await store.one("SELECT COALESCE(MAX(seq),0) seq FROM messages WHERE session=?", session) as { seq: number }).seq;
-  return { ...page, lastSeq };
+  return { ...page, messages: messages(page.messages), lastSeq };
 }

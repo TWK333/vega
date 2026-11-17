@@ -1,3 +1,5 @@
+import { stepSummary } from "../../shared/step-output.js";
+
 const DATABASE = "vega-chat-messages";
 let connection;
 const revisions = new Map();
@@ -63,7 +65,7 @@ export function createChatCache(user, employee) {
           const cursor = request.result;
           if (!cursor || rows.length === limit) {
             if (valid() && rows.length && rows.every((row) => row.session === rows[0].session && Number.isSafeInteger(row.message?.seq) && row.message.seq === row.seq))
-              done({ session: rows[0].session, messages: rows.reverse().map((row) => row.message) });
+              done({ session: rows[0].session, messages: rows.reverse().map((row) => stepSummary(row.message)) });
             return;
           }
           rows.push(cursor.value);
