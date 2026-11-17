@@ -20,12 +20,6 @@ const emit = defineEmits(["tab", "delete", "toggle-work", "menu"]);
 const menu = ref(null);
 const icons = { chat: "chat", tasks: "tasks", browser: "globe", memories: "memory", capabilities: "zap", settings: "settings" };
 function close(target) { if (target.value) target.value.open = false; }
-function clientName(client) {
-  return client?.name || ("客户端 " + String(client?.id || "").slice(0, 8));
-}
-function onlineClients(employee) {
-  return (employee.executionClients || []).filter((item) => item.online !== false);
-}
 </script>
 <template>
   <header class="employee-header">
@@ -35,7 +29,6 @@ function onlineClients(employee) {
       <div class="identity-text">
         <h2 class="truncate">{{ employee.name || "加载中…" }}</h2>
         <span :class="['identity-status', tone]" :title="employee.instruction || '把目标交给我，任务由我安排。'"><span class="dot" :class="[tone, { pulse: tone === 'info' }]" aria-hidden="true"></span>{{ status }}</span>
-        <p v-if="employee.executionClients" class="client-line">{{ onlineClients(employee).length ? "在线客户端：" + onlineClients(employee).map((node) => clientName(node)).join("、") : "云端运行，暂无在线客户端" }}</p>
       </div>
     </div>
     <nav class="employee-tabs" aria-label="牛马工作区">
@@ -107,5 +100,4 @@ function onlineClients(employee) {
   .popover-panel { width: min(300px, calc(100vw - 24px)); }
   .icon-summary { width: 40px; height: 40px; }
 }
-.client-line { margin: 2px 0 0; font-size: 12px; color: var(--muted, #667); }
 </style>
