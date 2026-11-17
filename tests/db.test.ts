@@ -42,6 +42,50 @@ test("concurrent appends get consecutive sequence numbers; a failed nested trans
   assert.equal(await store.get("outer", 0), 1);
 });
 
+test("afterCommit discards callbacks from rolled-back savepoints", async (t) => {
+  const store = await Store.open(":memory:");
+  t.after(() => store.close());
+  const seen: string[] = [];
+  await store.transaction(async () => {
+    store.afterCommit(() => seen.push("outer"));
+    await store.transaction(async () => {
+      store.afterCommit(() => seen.push("kept"));
+      await assert.rejects(store.transaction(async () => {
+        store.afterCommit(() => seen.push("discarded"));
+        await store.transaction(async () => { store.afterCommit(() => seen.push("discarded descendant")); });
+        throw Error("undo inner");
+      }), /undo inner/);
+      store.afterCommit(() => seen.push("kept after rollback"));
+    });
+    await assert.rejects(store.transaction(async () => {
+      store.afterCommit(() => seen.push("discarded sibling"));
+      throw Error("undo sibling");
+    }), /undo sibling/);
+  });
+  assert.deepEqual(seen, ["outer", "kept", "kept after rollback"]);
+  await store.transaction(async () => {
+    let resume!: () => void, started!: () => void;
+    const waiting = new Promise<void>((resolve) => { resume = resolve; });
+    const ready = new Promise<void>((resolve) => { started = resolve; });
+    const nested = store.transaction(async () => {
+      store.afterCommit(() => seen.push("discarded concurrent"));
+      started();
+      await waiting;
+      throw Error("undo concurrent inner");
+    });
+    await ready;
+    store.afterCommit(() => seen.push("outer during inner"));
+    resume();
+    await assert.rejects(nested, /undo concurrent inner/);
+  });
+  assert.deepEqual(seen, ["outer", "kept", "kept after rollback", "outer during inner"]);
+  await assert.rejects(store.transaction(async () => {
+    await store.transaction(async () => { store.afterCommit(() => seen.push("outer rollback")); });
+    throw Error("undo outer");
+  }), /undo outer/);
+  assert.deepEqual(seen, ["outer", "kept", "kept after rollback", "outer during inner"]);
+});
+
 test("a slow query does not block the event loop", async (t) => {
   const store = await Store.open(":memory:");
   t.after(() => store.close());

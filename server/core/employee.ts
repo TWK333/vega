@@ -350,6 +350,7 @@ export type EmployeeRuntime = {
   taskFinished?: (taskId: string) => void;
   holdTaskCleanup?: (taskId: string) => Promise<() => void>;
   emit: (type: string, data?: any, session?: string) => void;
+  message?: (employeeId: string, sessionId: string, message: Message) => void;
   config: () => Obj | Promise<Obj>;
   isolated?: boolean;
   presence?: () => Promise<Presence>;
@@ -546,7 +547,8 @@ export class Employee {
   async toChat(chatSession: string | undefined, group: Task["group"] | undefined, message: Message, wake: boolean) {
     if (!(group && await this.runtime.groups?.post(group, this.employeeId, message, wake))) {
       if (!chatSession) return;
-      await this.store.append(chatSession, message);
+      const saved = await this.store.append(chatSession, message);
+      this.store.afterCommit(() => this.runtime.message?.(this.employeeId, chatSession, saved));
       // Session-scoped signal so other open chats refresh without waiting for employee_changed.
       this.store.afterCommit(() => this.runtime.emit(message.role === "user" ? "user" : "message_end", undefined, chatSession));
     }

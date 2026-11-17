@@ -128,6 +128,7 @@ export async function gate(event: H3Event, path: string) {
   if (/^\/api\/me\/vault(?:\/|$)/.test(path)) return;
   // 每人自己的对外 MCP：任何已登录账号都能管理自己的配置，管不了别人的，也不因此获得管理权限。
   if (/^\/api\/me\/external-mcp(?:\/|$)/.test(path)) return;
+  if (role === "operator" && /^\/api\/me\/triggers(?:\/|$)/.test(path)) return;
   if (path === "/api/me/avatar" && event.method === "POST") return;
   if (/^\/api\/avatars\/users\/[^/]+$/.test(path) && event.method === "GET") return;
   if (/^\/api\/sessions\//.test(path) && event.method === "GET") return;

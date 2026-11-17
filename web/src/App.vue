@@ -1360,8 +1360,8 @@ async function applyRoute(route) {
   try {
     if (route.view === "group" && route.group && !groups.value.some((g) => g.id === route.group)) route = { view: "employee" };
     if (ADMIN_PAGES.includes(route.view) && !isAdmin.value) route = { view: "employee" };
-    // 非管理员只有自己的设置（密码本，以及「对外 MCP」）。管理员专属子页不留在地址里。
-    if (route.view === "settings" && !isAdmin.value && route.sub && route.sub !== "external-mcp") route = { view: "settings" };
+    // 非管理员只保留个人设置；只读账号不能配置触发器。
+    if (route.view === "settings" && ((!isAdmin.value && route.sub && !["vault", "external-mcp", "triggers"].includes(route.sub)) || (route.sub === "triggers" && !canExecute.value))) route = { view: "settings" };
     if (route.view === "group") openGroup(route.group);
     else if (route.view === "chat") {
       const session = route.session && sessions.value.find((s) => s.id === route.session);
@@ -1599,7 +1599,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       <TokenStatsView v-else-if="view === 'usage'" :api="api" :admin="isAdmin" :self-id="user.id" />
       <BrowserView v-else-if="view === 'browser' && isAdmin" :api="api" :csrf="csrfToken" />
       <ExperiencesView v-else-if="view === 'experiences'" :api="api" :tab="pageSub" @tab="setPageTab" />
-      <SettingsView v-else-if="view === 'settings'" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" :admin="isAdmin" :employees="myEmployees" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
+      <SettingsView v-else-if="view === 'settings'" :api="api" :config="config" :user-id="user.id" :models="catalogModels" :tab="pageSub" :admin="isAdmin" :can-execute="canExecute" :employees="myEmployees" @tab="setPageTab" @saved="config = $event" @error="error = $event" @notice="notice = $event" />
     </section>
     <div class="toasts" aria-live="polite">
       <div v-if="error" class="toast error" role="alert"><Icon name="alert" :size="16" /><span>{{ error }}</span><button type="button" class="icon" aria-label="关闭错误" @click="error = ''"><Icon name="close" :size="14" /></button></div>

@@ -299,7 +299,10 @@ export class Groups {
   // ---- conversation ------------------------------------------------------------------------------------------
   private async append(group: Group, message: Message) {
     const saved = await this.store.append(group.session, message);
-    this.store.afterCommit(() => this.emit(group.id, group.users));
+    this.store.afterCommit(() => {
+      this.emit(group.id, group.users);
+      if (message.author?.kind === "employee") this.engine.employeeMessage(message.author.id, group.session, saved, group.name);
+    });
     return saved;
   }
   private async notice(groupId: string, text: string) {

@@ -7,6 +7,7 @@ export type Op = "all" | "run" | "exec";
 /** One connection: SQLite's worker, or a MySQL pool connection (released after its transaction). */
 export type Conn = { query(op: Op, sql: string, params: unknown[]): Promise<any>; release?(): void };
 type Tx = { db: Db; conn: Conn; open: boolean; depth: number; after: (() => void)[] };
+type CommitScope = { tx: Tx; parent?: CommitScope; rolledBack: boolean };
 
 /** FIFO async lock. */
 export class Mutex {
@@ -20,6 +21,7 @@ export class Mutex {
 
 /** The transaction the current async flow runs in (AsyncLocalStorage, so callees need no handle). */
 const current = new AsyncLocalStorage<Tx>();
+const commitScope = new AsyncLocalStorage<CommitScope>();
 
 /**
  * Run fn outside any transaction. Timers and fire-and-forget work started inside a transaction inherit it otherwise,
@@ -54,21 +56,28 @@ export abstract class Db {
   /** Run fn once the outermost transaction commits (dropped on rollback), or now when there is none; never inside it. */
   afterCommit(fn: () => void) {
     const tx = current.getStore();
-    if (tx?.db === this && tx.open) tx.after.push(fn);
-    else outsideTransaction(fn);
+    if (tx?.db === this && tx.open) {
+      const scope = commitScope.getStore();
+      tx.after.push(scope?.tx === tx ? () => {
+        for (let branch: CommitScope | undefined = scope; branch; branch = branch.parent) if (branch.rolledBack) return;
+        fn();
+      } : fn);
+    } else outsideTransaction(fn);
   }
   async transaction<T>(fn: () => Promise<T>): Promise<T> {
     const tx = current.getStore();
     if (tx?.db === this && tx.open) {
       const name = "vega_" + ++tx.depth;
       await tx.conn.query("exec", "SAVEPOINT " + name, []);
+      const parent = commitScope.getStore(), scope: CommitScope = { tx, parent: parent?.tx === tx ? parent : undefined, rolledBack: false };
       try {
-        const value = await fn();
+        const value = await commitScope.run(scope, fn);
         // Only work the outer transaction awaits can nest; anything else must not outlive it.
         if (!tx.open) throw Error("Nested transaction outlived its outer transaction");
         await tx.conn.query("exec", "RELEASE SAVEPOINT " + name, []);
         return value;
       } catch (e) {
+        scope.rolledBack = true;
         if (tx.open) await tx.conn.query("exec", "ROLLBACK TO SAVEPOINT " + name, []);
         throw e;
       } finally { tx.depth--; }

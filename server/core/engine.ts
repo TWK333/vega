@@ -38,6 +38,7 @@ import { NetworkRelay } from "./network-relay";
 import { LocalBrowsers } from "./local-browsers";
 import { TaskBrowserTabs } from "./task-browser-tabs";
 import { Vault, migrateVaultOwnership } from "./vault";
+import { Triggers } from "./triggers";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
 
 /**
@@ -153,6 +154,7 @@ export class Engine {
   localBrowsers: LocalBrowsers;
   taskTabs: TaskBrowserTabs;
   vault: Vault;
+  triggers: Triggers;
   /** Group chats: users and their employees working together (groups.ts). */
   groups: Groups;
   fire: Fire;
@@ -351,6 +353,7 @@ export class Engine {
     this.providers.resolveImage = (im) => this.store.imageData(im);
     this.events.setMaxListeners(256);
     this.vault = new Vault(store);
+    this.triggers = new Triggers(store, this.vault);
     const runtime: EmployeeRuntime = {
       run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal),
       cancel: (s) => this.cancel(s),
@@ -359,6 +362,7 @@ export class Engine {
       taskFinished: (id) => this.taskTabs.finish(id),
       holdTaskCleanup: (id) => this.taskTabs.hold(id),
       emit: (type, data, session?) => this.emit({ type, data, session }),
+      message: (employeeId, sessionId, message) => this.employeeMessage(employeeId, sessionId, message),
       config: () => this.config(),
       isolated: true,
       // 指定 clientId 时返回那台已连接的客户端；不传则返回任一在线客户端（若在线）。
@@ -499,6 +503,21 @@ export class Engine {
     this.emit({ type: "config_changed" });
     return maskedConfig(next);
   }
+  /** Forward only committed, user-visible employee messages, never task-session internals. */
+  employeeMessage(employeeId: string, sessionId: string, message: Message, groupName = "") {
+    const text = String(message.displayText || message.text || "");
+    if (message.role !== "assistant" || message.notice || !message.seq || (!text.trim() && !message.images?.length && !message.files?.length && !message.tasks?.length)) return;
+    this.store.afterCommit(() => {
+      if (this.closing) return;
+      void (async () => {
+        // The chat may have been cleared before this callback ran.
+        const stored = await this.store.message(sessionId, message.seq!);
+        if (!stored || stored.at !== message.at || stored.text !== message.text || stored.author?.id !== message.author?.id) return;
+        const profile = await (await this.employee.for(employeeId)).profile();
+        if (profile.ownerId && !this.closing) this.triggers.fire(profile.ownerId, { employeeId, employeeName: profile.name, message: text, groupName, taskIds: (message.tasks || []).map((task) => task.id) });
+      })().catch(() => {});
+    });
+  }
   emit(e: AgentEvent) {
     const redact = e.session ? this.redactors.get(e.session) : undefined;
     if (
@@ -627,6 +646,7 @@ export class Engine {
     for (const run of this.active.values())
       run.control.abort(Error("Server shutting down"));
     while (this.active.size) await sleep(25);
+    await Promise.allSettled([...this.triggers.pending]);
     await Promise.all(
       [...this.mcpSessions.keys()].map((key) => this.releaseSession(key)),
     );
@@ -1353,7 +1373,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           task: session.taskId,
           ...(reply.usage || {}),
         });
-        await this.store.append(key, redactMessage(reply, redact));
+        const savedReply = await this.store.append(key, redactMessage(reply, redact));
+        if (session.employeeId && !session.taskId && !session.groupId) this.employeeMessage(session.employeeId, key, savedReply);
         emit("message_end", reply);
         if (session.groupId && !session.taskId && reply.text?.trim()) said = String(redact.value(reply.text));
         if (!reply.calls?.length && worker && session.groupId && !session.taskId && !state.steer.length) {

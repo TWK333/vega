@@ -144,6 +144,12 @@ test("App routing: unknown or forbidden ids and pages fall back to the default v
   const own = await boot("https://vega.test/settings/external-mcp");
   assert.deepEqual([own.c.view.value, own.c.pageSub.value, own.location.pathname], ["settings", "external-mcp", "/settings/external-mcp"]);
   assert.deepEqual(own.history, [], "a non-admin keeps their own 对外 MCP settings address");
+  const triggers = await boot("https://vega.test/settings/triggers");
+  assert.deepEqual([triggers.c.view.value, triggers.c.pageSub.value, triggers.location.pathname], ["settings", "triggers", "/settings/triggers"]);
+  const viewer = app("https://vega.test/settings/triggers");
+  viewer.c.canExecute.value = false;
+  await viewer.c.applyRoute(parseRoute(viewer.location.href));
+  assert.equal(viewer.c.pageSub.value, "");
   const adminPrinciples = await boot("https://vega.test/settings/principles", { admin: true });
   assert.deepEqual([adminPrinciples.c.view.value, adminPrinciples.c.pageSub.value, adminPrinciples.location.pathname], ["settings", "principles", "/settings/principles"]);
 });
