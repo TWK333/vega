@@ -10,8 +10,9 @@ import { httpURL, id, type Obj } from "./util";
 const MAX_TRIGGERS = 20, MAX_PENDING = 100, MAX_IN_FLIGHT = 100;
 const kind = (userId: string) => "trigger:user:" + userId;
 type Secret = { url: string; headers: string; body: string; siteOrigin?: string };
-type Trigger = { id: string; name: string; enabled: boolean; condition: "employee_message"; action: "http"; secret: string; updatedAt: number; lastAt?: number; lastResult?: string };
-export type EmployeeMessage = { employeeId: string; employeeName: string; message: string; groupName: string; taskIds?: string[] };
+type TriggerScope = { employees: string[]; groups: string[] };
+type Trigger = { id: string; name: string; enabled: boolean; condition: "employee_message"; action: "http"; scope?: TriggerScope; secret: string; updatedAt: number; lastAt?: number; lastResult?: string };
+export type EmployeeMessage = { employeeId: string; employeeName: string; message: string; groupName: string; groupId?: string; taskIds?: string[] };
 
 // Only public destinations: validate every resolved address and pin the actual connection to one of them.
 const blocked = new BlockList();
@@ -97,7 +98,7 @@ export class Triggers {
   dropped = new Map<string, number>();
   private inFlight = 0;
   post = postTrigger;
-  constructor(private store: Store, private vault: Vault) {}
+  constructor(private store: Store, private vault: Vault, private canScope: (userId: string, scope: TriggerScope) => Promise<boolean>) {}
   private aad(userId: string, key: string) { return "trigger:" + userId + ":" + key; }
   private async owned(userId: string, key: string) {
     const record = await this.store.object<Trigger>(kind(userId), key);
@@ -118,6 +119,16 @@ export class Triggers {
       check(old || (await this.store.objects(kind(userId))).length < MAX_TRIGGERS, 400, "最多创建 20 个触发器");
       check(typeof input.name === "string" && input.name.trim() && input.name.length <= 80 && !/[\x00-\x1f]/.test(input.name), 400, "名称需要 1–80 字，不能换行");
       check(input.condition === "employee_message" && input.action === "http" && typeof input.enabled === "boolean", 400, "触发条件或动作无效");
+      const selected = input.scope === undefined ? old?.scope : input.scope;
+      let scope: TriggerScope | undefined;
+      if (selected != null) {
+        check(typeof selected === "object" && !Array.isArray(selected), 400, "触发范围无效");
+        const validIds = (values: unknown, max: number) => Array.isArray(values) && values.length <= max && values.every((value) => typeof value === "string" && value.length > 0 && value.length <= 128);
+        check(validIds(selected.employees, 50) && validIds(selected.groups, 100), 400, "触发范围无效");
+        scope = { employees: [...new Set(selected.employees as string[])], groups: [...new Set(selected.groups as string[])] };
+        check(scope.employees.length || scope.groups.length, 400, "请至少选择一个牛马或群聊");
+        if (input.scope !== undefined) check(await this.canScope(userId, scope), 400, "只能选择自己的牛马或已加入的群聊");
+      }
       const previous: Secret | undefined = old && await this.vault.openObject(old.secret, this.aad(userId, old.id));
       check(input.url === undefined || typeof input.url === "string", 400, "接口地址无效");
       check(input.headers === undefined || (typeof input.headers === "string" && input.headers.length <= 16000), 400, "请求头过长");
@@ -126,7 +137,7 @@ export class Triggers {
       endpoint(secret.url);
       headersOf(secret.headers);
       bodyOf(secret.body, { message: '消息"\n\\', employeeName: "牛马", employeeId: "id", groupName: "群聊" });
-      const key = old?.id || id("tr"), record: Trigger = { ...old, id: key, name: input.name.trim(), enabled: input.enabled, condition: "employee_message", action: "http", secret: await this.vault.sealObject(secret, this.aad(userId, key)), updatedAt: Date.now() };
+      const key = old?.id || id("tr"), record: Trigger = { ...old, id: key, name: input.name.trim(), enabled: input.enabled, condition: "employee_message", action: "http", scope, secret: await this.vault.sealObject(secret, this.aad(userId, key)), updatedAt: Date.now() };
       await this.store.save(kind(userId), key, record);
       return await this.view(userId, record);
     });
@@ -155,7 +166,7 @@ export class Triggers {
   private async deliver(userId: string, event: EmployeeMessage) {
     const account = await this.store.one("SELECT disabled,role FROM web_users WHERE id=?", userId);
     if (!account || account.disabled || account.role === "viewer") return;
-    const entries = (await this.store.objects<Trigger>(kind(userId))).filter((item) => item.enabled);
+    const entries = (await this.store.objects<Trigger>(kind(userId))).filter((item) => item.enabled && (!item.scope || item.scope.employees.includes(event.employeeId) || (!!event.groupId && item.scope.groups.includes(event.groupId))));
     await Promise.all(entries.map(async (entry) => {
       let result = "成功";
       if (this.inFlight >= MAX_IN_FLIGHT) result = "接口调用过多，本次跳过";

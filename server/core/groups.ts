@@ -301,7 +301,7 @@ export class Groups {
     const saved = await this.store.append(group.session, message);
     this.store.afterCommit(() => {
       this.emit(group.id, group.users);
-      if (message.author?.kind === "employee") this.engine.employeeMessage(message.author.id, group.session, saved, group.name);
+      if (message.author?.kind === "employee") this.engine.employeeMessage(message.author.id, group.session, saved, { id: group.id, name: group.name });
     });
     return saved;
   }

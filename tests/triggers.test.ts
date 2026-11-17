@@ -59,6 +59,59 @@ test("personal trigger CRUD encrypts secrets, preserves edits and rejects other 
   } finally { await close(); }
 });
 
+test("trigger scopes match selected employees or groups by ID without crossing accounts", async () => {
+  const { store, engine, close } = await fixture();
+  try {
+    const one = await engine.employee.for((await engine.employee.create({ name: "一号" }, alice.id)).id);
+    const two = await engine.employee.for((await engine.employee.create({ name: "二号" }, alice.id)).id);
+    const other = await engine.employee.for((await engine.employee.create({ name: "其他人的牛马" }, bob.id)).id);
+    const group = await engine.groups.create(alice, { name: "同名群", employees: [one.employeeId, two.employeeId], users: [bob.id] });
+    const sameName = await engine.groups.create(alice, { name: "同名群", employees: [one.employeeId, two.employeeId] });
+    const privateGroup = await engine.groups.create(bob, { name: "私有群", employees: [other.employeeId] });
+    await engine.groups.addEmployee(bob, group.id, other.employeeId);
+    const scope = (employees: string[], groups: string[]) => ({ employees, groups });
+    const hook = (name: string, selection?: { employees: string[]; groups: string[] }) => ({ ...input, url: `https://example.com/${name}`, ...(selection ? { scope: selection } : {}) });
+    await engine.triggers.save(alice.id, hook("all"));
+    const selected = await engine.triggers.save(alice.id, hook("employee", scope([one.employeeId], [])));
+    await engine.triggers.save(alice.id, hook("group", scope([], [group.id])));
+    await engine.triggers.save(alice.id, hook("union", scope([one.employeeId], [group.id])));
+    await engine.triggers.save(bob.id, hook("bob"));
+    await assert.rejects(engine.triggers.save(alice.id, hook("empty", scope([], []))), /至少选择/);
+    await assert.rejects(engine.triggers.save(alice.id, hook("other", scope([other.employeeId], []))), /自己的牛马/);
+    await assert.rejects(engine.triggers.save(alice.id, hook("other-group", scope([], [privateGroup.id]))), /已加入的群聊/);
+    await assert.rejects(engine.triggers.save(alice.id, { ...input, scope: { employees: "wrong", groups: [] } }), /范围无效/);
+    // An older client that omits scope must not turn a restricted trigger into an unrestricted one.
+    await engine.triggers.save(alice.id, { ...input, id: selected.id, url: "", headers: "" });
+    assert.deepEqual((await engine.triggers.list(alice.id)).find((item) => item.id === selected.id)!.scope, scope([one.employeeId], []));
+    const sent: { url: string; text: string }[] = [];
+    engine.triggers.post = async (url, _headers, body) => { sent.push({ url, text: JSON.parse(body).text.content }); };
+    await one.toChat((await one.chat(alice.id)).id, undefined, { role: "assistant", text: "私聊一" }, false);
+    await two.toChat((await two.chat(alice.id)).id, undefined, { role: "assistant", text: "私聊二" }, false);
+    await engine.groups.replied({ groupId: group.id } as any, one.employeeId, "目标群一", [], 1);
+    await engine.groups.replied({ groupId: group.id } as any, two.employeeId, "目标群二", [], 1);
+    await engine.groups.replied({ groupId: sameName.id } as any, one.employeeId, "同名群一", [], 1);
+    await engine.groups.replied({ groupId: sameName.id } as any, two.employeeId, "同名群二", [], 1);
+    await engine.groups.replied({ groupId: group.id } as any, other.employeeId, "其他人", [], 1);
+    await until(() => sent.length === 16);
+    await Promise.allSettled([...engine.triggers.pending]);
+    const texts = (name: string) => sent.filter((item) => item.url.endsWith("/" + name)).map((item) => item.text).sort();
+    assert.equal(texts("all").length, 6);
+    assert.deepEqual(texts("employee"), ["一号: 私聊一 / ", "一号: 目标群一 / 同名群", "一号: 同名群一 / 同名群"].sort());
+    assert.deepEqual(texts("group"), ["一号: 目标群一 / 同名群", "二号: 目标群二 / 同名群"].sort());
+    assert.deepEqual(texts("union"), ["一号: 私聊一 / ", "一号: 目标群一 / 同名群", "一号: 同名群一 / 同名群", "二号: 目标群二 / 同名群"].sort());
+    assert.deepEqual(texts("bob"), ["其他人的牛马: 其他人 / 同名群"]);
+    await engine.triggers.save(alice.id, { ...input, id: selected.id, url: "", headers: "", scope: null });
+    assert.equal((await engine.triggers.list(alice.id)).find((item) => item.id === selected.id)!.scope, undefined);
+    const groupSession = (await engine.groups.get(group.id))!.session;
+    const delayed = await store.append(groupSession, { role: "assistant", text: "离群前的延迟消息", author: { kind: "employee", id: other.employeeId, name: "其他人的牛马" } });
+    await engine.groups.removeUser(bob, group.id, bob.id);
+    engine.employeeMessage(other.employeeId, groupSession, delayed, { id: group.id, name: group.name });
+    await sleep(80);
+    await Promise.allSettled([...engine.triggers.pending]);
+    assert.equal(sent.length, 16, "a delayed group event must not be delivered after its owner leaves");
+  } finally { await close(); }
+});
+
 test("only public IPs may be used, including mapped and reserved addresses", async () => {
   for (const address of ["127.0.0.1", "10.0.1.1", "169.254.169.254", "100.64.0.1", "192.168.1.1", "192.0.2.1", "::1", "::ffff:127.0.0.1", "fc00::1", "fe80::1", "2001:db8::1", "2002:7f00:1::1"]) assert.equal(publicAddress(address), false, address);
   for (const address of ["8.8.8.8", "1.1.1.1", "2606:4700:4700::1111"]) assert.equal(publicAddress(address), true, address);

@@ -48,7 +48,7 @@ watch(section, (id) => { if (id !== (props.tab || first.value)) emit("tab", id =
       </template>
       <div :hidden="section !== 'external-mcp'"><ExternalMcpSettings :api="api" :employees="employees || []" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
       <div :hidden="section !== 'vault'"><VaultSettings :api="api" :user-id="userId" :employees="employees || []" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
-      <div v-if="canExecute" :hidden="section !== 'triggers'"><TriggerSettings :api="api" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
+      <div v-if="canExecute" :hidden="section !== 'triggers'"><TriggerSettings :api="api" :employees="employees || []" @error="emit('error', $event)" @notice="emit('notice', $event)" /></div>
     </div>
   </div>
 </template>

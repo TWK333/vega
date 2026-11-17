@@ -353,7 +353,15 @@ export class Engine {
     this.providers.resolveImage = (im) => this.store.imageData(im);
     this.events.setMaxListeners(256);
     this.vault = new Vault(store);
-    this.triggers = new Triggers(store, this.vault);
+    this.triggers = new Triggers(store, this.vault, async (userId, scope) => {
+      const employees = await this.employee.all();
+      for (const id of scope.employees) {
+        const employee = employees.find((item) => item.employeeId === id && !item.deleting && !item.deleted);
+        if (!employee || (await employee.profile()).ownerId !== userId) return false;
+      }
+      for (const id of scope.groups) if (!(await this.groups.get(id))?.users.includes(userId)) return false;
+      return true;
+    });
     const runtime: EmployeeRuntime = {
       run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal),
       cancel: (s) => this.cancel(s),
@@ -504,7 +512,7 @@ export class Engine {
     return maskedConfig(next);
   }
   /** Forward only committed, user-visible employee messages, never task-session internals. */
-  employeeMessage(employeeId: string, sessionId: string, message: Message, groupName = "") {
+  employeeMessage(employeeId: string, sessionId: string, message: Message, group?: { id: string; name: string }) {
     const text = String(message.displayText || message.text || "");
     if (message.role !== "assistant" || message.notice || !message.seq || (!text.trim() && !message.images?.length && !message.files?.length && !message.tasks?.length)) return;
     this.store.afterCommit(() => {
@@ -514,7 +522,11 @@ export class Engine {
         const stored = await this.store.message(sessionId, message.seq!);
         if (!stored || stored.at !== message.at || stored.text !== message.text || stored.author?.id !== message.author?.id) return;
         const profile = await (await this.employee.for(employeeId)).profile();
-        if (profile.ownerId && !this.closing) this.triggers.fire(profile.ownerId, { employeeId, employeeName: profile.name, message: text, groupName, taskIds: (message.tasks || []).map((task) => task.id) });
+        if (group) {
+          const current = await this.groups.get(group.id);
+          if (!current?.users.includes(profile.ownerId) || !current.employees.some((member) => member.id === employeeId)) return;
+        }
+        if (profile.ownerId && !this.closing) this.triggers.fire(profile.ownerId, { employeeId, employeeName: profile.name, message: text, groupName: group?.name || "", groupId: group?.id, taskIds: (message.tasks || []).map((task) => task.id) });
       })().catch(() => {});
     });
   }
