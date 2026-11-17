@@ -33,7 +33,9 @@ test("personal trigger CRUD encrypts secrets, preserves edits and rejects other 
     const created = await triggersApi(engine.triggers, alice, "POST", [], input) as any;
     const item = created.trigger;
     assert(item.id && item.hasUrl && item.hasHeaders);
-    assert(!JSON.stringify(item).includes("secret"));
+    assert.equal(item.url, input.url);
+    assert(!JSON.stringify(item).includes("secret-header") && !("secret" in item));
+    assert.equal((await triggersApi(engine.triggers, alice, "GET", [], {}) as any).triggers[0].url, input.url);
     const saved = await store.object<any>("trigger:user:u1", item.id);
     assert(!JSON.stringify(saved).includes("key=secret") && !JSON.stringify(saved).includes("secret-header"));
     assert.equal((await triggersApi(engine.triggers, bob, "GET", [], {}) as any).triggers.length, 0);
@@ -42,12 +44,16 @@ test("personal trigger CRUD encrypts secrets, preserves edits and rejects other 
     await assert.rejects(triggersApi(engine.triggers, alice, "POST", [], { ...input, name: "bad", url: "http://127.0.0.1/" }), /内网|本机/);
     await assert.rejects(triggersApi(engine.triggers, alice, "POST", [], { ...input, body: '{"x":{{message}}}' }), /JSON/);
     await assert.rejects(triggersApi(engine.triggers, alice, "POST", [], { ...input, headers: '{"Host":"internal"}' }), /请求头/);
-    await triggersApi(engine.triggers, alice, "POST", [], { ...input, id: item.id, url: "", headers: "", name: "改名" });
+    const kept = await triggersApi(engine.triggers, alice, "POST", [], { ...input, id: item.id, url: "", headers: "", name: "改名" }) as any;
+    assert.equal(kept.trigger.url, input.url);
+    const changedUrl = "https://example.com/new-hook?key=updated";
+    const changed = await triggersApi(engine.triggers, alice, "POST", [], { ...input, id: item.id, url: changedUrl, headers: "" }) as any;
+    assert.equal(changed.trigger.url, changedUrl);
     const sent: any[] = [];
     engine.triggers.post = async (url, headers, body) => { sent.push({ url, headers, body: JSON.parse(body) }); };
     engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "牛马", message: '引号"\n换行', groupName: "" });
     await until(() => sent.length === 1);
-    assert.equal(sent[0].url, input.url);
+    assert.equal(sent[0].url, changedUrl);
     assert.equal(sent[0].headers.Authorization, "Bearer secret-header");
     assert.equal(sent[0].body.text.content, '牛马: 引号"\n换行 / ');
     await triggersApi(engine.triggers, alice, "PATCH", [item.id], { enabled: false });
@@ -213,7 +219,7 @@ test("attachment-only and task-card messages also trigger, but empty, tool and n
   } finally { await close(); }
 });
 
-test("failed calls are visible without leaking their URL or response, and are not replayed", async () => {
+test("failed call status does not leak the URL or response, and calls are not replayed", async () => {
   const { engine, close } = await fixture();
   try {
     await engine.triggers.save(alice.id, input);
@@ -224,7 +230,8 @@ test("failed calls are visible without leaking their URL or response, and are no
     await Promise.allSettled([...engine.triggers.pending]);
     const item = (await engine.triggers.list(alice.id))[0];
     assert.match(item.lastResult!, /调用失败/);
-    assert(!JSON.stringify(item).includes("secret"));
+    assert.equal(item.url, input.url);
+    assert(!item.lastResult!.includes("secret") && !JSON.stringify(item).includes("secret-header"));
     assert.equal(attempts, 1);
   } finally { await close(); }
 });

@@ -108,7 +108,7 @@ export class Triggers {
   private async view(userId: string, record: Trigger) {
     const secret: Secret = await this.vault.openObject(record.secret, this.aad(userId, record.id));
     const { secret: _secret, ...visible } = record;
-    return { ...visible, body: secret.body, hasUrl: !!secret.url, hasHeaders: secret.headers !== "{}" };
+    return { ...visible, url: secret.url, body: secret.body, hasUrl: !!secret.url, hasHeaders: secret.headers !== "{}" };
   }
   async list(userId: string) {
     return await Promise.all((await this.store.objects<Trigger>(kind(userId))).map((record) => this.view(userId, record)));
