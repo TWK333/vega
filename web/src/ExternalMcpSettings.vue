@@ -7,7 +7,7 @@ const confirm = window.confirm.bind(window);
 const busy = ref(false);
 const configs = ref([]);
 const groups = ref([]);
-const revealed = ref(null);
+const revealed = ref({});
 const creating = ref(blank());
 let disposed = false;
 function blank() {
@@ -35,10 +35,25 @@ async function load() {
 function toggle(form, key, id) {
   form[key] = form[key].includes(id) ? form[key].filter((value) => value !== id) : [...form[key], id];
 }
-async function copy(text) {
+function showConfig({ config, token }) {
+  revealed.value[config.id] = JSON.stringify({
+    mcpServers: { vega: { url: config.url, headers: { Authorization: "Bearer " + token } } },
+  }, null, 2);
+}
+async function copy(id) {
   try {
-    await navigator.clipboard.writeText(text);
-    emit("notice", "已复制");
+    if (navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(revealed.value[id]);
+        emit("notice", "已复制配置");
+        return;
+      } catch { /* 非安全上下文或剪贴板权限受限时尝试选中文本复制。 */ }
+    }
+    const field = document.getElementById("mcp-json-" + id);
+    field?.focus();
+    field?.select();
+    if (!field || !document.execCommand?.("copy")) throw Error();
+    emit("notice", "已复制配置");
   } catch {
     emit("error", "复制失败，请手动选择文本复制");
   }
@@ -51,10 +66,11 @@ async function create() {
   await run(async () => {
     const result = await props.api("/me/external-mcp", "POST", creating.value);
     if (disposed) return;
-    revealed.value = { id: result.config.id, token: result.token };
+    showConfig(result);
+    configs.value = [result.config, ...configs.value];
     creating.value = blank();
     await load();
-    emit("notice", "已创建。令牌只显示这一次，请立刻复制。");
+    emit("notice", "已创建。配置只显示这一次，请立刻复制。");
   });
 }
 async function save(item, form) {
@@ -80,9 +96,9 @@ async function rotate(item) {
   await run(async () => {
     const result = await props.api("/me/external-mcp/" + item.id + "/rotate", "POST", {});
     if (disposed) return;
-    revealed.value = { id: item.id, token: result.token };
+    showConfig(result);
     await load();
-    emit("notice", "新令牌只显示这一次，请立刻复制。");
+    emit("notice", "新配置只显示这一次，请立刻复制。");
   });
 }
 async function revoke(item) {
@@ -90,7 +106,7 @@ async function revoke(item) {
   await run(async () => {
     await props.api("/me/external-mcp/" + item.id + "/revoke", "POST", {});
     if (disposed) return;
-    if (revealed.value?.id === item.id) revealed.value = null;
+    delete revealed.value[item.id];
     await load();
   });
 }
@@ -99,32 +115,24 @@ async function remove(item) {
   await run(async () => {
     await props.api("/me/external-mcp/" + item.id, "DELETE");
     if (disposed) return;
-    if (revealed.value?.id === item.id) revealed.value = null;
+    delete revealed.value[item.id];
     await load();
   });
 }
 onMounted(() => void run(load));
-onBeforeUnmount(() => { disposed = true; });
+onBeforeUnmount(() => { disposed = true; revealed.value = {}; });
 </script>
 <template>
   <div class="external-mcp">
     <section class="card">
       <div class="card-head">
         <h3>对外 MCP</h3>
-        <p class="hint">让 Cursor、Claude 等外部客户端连接你已经能对话的牛马和群聊。每条连接有自己的地址和令牌，只能看到你勾选的对象。这和牛马「技能 / MCP 客户端」不是一回事：那边是牛马去调用外部服务，这里是外部客户端来找你的牛马。</p>
+        <p class="hint">让 Cursor、Claude 等外部客户端连接你已经能对话的牛马和群聊，只能看到你勾选的对象。这和牛马「技能 / MCP 客户端」不是一回事：那边是牛马去调用外部服务，这里是外部客户端来找你的牛马。</p>
       </div>
-      <p class="callout info"><Icon name="plug" :size="14" /><span>在客户端添加远程 MCP（Streamable HTTP）时，URL 填连接地址，请求头加 <code>Authorization: Bearer &lt;令牌&gt;</code>。也可以用请求头 <code>X-Vega-MCP-Token: &lt;令牌&gt;</code>。不要把令牌放进地址。</span></p>
-      <pre class="example">{
-  "mcpServers": {
-    "vega": {
-      "url": "连接地址",
-      "headers": { "Authorization": "Bearer 令牌" }
-    }
-  }
-}</pre>
+      <p class="callout info"><Icon name="plug" :size="14" /><span>创建后复制 JSON 到支持 Streamable HTTP 的客户端。配置包含访问凭据，请妥善保管。</span></p>
     </section>
     <section class="card">
-      <div class="card-head row"><div><h3>新建连接</h3><p class="hint">名称只用于你自己区分。令牌在创建时显示一次，服务端只保存它的哈希。</p></div></div>
+      <div class="card-head row"><div><h3>新建连接</h3><p class="hint">名称只用于你自己区分。配置仅在创建或轮换时显示，服务端不保存明文令牌。</p></div></div>
       <form class="form-grid" @submit.prevent="create">
         <label>名称<input v-model="creating.name" required maxlength="40" placeholder="例如：我的 Cursor" :disabled="busy" /></label>
         <label class="check"><input v-model="creating.enabled" type="checkbox" :disabled="busy" />创建后立即启用</label>
@@ -144,7 +152,7 @@ onBeforeUnmount(() => { disposed = true; });
             </div>
           </div>
         </div>
-        <button class="primary" type="submit" :disabled="busy">创建并显示令牌</button>
+        <button class="primary" type="submit" :disabled="busy">创建并显示配置</button>
       </form>
     </section>
     <p v-if="!configs.length" class="empty-state">还没有对外 MCP</p>
@@ -152,7 +160,7 @@ onBeforeUnmount(() => { disposed = true; });
       <div class="card-head row">
         <div>
           <h3>{{ item.name }}</h3>
-          <p class="hint">{{ item.revoked ? "已吊销" : item.enabled ? "启用中" : "已停用" }}<template v-if="item.tokenHint"> · 令牌 {{ item.tokenHint }}</template></p>
+          <p class="hint">{{ item.revoked ? "已吊销" : item.enabled ? "启用中" : "已停用" }}</p>
         </div>
         <div class="actions">
           <button type="button" class="sm" :disabled="busy" @click="setEnabled(item, !item.enabled)">{{ item.enabled ? "停用" : "启用" }}</button>
@@ -161,18 +169,15 @@ onBeforeUnmount(() => { disposed = true; });
           <button type="button" class="sm danger-text" :disabled="busy" @click="remove(item)">删除</button>
         </div>
       </div>
-      <div v-if="revealed && revealed.id === item.id" class="callout info token-reveal">
-        <Icon name="key" :size="14" />
+      <div v-if="revealed[item.id]" class="callout info config-reveal">
+        <Icon name="plug" :size="14" />
         <div>
-          <p>令牌只显示这一次。刷新或离开后无法再查看，只能轮换。</p>
-          <div class="url-row"><input class="token" readonly :value="revealed.token" :aria-label="item.name + ' 令牌'" /><button type="button" class="sm" @click="copy(revealed.token)">复制令牌</button></div>
-          <button type="button" class="link" @click="revealed = null">我已保存，不再显示</button>
+          <p>配置只显示这一次，刷新或离开后无法再查看，请复制并妥善保存。</p>
+          <textarea :id="'mcp-json-' + item.id" class="config-json" readonly spellcheck="false" :value="revealed[item.id]" :aria-label="item.name + ' MCP 配置 JSON'"></textarea>
+          <div class="config-actions"><button type="button" class="sm" @click="copy(item.id)">复制 JSON</button><button type="button" class="link" @click="delete revealed[item.id]">我已保存，不再显示</button></div>
         </div>
       </div>
-      <label class="url-field">连接地址
-        <div class="url-row"><input readonly :value="item.url" :aria-label="item.name + ' 连接地址'" /><button type="button" class="sm" :disabled="busy" @click="copy(item.url)">复制地址</button></div>
-      </label>
-      <p class="hint">请求头 <code>Authorization: Bearer &lt;令牌&gt;</code>，或 <code>X-Vega-MCP-Token: &lt;令牌&gt;</code>。停用或吊销后，这条连接立刻拒绝新请求，其它连接不受影响。</p>
+      <p v-else class="hint">配置仅在创建或轮换时显示；未保存可轮换令牌重新生成。</p>
       <form class="form-grid" @submit.prevent="save(item, item)">
         <label>名称<input v-model="item.name" required maxlength="40" :disabled="busy" /></label>
         <div class="targets">
@@ -204,13 +209,10 @@ onBeforeUnmount(() => { disposed = true; });
 .checks { display: grid; align-content: start; gap: 6px; max-height: 180px; overflow: auto; padding: 8px; border: 1px solid var(--border); border-radius: 8px; }
 .check { display: flex; align-items: center; gap: 8px; font-weight: 500; }
 .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
-.url-field { display: grid; gap: 6px; margin: 12px 0; font-size: 13px; font-weight: 500; }
-.url-row { display: flex; gap: 8px; }
-.url-row input { flex: 1; min-width: 0; font-family: var(--mono); font-size: 12px; }
-.example { margin: 12px 0 0; padding: 10px 12px; overflow: auto; border-radius: 8px; background: var(--surface-2); font: 12px/1.6 var(--mono); }
-.token-reveal { margin: 12px 0; }
-.token-reveal p { margin: 0 0 8px; }
-.token-reveal .link { margin-top: 8px; }
-code { font-family: var(--mono); font-size: 12px; }
+.config-reveal { margin: 12px 0; }
+.config-reveal > div { flex: 1; min-width: 0; }
+.config-reveal p { margin: 0 0 8px; }
+.config-json { display: block; width: 100%; min-height: 12em; resize: vertical; font: 12px/1.6 var(--mono); }
+.config-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; }
 @media (max-width: 699px) { .targets { grid-template-columns: minmax(0, 1fr); } .actions { justify-content: flex-start; } }
 </style>

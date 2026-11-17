@@ -90,8 +90,8 @@ test("对外 MCP is a personal settings section and does not open admin settings
   assert.match(settings, /<ExternalMcpSettings :api="api" :employees="employees \|\| \[\]"/);
   assert.match(settings, /props\.admin \? "providers" : "vault"/);
   const page = readFileSync("web/src/ExternalMcpSettings.vue", "utf8");
-  assert.match(page, /Authorization: Bearer/);
-  assert.match(page, /X-Vega-MCP-Token/);
+  assert.match(page, /mcpServers/);
+  assert.match(page, /复制 JSON/);
   assert.match(page, /\/me\/external-mcp/);
   assert.match(page, /Streamable HTTP/);
   assert.match(capabilities, /<h3>MCP 客户端<\/h3>/);
