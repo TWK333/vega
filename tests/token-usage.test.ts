@@ -21,23 +21,45 @@ test("token usage is recorded per user and totalled over the whole range in SQL"
   }
 });
 
-test("token usage per task groups and pages in SQL", async () => {
+test("token usage per task is paged by task creation time, with missing tasks last", async () => {
   const store = await Store.open(":memory:");
   try {
-    await store.recordTokenUsage({ userId: "alice", at: 1000, task: "t1", employee: "e1", session: "s1", input: 10, output: 5, total: 15 });
-    await store.recordTokenUsage({ userId: "alice", at: 2000, task: "t1", employee: "e1", session: "s1", input: 1, output: 1, cacheRead: 3, total: 5 });
-    await store.recordTokenUsage({ userId: "alice", at: 3000, task: "t2", employee: "e1", session: "s2", input: 7, total: 7 });
-    await store.recordTokenUsage({ userId: "bob", at: 4000, session: "s3", input: 2, total: 2 });
+    await store.putEmployeeTask("e1", "t1", false, 100, JSON.stringify({ id: "t1", createdAt: 100 }));
+    await store.putEmployeeTask("e1", "t2", false, 200, JSON.stringify({ id: "t2", createdAt: 200 }));
+    await store.putEmployeeTask("e1", "deleted", false, 300, JSON.stringify({ id: "deleted", createdAt: 300 }));
+    await store.recordTokenUsage({ userId: "alice", at: 2000, task: "t1", employee: "e1", session: "s1", input: 10, output: 5, total: 15 });
+    await store.recordTokenUsage({ userId: "alice", at: 5000, task: "t1", employee: "e1", session: "s1", input: 1, output: 1, cacheRead: 3, total: 5 });
+    await store.recordTokenUsage({ userId: "alice", at: 1000, task: "t2", employee: "e1", session: "s2", input: 7, total: 7 });
+    await store.recordTokenUsage({ userId: "alice", at: 8000, task: "deleted", employee: "e1", input: 100, total: 100 });
+    await store.deleteEmployeeTask("deleted");
+    await store.recordTokenUsage({ userId: "bob", at: 9000, session: "s3", input: 2, total: 2 });
+    // The newer task comes first despite the older task having more tokens and later first and last requests.
     const first = await store.tokenUsageTasks({ userId: "alice", pageSize: 1 });
-    assert.deepEqual(first.tasks, [{ user: "alice", task: "t1", employee: "e1", n: 2, input: 11, output: 6, cacheRead: 3, cacheWrite: 0, total: 20, first: 1000, last: 2000 }]);
-    assert.deepEqual([first.total, first.page, first.pageSize], [2, 1, 1]);
+    assert.deepEqual(first.tasks, [{ user: "alice", task: "t2", employee: "e1", n: 1, input: 7, output: 0, cacheRead: 0, cacheWrite: 0, total: 7, first: 1000, last: 1000 }]);
+    assert.deepEqual([first.total, first.page, first.pageSize], [3, 1, 1]);
     const rest = await store.tokenUsageTasks({ userId: "alice", page: 2, pageSize: 1 });
-    assert.deepEqual([rest.tasks[0].task, rest.tasks[0].total], ["t2", 7]);
-    assert.equal((await store.tokenUsageTasks({ userId: "alice", page: 3, pageSize: 1 })).tasks.length, 0);
-    // Rows without a task stay a separate bucket instead of being merged into another task.
+    assert.deepEqual(rest.tasks, [{ user: "alice", task: "t1", employee: "e1", n: 2, input: 11, output: 6, cacheRead: 3, cacheWrite: 0, total: 20, first: 2000, last: 5000 }]);
+    assert.equal((await store.tokenUsageTasks({ userId: "alice", page: 3, pageSize: 1 })).tasks[0].task, "deleted");
+    assert.equal((await store.tokenUsageTasks({ userId: "alice", page: 4, pageSize: 1 })).tasks.length, 0);
+    // Missing task records and ordinary chats are retained after all known tasks, newest usage first.
     const all = await store.tokenUsageTasks({ pageSize: 20 });
-    assert.equal(all.total, 3);
-    assert(all.tasks.some((row) => row.user === "bob" && !row.task && row.total === 2));
+    assert.equal(all.total, 4);
+    assert.deepEqual(all.tasks.map((row) => row.task || "plain"), ["t2", "t1", "plain", "deleted"]);
+    assert.deepEqual((await store.tokenUsageTasks({ userId: "alice", from: 4000 })).tasks.map((row) => row.task), ["t1", "deleted"]);
+  } finally {
+    await store.close();
+  }
+});
+
+test("task usage pagination is stable when creation and usage times match", async () => {
+  const store = await Store.open(":memory:");
+  try {
+    for (const task of ["t2", "t1"]) {
+      await store.putEmployeeTask("e1", task, false, 100, JSON.stringify({ id: task, createdAt: 100 }));
+      await store.recordTokenUsage({ userId: "alice", at: 1000, task, employee: "e1", total: 1 });
+    }
+    assert.equal((await store.tokenUsageTasks({ pageSize: 1 })).tasks[0].task, "t1");
+    assert.equal((await store.tokenUsageTasks({ page: 2, pageSize: 1 })).tasks[0].task, "t2");
   } finally {
     await store.close();
   }

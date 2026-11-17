@@ -113,7 +113,7 @@ onMounted(load);
     <section class="card">
       <div class="card-head">
         <h3>按任务统计</h3>
-        <p class="hint">{{ rangeLabel }}共 {{ formatTokens(page.total) }} 项，按合计用量从高到低排列；没有任务归属的普通会话单独归入「普通会话」。</p>
+        <p class="hint">{{ rangeLabel }}共 {{ formatTokens(page.total) }} 项，按任务创建时间从新到旧排列；已删除任务和普通会话排在末尾，按最近用量时间排列。</p>
       </div>
       <div class="task-table" role="table" aria-label="按任务统计的用量">
         <div class="task-row task-header" :class="{ admin: isAdmin }" role="row">

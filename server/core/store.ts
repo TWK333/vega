@@ -624,7 +624,7 @@ export class Store {
     const sum = (key: string) => `COALESCE(SUM(${this.json("$." + key)}),0) ${key}`;
     // Rows from plain chats carry no task: they group per user and 牛马 instead of being added together.
     const group = `SELECT user,${task} task,${employee} employee,COUNT(*) n,MIN(at) firstAt,MAX(at) lastAt,${["input", "output", "cacheRead", "cacheWrite", "total"].map(sum).join(",")} FROM token_usage${filter} GROUP BY user,${task},${employee}`;
-    const rows = await this.all(`${group} ORDER BY total DESC,lastAt DESC LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, ...params);
+    const rows = await this.all(`SELECT g.* FROM (${group}) g LEFT JOIN employee_tasks t ON t.id=g.task ORDER BY (t.created IS NULL),t.created DESC,g.lastAt DESC,g.user,g.task,g.employee LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, ...params);
     const total = Number((await this.one(`SELECT COUNT(*) n FROM (${group}) g`, ...params))!.n);
     return {
       tasks: rows.map((row) => ({
