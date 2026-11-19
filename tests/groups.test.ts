@@ -14,6 +14,7 @@ import { NEW_SESSION_NOTICE, newCommand } from "../server/core/new-session";
 import { readFileSync } from "node:fs";
 import { parseMentions } from "../server/core/names";
 import { sleep } from "../server/core/util";
+import { chatHistory } from "../server/core/chat-page";
 
 const u1 = { id: "u1", role: "operator" }, u2 = { id: "u2", role: "operator" }, u3 = { id: "u3", role: "operator" };
 async function fixture() {
@@ -130,6 +131,81 @@ test("an @ starts that member's turn with the group context; members @ each othe
     assert(!privateChat || (await engine.store.messages(privateChat)).length === 0, "the private chat is separate");
     const hidden = (await engine.store.sessions()).filter((s: any) => s.groupId);
     assert.equal(hidden.length, 3, "the group conversation plus one session per member");
+  } finally { await close(); }
+});
+
+test("group replies surface a selected source once, and a user reply to an employee does not need an @", async () => {
+  const { store, engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", "u1"), b = await make("小B", "u1");
+    const group = await engine.groups.create(u1, { name: "回复群", users: [u2.id], employees: [a, b] });
+    const session = (await engine.groups.get(group.id))!.session;
+    // A referenced bot message must not replay an @mention from the quoted text.
+    const source = await store.append(session, { role: "assistant", text: "@小B 以灰度批次三为准。" + "甲".repeat(180) + "末尾信息", author: { kind: "employee", id: a, name: "小A" } });
+    for (let i = 0; i < 22; i++) await store.append(session, { role: "user", text: "其他话题", author: { kind: "user", id: u1.id, name: "alice" } });
+    const seen = script(engine, { [a]: [`[[reply:${source.seq}]]\n这次核对的是批次三。`], [b]: ["不需要引用。", "[[reply:999999]]\n无效编号不会变成引用。"] });
+    await engine.groups.send(u2, group.id, { text: "具体是哪个批次？", quote: await store.quote(session, source.seq!) });
+    await until(async () => (await groupMessages(engine, group.id)).some((m) => m.text === "这次核对的是批次三。"));
+    const rows = await groupMessages(engine, group.id);
+    const reply = rows.at(-1)!;
+    assert.equal(reply.quote?.seq, source.seq);
+    assert.deepEqual(reply.quote?.author, source.author);
+    assert.deepEqual(seen.map((r) => r.employeeId), [a]);
+    assert.equal(narrated.length, 0);
+    const ask = seen[0].messages.findLast((m) => m.role === "user" && !m.runtime).text;
+    assert.match(ask, new RegExp(`回复 #${source.seq}`));
+    assert.match(ask, /末尾信息/, "the cited source remains readable outside the recent window");
+    assert.match(seen[0].system, /默认直接回复，不加引用/);
+    await engine.groups.send(u2, group.id, { text: "@小B 看看这条", quote: await store.quote(session, source.seq!) });
+    await until(async () => (await groupMessages(engine, group.id)).some((m) => m.text === "不需要引用。"));
+    assert.equal((await groupMessages(engine, group.id)).at(-1)?.quote, undefined);
+    await engine.groups.send(u2, group.id, { text: "@小B 再确认一下" });
+    await until(async () => (await groupMessages(engine, group.id)).some((m) => m.text === "无效编号不会变成引用。"));
+    assert.equal((await groupMessages(engine, group.id)).at(-1)?.quote, undefined);
+    assert.deepEqual(seen.map((r) => r.employeeId), [a, b, b], "explicit mentions override quote routing");
+  } finally { await close(); }
+});
+
+test("task topics collect linked group messages and address replies to the right employee without a new conversation", async () => {
+  const { store, engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", "u1"), b = await make("小B", "u1");
+    const room = await engine.groups.create(u1, { name: "话题群", users: [u2.id], employees: [a, b] });
+    const group = (await engine.groups.get(room.id))!;
+    const title = "核对第三批灰度";
+    const seen = script(engine, { [a]: [{ text: "", calls: [{ id: "create", name: "employee_task_create", arguments: { instructions: title } }] }, "我来核对灰度。", "主聊天的状态回复。", "我按第三批核对。"] });
+    const source = await engine.groups.send(u2, group.id, { text: `@小A ${title}` });
+    const waitFor = (text: string) => until(async () => (await groupMessages(engine, group.id)).some((m) => m.text === text));
+    await waitFor("我来核对灰度。");
+    await settle(engine);
+    const employee = await engine.employee.for(a), task = (await employee.state()).tasks.find((t) => t.text === title)!;
+    assert.deepEqual(task.group?.sourceSeqs, [source.seq]);
+    await engine.groups.send(u2, group.id, { text: `@小A ${task.id} 现在进度怎样？` });
+    await waitFor("主聊天的状态回复。");
+    await settle(engine);
+    const progressText = "第四项核对中";
+    await engine.groups.post(task.group!, a, { role: "assistant", text: progressText, progress: true, topicTaskId: task.id }, false);
+    for (let i = 0; i < 202; i++) await store.append(group.session, { role: "user", text: "无关聊天", author: { kind: "user", id: u1.id, name: "alice" } });
+    const quote = await store.quote(group.session, source.seq!);
+    const followup = await engine.groups.send(u2, group.id, { text: "再补一项，请一并核对。", quote, topicTaskId: task.id });
+    await waitFor("我按第三批核对。");
+    const scoped = await engine.groups.topicMessages((await engine.groups.get(group.id))!, task.id);
+    assert.deepEqual(scoped.map((m) => m.text), [`@小A ${title}`, "我来核对灰度。", `@小A ${task.id} 现在进度怎样？`, "主聊天的状态回复。", progressText, "再补一项，请一并核对。", "我按第三批核对。"]);
+    assert.equal(scoped.at(-2)?.quote?.seq, source.seq);
+    assert.equal(scoped.at(-1)?.replyToSeq, followup.seq);
+    assert((await groupMessages(engine, group.id)).some((m) => m.seq === followup.seq), "topic and main chat share the same transcript");
+    const page = await chatHistory(store, group.session, new URLSearchParams("limit=1"), scoped);
+    assert.equal(page.messages[0].text, "我按第三批核对。");
+    assert.equal(page.hasMore, true);
+    const request = seen.at(-1)!.messages.findLast((m) => m.role === "user" && !m.runtime);
+    assert.match(request.text, /当前任务话题/);
+    assert.doesNotMatch(request.text, /无关聊天/);
+    assert.match(seen.at(-1)!.messages.at(-1).text, /本次话题关联群任务/);
+    assert(seen.every((turn) => turn.employeeId === a) && narrated.length === 0);
+    await assert.rejects(engine.groups.send(u2, group.id, { text: "/new", topicTaskId: task.id }), { statusCode: 400 });
+    const other = await engine.groups.create(u1, { name: "其他群", employees: [a] });
+    await assert.rejects(engine.groups.topicMessages((await engine.groups.get(other.id))!, task.id), { statusCode: 404 });
+    await assert.rejects(engine.groups.send(u1, other.id, { text: "错误的话题", topicTaskId: task.id }), { statusCode: 404 });
   } finally { await close(); }
 });
 
@@ -336,18 +412,19 @@ test("工作面板: the group's tasks by member, open ones first; guests see a p
   } finally { await close(); }
 });
 
-test("工作面板 UI: a header button opens it beside the chat; owners open tasks in the employee view, others read them inline", async () => {
+test("工作面板 UI: opening a task keeps the main chat beside its topic and task details", async () => {
   const { readFile } = await import("node:fs/promises");
   const chat = await readFile("web/src/GroupChat.vue", "utf8"), panel = await readFile("web/src/GroupWork.vue", "utf8");
   assert.match(chat, /@click="toggleWork"><Icon name="tasks" :size="15" \/><span class="hide-mobile">工作面板<\/span>/);
   assert.match(chat, /<GroupWork v-if="work && group" :members="workMembers"/);
-  assert.match(chat, /props\.api\(`\/groups\/\$\{id\}\/tasks`\)/);
+  assert.match(chat, /props\.api\(`\/groups\/\$\{id\}\/tasks(?:\?[^`]+)?`\)/);
   assert.match(chat, /matchMedia\("\(min-width: 768px\)"\)/, "work panel defaults open when it sits beside the chat");
   assert(!/emit\(["']tab["']\)|:tab=|props\.tab/.test(chat) && !/GROUP_PANELS/.test(await readFile("web/src/router.js", "utf8")), "panels stay local; not in the route");
-  assert.match(panel, /if \(member\.mine\) emit\("open", \{ employeeId: member\.id, taskId: task\.id \}\);\r?\n  else selectedKey\.value = \{ member: member\.id, task: task\.id \};/);
+  assert.match(panel, /emit\("select", \{ employeeId: member\.id, taskId: task\.id, title: task\.text \}\)/);
+  assert.match(panel, /v-if="owned\(\)"[^>]+emit\('open'/, "only owners can explicitly leave the group for the task workspace");
   assert.match(panel, /watch\(\(\) => props\.members/, "open detail reloads with live task updates");
   assert.match(panel, /<TaskDetail[^>]*:readonly="!selected\.canControl"/);
-  assert.match(chat, /taskFocus\.value = \{ member: author\.id, task: taskId \}/);
+  assert.match(chat, /taskFocus\.value = \{ member: employeeId, task: taskId \}/);
   assert.doesNotMatch(chat, /只有它的主人能查看详情/);
   assert.match(panel, /props\.api\(taskPath\(key\), "POST"/);
   assert.match(panel, /action === "redispatch" && !confirm/);

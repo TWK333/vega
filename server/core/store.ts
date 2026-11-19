@@ -6,6 +6,7 @@ import { cloudFor } from "./cloud";
 import { Files } from "./files";
 import type { FileRef } from "./attachments";
 import { assert, id, type Obj } from "./util";
+import { quoteOf, type ChatAuthor, type ChatQuote } from "../../shared/chat-quote";
 /** Unread counts stop here (the badge shows 99+). */
 export const UNREAD_MAX = 100;
 export type Part = { type: string; [key: string]: any };
@@ -20,17 +21,20 @@ export type Message = {
   clientMessageId?: string;
   clientMessageHash?: string;
   taskInput?: { answer?: string; handoff?: string; handoffRevision?: number; quoteSeq?: number };
-  quote?: { seq: number; role: string; text: string; taskId?: string };
+  quote?: ChatQuote;
   tasks?: { id: string; title: string; status: string }[];
   delivery?: boolean;
   /** Group chat (groups.ts): who said it, in the group's own session. */
-  author?: { kind: "user" | "employee"; id: string; name: string };
+  author?: ChatAuthor;
   /**
    * Group chat relay depth: 0 for a user's message, n for the n-th employee turn handed on by @mentions since then.
    * In a member's own group session (role user) also the group message it answers (seq) and who sent it.
    */
   hop?: number;
-  group?: { groupId: string; name: string; seq: number; from: { kind: "user" | "employee"; id: string; name: string }; byOwner: boolean };
+  /** Group timeline links; replyToSeq is the turn's source, even when there is no visible quote. */
+  topicTaskId?: string;
+  replyToSeq?: number;
+  group?: { groupId: string; name: string; seq: number; from: { kind: "user" | "employee"; id: string; name: string }; byOwner: boolean; topicTaskId?: string };
   /** A group notice from the system (member joined/left, relay limit reached). */
   notice?: boolean;
   /** /new divider: the model context of this session starts after it (context.ts sinceNewSession). */
@@ -425,9 +429,9 @@ export class Store {
   async quote(key: string, seq: number): Promise<NonNullable<Message["quote"]>> {
     assert(Number.isSafeInteger(seq) && seq > 0, "Invalid quoted message");
     const message = await this.message(key, seq);
-    assert(message && ["user", "assistant"].includes(message.role) && (message.text?.trim() || message.images?.length), "Quoted message not found in this conversation");
-    const text = (message.displayText || message.text || "[图片]").replace(/[`*_#>]/g, "").replace(/\s+/g, " ").trim();
-    return { seq, role: message.role, text: text.length > 160 ? text.slice(0, 160) + "…" : text, taskId: message.tasks?.length === 1 ? message.tasks[0].id : undefined };
+    const quote = message && quoteOf(message);
+    assert(quote, "Quoted message not found in this conversation");
+    return quote;
   }
   async messages(key: string): Promise<Message[]> {
     return (await this.all("SELECT seq,data FROM messages WHERE session=? ORDER BY seq", key)).map((r) => this.parseMessage(r));

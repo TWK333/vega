@@ -499,7 +499,16 @@ test(
       assert.equal((await req(`/groups/${room.id}/employees`, "POST", { employeeId: workerA.id }, b)).r.status, 400, "only your own employees");
       await ok(`/groups/${room.id}/employees`, "POST", { employeeId: workerB.id }, b);
       assert.equal((await ok(`/groups/${room.id}`, "GET", undefined, v)).employees.length, 2);
-      assert.equal((await req(`/groups/${room.id}/messages`, "POST", { text: "viewer cannot post" }, v)).r.status, 403);
+      const roomMessages = `/groups/${room.id}/messages`;
+      assert.equal((await req(roomMessages, "POST", { text: "viewer cannot post" }, v)).r.status, 403);
+      const roomSender = (await ok("/bootstrap", "GET", undefined, a)).user.username;
+      const roomSource = await ok(roomMessages, "POST", { text: `@${roomSender} 这是要核对的版本` }, a);
+      const roomReply = await ok(roomMessages, "POST", { text: `@${roomSender} 确认收到`, quoteSeq: roomSource.seq, quote: { text: "forged" } }, b);
+      const roomHistory = await ok(roomMessages + "?limit=20&stepSummaries=1", "GET", undefined, v);
+      const storedQuote = roomHistory.messages.find((m: any) => m.seq === roomReply.seq)?.quote;
+      assert.deepEqual(storedQuote, { seq: roomSource.seq, role: "user", text: `@${roomSender} 这是要核对的版本`, author: { kind: "user", id: idA, name: roomSender } });
+      assert.equal((await req(roomMessages, "POST", { text: "quote unavailable", quoteSeq: 99999 }, a)).r.status, 400);
+      assert.equal((await req(roomMessages, "GET", undefined, admin)).r.status, 400);
       assert.equal((await req(`/groups/${room.id}`, "PATCH", { bulletin: "not the creator" }, b)).r.status, 400);
       assert.equal((await req(`/groups/${room.id}`, "GET", undefined, admin)).r.status, 400, "administrators are not members either");
       assert((await ok("/groups/directory", "GET", undefined, b)).some((u: any) => u.id === idA));

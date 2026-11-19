@@ -160,7 +160,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   }
   if (task) {
     out.push(tool("task_progress",
-      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、工作原则和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。步骤需要交付成果时用 stepOutput 保存为独立产物，正文和文件不混入对话消息；不新建任务或会话、不结束本轮，最终仍需 task_complete。",
+      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；同一步骤只更新 status，执行结果写 message。计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、工作原则和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。步骤需要交付成果时用 stepOutput 保存为独立产物，正文和文件不混入对话消息；不新建任务或会话、不结束本轮，最终仍需 task_complete。回执 outlineReviewRequired=true 时，首次交付就逐项复核 changedSteps，不要空提等驳回。",
       { message: str("当前进度，1–200 字", { minLength: 1, maxLength: 200 }),
         plan: { type: "array", minItems: 1, maxItems: 50, description: "完整计划，包括未来步骤", items: obj({
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
@@ -190,16 +190,16 @@ export function employeeTools(ctx: ToolContext): Tool[] {
     if (!ctx.computer) {
       // Browser work uses same-session switch_scene(scene=computer); isolated task_relay_computer is retired.
       out.push(tool("task_complete",
-        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、工作原则与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。evidence 写实际结果与验证证据；summary 写给用户的 1–400 字摘要（先结论，再重要变化、限制或需用户处理的事项）；deliverableRefs 可省略（系统选用尚未作为步骤产物交出的最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。已交出的步骤产物不会自动算作最终正文，也不要重复放进正文；仅当用户明确要求时可显式引用其文本。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独的最终正文时传 []（本次交付期内已写出未交出的正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
-        { evidence: str("实际结果与验证证据，1–8000 字", { minLength: 1, maxLength: 8000 }),
-          outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、工作原则与用户最新要求；回执 changedSteps 每条在 requirement 原样列出并解释如何完成、替代或为何不适用，这不要求旧计划保持不变。每项写状态和真实依据。", items: obj({
-            requirement: str("用户任务或工作原则中的一项要求", { minLength: 1, maxLength: 500 }),
+        "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、工作原则与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。首次提交 evidence 写实际结果与验证证据；summary 只写结论、重要变化、限制或需用户处理的事项（建议 100–150 字，上限 400）。outline_review_incomplete 回执带 outlineReviewRetry 时只补缺项，不重发原内容。deliverableRefs 可省略（系统选用尚未作为步骤产物交出的最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。已交出的步骤产物不会自动算作最终正文，也不要重复放进正文；仅当用户明确要求时可显式引用其文本。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独的最终正文时传 []（本次交付期内已写出未交出的正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
+        { evidence: str("完整提交必填：实际结果与验证证据，1–8000 字。补交缺项时省略", { minLength: 1, maxLength: 8000 }),
+          outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、工作原则与用户最新要求，并复核 task_progress 回执的 changedSteps；每条在 requirement 原样列出并解释如何完成、替代或为何不适用。用 outlineReviewRetry 补交时只填该次回执缺少的 changedSteps。", items: obj({
+            requirement: str("用户任务、工作原则中的一项要求或 changedSteps 中的原文", { minLength: 1, maxLength: 500 }),
             status: str("met 已满足 / not_applicable 条件不适用 / unmet 尚未满足", { enum: ["met", "not_applicable", "unmet"] }),
             evidence: str("实际回执、验证证据或不适用/未完成的原因", { minLength: 1, maxLength: 2000 }),
           }, ["requirement", "status", "evidence"]) },
-          summary: str("交付摘要，1–400 字；先结论，简单任务一两句即可，勿写小标题清单", { minLength: 1, maxLength: 400 }),
-          deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" } },
-        ["evidence"]));
+          outlineReviewRetry: str("仅补交缺项时复制最近一次 outline_review_incomplete 的同名字段；只传此字段及缺项 outlineReview，不传 evidence、summary 或 deliverableRefs", { minLength: 1, maxLength: 100 }),
+          summary: str("交付摘要，1–400 字，建议 100–150 字以内；先结论，简单任务一两句即可，勿写小标题清单", { minLength: 1, maxLength: 400 }),
+          deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" } }));
     }
   }
   if (!ctx.member) {
@@ -342,7 +342,10 @@ export function toInternal(name: string, a: Obj, ctx: ToolContext): Internal {
       return employee(defined({ action: "defer", text: a.checkpoint, nextAt: a.resumeAt, nextCheckInMinutes: a.delayMinutes }));
     }
     case "task_relay_computer": return employee({ action: "relay", scene: "computer", text: a.handoff });
-    case "task_complete": return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs, outlineReview: a.outlineReview }));
+    case "task_complete": {
+      if (a.evidence === undefined && a.outlineReviewRetry === undefined) throw new ArgumentError("参数 缺少必填字段 evidence（仅补交复核缺项时可省略）");
+      return employee(defined({ action: "complete", text: a.evidence, summary: a.summary, deliverableRef: a.deliverableRefs, outlineReview: a.outlineReview, outlineReviewRetry: a.outlineReviewRetry }));
+    }
     case "memory_search": return employee(defined({ action: "memory_search", query: a.query, status: a.status, memoryScene: a.memoryScene }));
     case "memory_propose": return employee(defined({ action: "memory_propose", claim: a.claim, memoryKind: a.memoryKind, scope: a.scope, tags: a.tags, memoryScene: a.memoryScene, evidence: a.evidence, id: a.memoryId, pinned: a.pinned }));
     case "memory_manage": {

@@ -12,6 +12,7 @@ import { MESSAGE_POSE } from "./bot-avatar.js";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
+import { quoteOf } from "../../shared/chat-quote";
 const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, loadStepOutput: Function, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean, selfTint: Object });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
 // In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
@@ -21,6 +22,9 @@ const exportOpen = ref(false), exportError = ref("");
 // In a group every message carries its author (a user or an employee, avatar filled in by the group view); only the
 // viewer's own messages sit on the right. A private chat has no authors: user messages are mine, the rest the employee's.
 const mine = computed(() => props.message.role === "user" && (!props.message.author || props.message.author.id === props.viewerId));
+const source = computed(() => props.quotable && quoteOf(props.message));
+const replyLabel = computed(() => props.message.author ? "回复" : "引用");
+const quoteName = computed(() => props.message.quote?.author?.name || (props.message.quote?.role === "user" ? "我" : props.name));
 // Earlier step outputs were saved inside the chat body; present them as cards without rewriting history.
 const legacyOutput = computed(() => {
   const prefix = "**步骤产物（任务未完成）**\n\n", text = String(props.message.text || "");
@@ -83,11 +87,11 @@ async function runExport(format) {
         <strong v-else-if="!mine && !continued">{{ sender.name }}</strong>
         <span v-if="!mine && sender.kind === 'user' && message.author" class="author-tag">用户</span>
         <time v-if="message.at">{{ shortTime(message.at) }}</time>
-        <button v-if="quotable && message.seq" type="button" class="chat-reply" aria-label="引用这条消息" title="引用" @click="emit('quote', message)"><Icon name="reply" :size="13" /><span class="reply-label">引用</span></button>
+        <button v-if="source" type="button" class="chat-reply" :aria-label="replyLabel + '这条消息'" :title="replyLabel" @click="emit('quote', source)"><Icon name="reply" :size="13" /><span class="reply-label">{{ replyLabel }}</span></button>
         <button v-if="rememberable && !mine && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
       </div>
+      <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到 ' + quoteName + ' 的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><Icon name="reply" :size="12" /><strong>{{ quoteName }}</strong><span>{{ message.quote.text }}</span></button>
       <div class="chat-bubble" :class="{ failed: message.error, tinted: !!tint }" :style="tint" :role="message.error ? 'alert' : undefined">
-        <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到引用的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><strong>{{ message.quote.role === 'user' ? '我' : name }}</strong><span>{{ message.quote.text }}</span></button>
         <UserMessage v-if="message.role === 'user' && message.text" :text="message.displayText || message.text" />
         <MessageText v-else-if="message.text" :text="bodyText" :streaming="message.streaming" :archive-base="archiveBase" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
@@ -147,7 +151,8 @@ async function runExport(format) {
 .chat-reply { gap: 3px; min-height: 20px; padding: 0 4px; border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 400; opacity: 0; }
 .chat-message:hover .chat-reply, .chat-reply:focus-visible { opacity: 1; }
 .chat-reply:hover:not(:disabled) { background: var(--surface-2); color: var(--accent); }
-.chat-bubble { min-width: 0; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
+.chat-bubble { justify-self: start; min-width: 0; max-width: 100%; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
+.user .chat-bubble { justify-self: end; }
 .user .chat-bubble { border-radius: 14px 4px 14px 14px; background: var(--accent-soft); color: #13254f; }
 /* A colored bubble keeps its links and mentions readable instead of accent-blue on the same color. */
 .chat-bubble.tinted :deep(a), .chat-bubble.tinted :deep(.mention) { color: inherit; text-decoration: underline; }
@@ -160,17 +165,11 @@ async function runExport(format) {
 .author-name { height: auto; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--text-2); font-size: 12px; font-weight: 600; }
 .author-name:hover:not(:disabled) { background: transparent; color: var(--accent-text); text-decoration: underline; }
 .chat-bubble img { display: block; max-width: 100%; max-height: 360px; margin-top: 6px; border-radius: var(--r-md); }
-.chat-quote { display: grid; justify-content: stretch; justify-items: start; gap: 1px; width: 100%; max-width: 100%; height: auto; min-height: 0; margin: 0 0 6px; padding: 4px 8px; border: 0; border-left: 2px solid var(--accent); border-radius: 2px 6px 6px 2px; background: rgb(255 255 255 / 60%); color: var(--text-2); font-weight: 400; text-align: left; white-space: normal; }
-/* 不让引用原文撑宽气泡，同时给短回复保留可读的预览宽度。 */
-@supports (contain: inline-size) and (contain-intrinsic-inline-size: 14rem) {
-  .chat-quote { contain: inline-size; contain-intrinsic-inline-size: 14rem; }
-}
-.chat-quote:hover:not(:disabled) { background: rgb(255 255 255 / 75%); }
-.chat-quote strong { max-width: 100%; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.chat-quote span { min-width: 0; max-width: 100%; display: -webkit-box; overflow: hidden; overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-/* 深色气泡上的引用加深背景，保留白字对比度。 */
-.chat-bubble.tinted .chat-quote { border-left-color: rgb(255 255 255 / 50%); background: rgb(0 0 0 / 12%); color: inherit; }
-.chat-bubble.tinted .chat-quote:hover:not(:disabled) { background: rgb(0 0 0 / 20%); }
+.chat-quote { display: flex; justify-content: start; justify-self: start; gap: 5px; max-width: min(100%, 28rem); height: auto; min-height: 24px; padding: 2px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); font-size: 12px; font-weight: 400; line-height: 18px; text-align: left; white-space: nowrap; }
+.user .chat-quote { justify-self: end; }
+.chat-quote:hover:not(:disabled) { background: var(--surface-2); color: var(--text-2); }
+.chat-quote strong { max-width: 40%; }
+.chat-quote strong, .chat-quote span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .chat-step-output { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; gap: 6px; width: 100%; height: auto; min-width: 0; max-width: min(100%, 440px); padding: 12px 14px; border-color: var(--border); border-radius: var(--r-lg); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; }
 .chat-step-output:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); }
 .chat-step-output strong { display: -webkit-box; overflow: hidden; font-size: 13px; font-weight: 600; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }

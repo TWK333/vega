@@ -8,7 +8,7 @@ import { createServer } from "vite";
 import vue from "@vitejs/plugin-vue";
 
 const run = promisify(execFile);
-test("debug cards stay compact and group task links open requester controls or read-only details", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 90000 }, async () => {
+test("debug cards stay compact; group task links keep task details and a remembered topic tab in the group", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 90000 }, async () => {
   const root = process.cwd(), temp = join(root, ".tmp");
   await mkdir(temp, { recursive: true });
   const dir = await mkdtemp(join(temp, "group-debug-ui-"));
@@ -27,7 +27,13 @@ test("debug cards stay compact and group task links open requester controls or r
       const state = reactive({ view: 'group', revision: 0, user: { id: 'requester', role: 'operator' } });
       const task = { id: 't1', text: '核对指标筛选器的中英文提示文案', status: 'waiting', createdAt: Date.now(), waiting: '请补充验收环境', plan: [{ content: '核对提示文案', status: 'pending' }], requester: { kind: 'user', id: 'requester', name: '发起人' } };
       const group = { id: 'g1', name: '情报小分队', bulletin: '', users: [{ id: 'owner', name: '归属人' }, { id: 'requester', name: '发起人' }, { id: 'member', name: '同事' }], employees: [{ id: 'e1', name: '情报开发', mine: false, avatar: 'bot:round:blue' }], running: [] };
-      const posts = [];
+      const posts = [], messagePosts = [];
+      const other = { ...task, id: 't-other', text: '核对账号列表', status: 'queued' };
+      const messages = [
+        { seq: 1, role: 'assistant', text: '请核对这条任务', topicTaskId: task.id, author: { kind: 'employee', id: 'e1', name: '情报开发' }, tasks: [{ id: task.id, title: task.text, status: task.status }] },
+        { seq: 2, role: 'user', text: '无关的主聊天', author: { kind: 'user', id: 'member', name: '同事' } },
+        { seq: 3, role: 'assistant', text: '另一项任务的讨论', topicTaskId: other.id, author: { kind: 'employee', id: 'e1', name: '情报开发' }, tasks: [{ id: other.id, title: other.text, status: other.status }] }
+      ];
       let confirmed = false;
       window.confirm = () => confirmed;
       const sessions = [
@@ -39,12 +45,20 @@ test("debug cards stay compact and group task links open requester controls or r
       ];
       const api = async (path, method = 'GET', body) => {
         if (path === '/debug/sessions') return sessions;
-        if (path.includes('/messages?')) return { group, messages: [{ seq: 1, role: 'assistant', text: '请核对这条任务', author: { kind: 'employee', id: 'e1', name: '情报开发' }, tasks: [{ id: task.id, title: task.text, status: task.status }] }], taskStatus: { [task.id]: task.status } };
+        if (path.includes('/messages?')) {
+          const topicId = new URLSearchParams(path.split('?')[1]).get('topicTaskId');
+          return { group, messages: messages.filter((m) => !topicId || m.topicTaskId === topicId), taskStatus: { [task.id]: task.status } };
+        }
+        if (path.endsWith('/messages') && method === 'POST') {
+          messagePosts.push(body);
+          messages.push({ seq: messages.length + 1, role: 'user', text: body.text, topicTaskId: body.topicTaskId, author: { kind: 'user', id: state.user.id, name: '发起人' } });
+          return {};
+        }
         if (path.endsWith('/read')) return {};
-        if (path === '/groups/g1/tasks') return { members: [{ id: 'e1', name: '情报开发', mine: false, tasks: [] }] };
+        if (path.startsWith('/groups/g1/tasks?')) return { members: [{ id: 'e1', name: '情报开发', mine: false, tasks: [other] }] };
         if (path.startsWith('/groups/g1/tasks/e1/')) {
           if (method === 'POST') { posts.push(body); task.status = body.action === 'answer' ? 'queued' : task.status; return body.action === 'redispatch' ? { id: 't2' } : {}; }
-          return { ...task, id: path.split('/').at(-1), canControl: state.user.id === 'requester' };
+          return { ...(path.endsWith(other.id) ? other : task), id: path.split('/').at(-1), canControl: state.user.id === 'requester' };
         }
         throw Error('unexpected API ' + path);
       };
@@ -52,6 +66,10 @@ test("debug cards stay compact and group task links open requester controls or r
       try {
         app.mount('#app'); await flush();
         document.querySelector('.chat-task-link').click(); await flush();
+        const chat = () => document.querySelector('.chat-scroll').textContent;
+        const tabs = () => [...document.querySelectorAll('.group-chat-tabs button')];
+        const draft = () => document.querySelector('.chat-composer textarea');
+        check(tabs()[1].getAttribute('aria-pressed') === 'true' && chat().includes('请核对这条任务') && !chat().includes('无关的主聊天'), 'first task opens its filtered topic');
         check(document.querySelector('.task-detail')?.textContent.includes(task.text), 'a non-owner opens a linked task even when it is absent from the recent board');
         check(document.querySelector('.access-note')?.textContent.includes('可以操作'), 'requester gets controls');
         input(document.querySelector('.task-detail textarea'), '使用开发环境'); await flush();
@@ -65,6 +83,23 @@ test("debug cards stay compact and group task links open requester controls or r
         redispatch.click(); await flush(); check(posts.length === 1, 'cancelled confirmation does not submit');
         confirmed = true; redispatch.click(); await flush();
         check(posts.length === 2 && posts[1].action === 'redispatch' && posts[1].confirmed === true, 'redispatch needs explicit confirmation');
+        tabs()[0].click(); await flush();
+        input(draft(), '主聊天草稿'); await flush();
+        document.querySelector('[aria-label="返回任务列表"]').click(); await flush();
+        document.querySelector('[data-task-id="t-other"]').click(); await flush();
+        check(tabs()[0].getAttribute('aria-pressed') === 'true' && tabs()[1].textContent.includes(other.text) && chat().includes('无关的主聊天'), 'manual main selection survives a task switch');
+        tabs()[1].click(); await flush();
+        check(chat().includes('另一项任务的讨论') && !chat().includes('请核对这条任务') && !chat().includes('无关的主聊天'), 'only this task appears in the topic');
+        check(draft().value === '', 'switching to a task does not copy a main-chat draft');
+        input(draft(), '话题补充'); await flush();
+        document.querySelector('.chat-composer .send').click(); await flush();
+        check(messagePosts.length === 1 && messagePosts[0].topicTaskId === other.id && chat().includes('话题补充'), 'topic send is tied to the selected task');
+        tabs()[0].click(); await flush();
+        check(draft().value === '主聊天草稿' && chat().includes('话题补充'), 'main draft is kept and topic sends also appear in main');
+        state.view = 'debug'; await flush();
+        state.view = 'group'; await flush();
+        document.querySelector('.chat-task-link').click(); await flush();
+        check(tabs()[0].getAttribute('aria-pressed') === 'true' && chat().includes('无关的主聊天'), 'main preference survives leaving and re-entering the group');
         state.view = 'debug'; await flush();
         for (const width of [320, 390, 880, 1280]) {
           document.querySelector('#app').style.width = width + 'px'; await flush();

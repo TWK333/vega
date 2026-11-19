@@ -704,18 +704,26 @@ export class Tools {
         const task = employee.task(await employee.state(), id);
         assert(task.group?.groupId === source.group.groupId, "已有任务不属于本群，不能通过去重键接管或公开");
       }
-      if (source?.seq && !existing) await employee.update((state) => {
-              const task = employee.task(state, id);
-              if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
-              // A follow-up changes its source message, not the original task requester's authority.
-              if (source.group && !task.group) task.group = { groupId: source.group.groupId, name: source.group.name, hop: source.hop || 0, requester: source.group.from, byOwner: source.group.byOwner };
-              // The message's images and files go with the work (its next run receives the ones it has not seen).
-              const images = (source.images || []).filter((x) => x.blobId), files = source.files || [];
-              if (images.length || files.length) {
-                const known = task.attachments || { images: [], files: [] }, seen = new Set([...known.images, ...known.files].map((x: { blobId?: string }) => x.blobId));
-                task.attachments = { images: [...known.images, ...images.filter((x) => !seen.has(x.blobId)).map(({ mime, blobId }) => ({ mime, blobId }))], files: [...known.files, ...files.filter((x) => !seen.has(x.blobId))] };
-              }
-            });
+      if (source?.seq && (!existing || source.group)) await employee.update(async (state) => {
+        const task = employee.task(state, id);
+        const previousSource = task.chatSource;
+        // A follow-up changes its source message, not the original task requester's authority.
+        if (!existing && source.group && !task.group) task.group = { groupId: source.group.groupId, name: source.group.name, hop: source.hop || 0, requester: source.group.from, byOwner: source.group.byOwner };
+        if (source.group && task.group?.groupId === source.group.groupId) {
+          const legacy = !task.group.sourceSeqs && previousSource?.session === this.session.id
+            ? (await this.engine.store.message(this.session.id, previousSource.seq))?.group : undefined;
+          const seqs = task.group.sourceSeqs || (legacy?.groupId === source.group.groupId ? [legacy.seq] : []);
+          if (!seqs.includes(source.group.seq)) task.group.sourceSeqs = [...seqs, source.group.seq];
+        }
+        if (existing) return;
+        if (replace || !task.chatSource) task.chatSource = { session: this.session.id, seq: source.seq };
+        // The message's images and files go with the work (its next run receives the ones it has not seen).
+        const images = (source.images || []).filter((x) => x.blobId), files = source.files || [];
+        if (images.length || files.length) {
+          const known = task.attachments || { images: [], files: [] }, seen = new Set([...known.images, ...known.files].map((x: { blobId?: string }) => x.blobId));
+          task.attachments = { images: [...known.images, ...images.filter((x) => !seen.has(x.blobId)).map(({ mime, blobId }) => ({ mime, blobId }))], files: [...known.files, ...files.filter((x) => !seen.has(x.blobId))] };
+        }
+      });
       const task = employee.task(await employee.state(), id);
       return { id, title: task.text.slice(0, 80), status: task.status };
     };

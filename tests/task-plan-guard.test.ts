@@ -60,7 +60,9 @@ test("合并后的计划经逐项对照可交付，替代的中间步骤无需�
     await running(employee, id);
     await employee.execute(id, { action: "progress", text: "开始", plan });
     const merged = [{ content: "澄清需求并完成开发测试", status: "completed" }];
-    await employee.execute(id, { action: "progress", text: "以合并步骤完成", plan: merged });
+    const ready = await employee.execute(id, { action: "progress", text: "以合并步骤完成", plan: merged });
+    assert.equal(ready.value.outlineReviewRequired, true);
+    assert.deepEqual(ready.value.changedSteps, plan.map(step => step.content));
     const review = plan.map(step => ({ requirement: step.content, status: "met", evidence: "需求单回复、提交和测试回执" }));
     const result = await employee.execute(id, { ...delivery, text: "已完成澄清、开发和测试", outlineReview: review });
     assert.equal(result.value.status, undefined);
@@ -88,6 +90,52 @@ test("取消不再需要的中间方法，不等于放弃用户要求", async ()
     ] });
     assert.equal(result.value.status, undefined);
     assert.equal((await employee.state()).tasks[0].completion, delivery.text);
+  } finally { employee.close(); await store.close(); }
+});
+
+test("复核补交只发缺项，保留已填依据和交付内容", async () => {
+  const { store, employee, id } = await fixture();
+  try {
+    await running(employee, id);
+    await employee.execute(id, { action: "progress", text: "开始", plan });
+    await employee.execute(id, { action: "progress", text: "澄清开发验证已完成", plan: [{ content: "按澄清回复开发并验证", status: "completed" }] });
+    const review = plan.map(step => ({ requirement: step.content, status: "met", evidence: "已验证：" + step.content }));
+    const first = await employee.execute(id, { ...delivery, text: "已完成澄清、开发和验证。", summary: "开发验证完成。", outlineReview: review.slice(0, 2) });
+    assert.equal(first.value.code, "outline_review_incomplete");
+    assert.deepEqual(first.value.changedSteps, plan.slice(2).map(step => step.content));
+    assert(!first.stop);
+    assert(!(await employee.state()).tasks[0].completion);
+    const second = await employee.execute(id, { action: "complete", outlineReviewRetry: first.value.outlineReviewRetry, outlineReview: review.slice(2, 3) });
+    assert.equal(second.value.code, "outline_review_incomplete");
+    assert.deepEqual(second.value.changedSteps, [plan[3].content]);
+    const result = await employee.execute(id, { action: "complete", outlineReviewRetry: second.value.outlineReviewRetry, outlineReview: review.slice(3) });
+    assert.equal(result.stop, true);
+    const task = (await employee.state()).tasks[0];
+    assert.deepEqual(task.outlineReview, review);
+    assert.equal(task.completion, "已完成澄清、开发和验证。");
+    assert.equal(task.summary, "开发验证完成。");
+  } finally { employee.close(); await store.close(); }
+});
+
+test("补交草稿随计划变更失效，新草稿保留未满足项并阻止交付", async () => {
+  const { store, employee, id } = await fixture();
+  try {
+    await running(employee, id);
+    await employee.execute(id, { action: "progress", text: "开始", plan });
+    await employee.execute(id, { action: "progress", text: "修改执行方案", plan: [plan[0]] });
+    const draft = await employee.execute(id, { ...delivery, outlineReview: unmet(plan[1]) });
+    assert.equal(draft.value.code, "outline_review_incomplete");
+    const missingAsMet = draft.value.changedSteps.map((requirement: string) => ({ requirement, status: "met", evidence: "已核对回执" }));
+    const patch = { action: "complete", outlineReview: missingAsMet };
+    await employee.execute(id, { action: "progress", text: "补充核对", plan: [...plan.slice(0, 1), { content: "补充核对", status: "completed" }] });
+    const stale = await employee.execute(id, { ...patch, outlineReviewRetry: draft.value.outlineReviewRetry });
+    assert.equal(stale.value.code, "outline_review_retry_expired");
+    const fresh = await employee.execute(id, { ...delivery, outlineReview: unmet(plan[1]) });
+    assert.equal(fresh.value.code, "outline_review_incomplete");
+    const blocked = await employee.execute(id, { ...patch, outlineReviewRetry: fresh.value.outlineReviewRetry });
+    assert.equal(blocked.value.code, "outline_unmet");
+    assert.equal(blocked.value.unmet[0].content, plan[1].content);
+    assert(!(await employee.state()).tasks[0].completion);
   } finally { employee.close(); await store.close(); }
 });
 

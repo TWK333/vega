@@ -295,7 +295,9 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 .composer-wrap { flex: none; padding: 8px max(16px, calc((100% - var(--read-w)) / 2)) 14px; }
 .composer { padding: 8px 10px; border: 1px solid var(--border-strong); border-radius: var(--r-lg); background: var(--surface); }
 .composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
-.composer textarea { width: 100%; min-height: 44px; max-height: 200px; padding: 4px; border: 0; box-shadow: none; resize: none; font-size: 14px; }
+/* shortcut: browsers without field-sizing keep their initial rows; add JS sizing if those browsers need support. */
+.chat-draft { min-width: 0; field-sizing: content; max-height: 200px; max-height: min(200px, 30dvh); overflow-y: auto; }
+.composer textarea { width: 100%; min-height: 44px; padding: 4px; border: 0; box-shadow: none; resize: none; font-size: 14px; }
 .composer textarea:focus { box-shadow: none; }
 .composer-bottom { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .composer-bottom .hint { margin-left: auto; font-size: 11px; }

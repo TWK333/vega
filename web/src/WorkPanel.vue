@@ -47,7 +47,7 @@ function brief(text, max = 72) {
   </aside>
 </template>
 <style scoped>
-.work-panel { display: flex; flex-direction: column; min-height: 0; width: 320px; border-left: 1px solid var(--border); background: var(--bg); }
+.work-panel { display: flex; flex-direction: column; flex: none; min-height: 0; width: clamp(320px, 26vw, 480px); border-left: 1px solid var(--border); background: var(--bg); }
 .work-panel.overlay { position: absolute; top: 0; right: 0; bottom: 0; z-index: 20; width: min(340px, 92%); box-shadow: var(--sh-lg); animation: rise-in .15s ease; }
 .panel-head { display: flex; align-items: center; gap: 8px; flex: none; height: 44px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--border); }
 .panel-head h3 { flex: 1; font-size: 13px; }

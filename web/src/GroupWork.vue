@@ -5,10 +5,11 @@ import EmployeeAvatar from "./EmployeeAvatar.vue";
 import TaskDetail from "./TaskDetail.vue";
 import { taskLabel, taskTone, planProgress, shortTime } from "./task-status";
 // The group's 工作面板: tasks started from this group, by member employee (GET /groups/:id/tasks, already ordered).
-// Owners keep their employee workspace; everyone else opens a task-scoped group view.
+// Task details stay beside the chat; owners can explicitly open their execution workspace.
 const props = defineProps({ members: Array, loading: Boolean, api: Function, groupId: String, focus: Object });
-const emit = defineEmits(["open", "close", "changed"]);
+const emit = defineEmits(["select", "open", "close", "changed"]);
 const selectedKey = ref(null), selected = ref(null), detailLoading = ref(false), error = ref("");
+const owned = () => props.members?.some((member) => member.mine && member.id === selectedKey.value?.member);
 const requester = (task) => task.requester ? `${task.requester.kind === "employee" ? "牛马" : ""}${task.requester.name}` : "";
 const note = (task) => task.status === "waiting" ? task.waiting : task.status === "approval" ? task.approval : task.progress?.at(-1)?.text || task.queueReason || "";
 let version = 0;
@@ -24,8 +25,7 @@ async function loadDetail() {
   finally { if (current === version) detailLoading.value = false; }
 }
 function open(member, task) {
-  if (member.mine) emit("open", { employeeId: member.id, taskId: task.id });
-  else selectedKey.value = { member: member.id, task: task.id };
+  emit("select", { employeeId: member.id, taskId: task.id, title: task.text });
 }
 async function control(action, text) {
   const key = selectedKey.value;
@@ -38,7 +38,7 @@ async function control(action, text) {
     const result = await props.api(taskPath(key), "POST", { action: action === "reject" ? "approve" : action, ...(action === "approve" || action === "reject" ? { approved: action === "approve" } : {}), ...(text ? { text } : {}), ...(action === "redispatch" ? { confirmed: true } : {}), ...(action === "seal" ? { manual: true } : {}) });
     if (selectedKey.value === key) {
       if (action === "remove") selectedKey.value = null;
-      else if (action === "redispatch" && result.id) selectedKey.value = { ...key, task: result.id };
+      else if (action === "redispatch" && result.id) open({ id: key.member }, { id: result.id, text: selected.value?.text });
       else await loadDetail();
     }
     emit("changed");
@@ -61,7 +61,7 @@ onBeforeUnmount(() => { version++; });
     <div v-if="selectedKey" class="panel-scroll detail" :aria-busy="detailLoading">
       <p v-if="detailLoading && !selected" class="panel-empty">正在读取任务…</p>
       <template v-if="selected">
-        <p class="panel-empty access-note"><Icon name="lock" :size="12" />{{ selected.canControl ? '你可以操作此任务' : '只读 · 仅发起人和牛马归属人可操作' }}</p>
+        <p class="panel-empty access-note"><Icon name="lock" :size="12" />{{ selected.canControl ? '你可以操作此任务' : '只读 · 仅发起人和牛马归属人可操作' }}<button v-if="owned()" type="button" class="link" @click="emit('open', { employeeId: selectedKey.member, taskId: selectedKey.task })">打开任务会话</button></p>
         <TaskDetail :key="selected.id" :task="selected" :employee-id="selectedKey.member" :readonly="!selected.canControl" :act="control" />
       </template>
     </div>
@@ -84,7 +84,7 @@ onBeforeUnmount(() => { version++; });
   </aside>
 </template>
 <style scoped>
-.group-work { display: flex; flex-direction: column; flex: none; min-height: 0; width: 320px; border-left: 1px solid var(--border); background: var(--bg); }
+.group-work { display: flex; flex-direction: column; flex: none; min-height: 0; width: clamp(320px, 26vw, 480px); border-left: 1px solid var(--border); background: var(--bg); }
 .panel-head { display: flex; align-items: center; gap: 8px; flex: none; height: 44px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--border); }
 .panel-head h3 { flex: 1; font-size: 13px; }
 .panel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 12px 16px; scrollbar-width: thin; }
@@ -102,7 +102,7 @@ onBeforeUnmount(() => { version++; });
 .mini-progress { display: block; height: 3px; margin-top: 2px; overflow: hidden; border-radius: 2px; background: var(--surface-3); }
 .mini-progress span { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
 .panel-empty { display: flex; gap: 8px; padding: 8px 4px; color: var(--muted); font-size: 12px; line-height: 1.55; }
-.group-work:has(.detail) { width: min(460px, 48%); }
+.group-work:has(.detail) { width: min(clamp(460px, 32vw, 560px), 48%); }
 .panel-scroll.detail :deep(.task-detail) { padding: 12px 16px 20px; min-height: 0; }
 .access-note { align-items: center; margin: 0; padding: 10px 16px 0; }
 @media (max-width: 767px) { .group-work, .group-work:has(.detail) { position: absolute; z-index: 20; top: 52px; right: 0; bottom: 0; width: min(460px, 100%); box-shadow: var(--sh-lg); } }

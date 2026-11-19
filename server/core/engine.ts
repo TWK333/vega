@@ -1181,21 +1181,24 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const employeeState = await worker?.state();
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
         const latestChat = worker && !session.taskId ? await this.store.lastMessage(key, "user") : undefined;
-        const quoted = !session.groupId && latestChat?.quote ? await this.store.message(key, latestChat.quote.seq) : undefined;
-        const quotedTaskId = quoted?.tasks?.length === 1 ? quoted.tasks[0].id : undefined;
-        const quotedTask = quotedTaskId ? await worker!.findTask(quotedTaskId) : undefined;
-        const quotedFollowUp = !!quotedTask && followUpOpen(quotedTask);
         const groupId = session.groupId;
         const sourceGroup = groupId && latestChat?.group?.groupId === groupId ? await this.groups.get(groupId) : undefined;
         const groupMessage = sourceGroup && latestChat?.group ? await this.store.message(sourceGroup.session, latestChat.group.seq) : undefined;
-        const matchText = groupId ? groupMessage?.text || "" : [latestChat?.text, latestChat?.quote?.text].filter(Boolean).join("\n");
+        const topicTaskId = sourceGroup && latestChat?.group?.topicTaskId;
         const matchScope = groupId ? employeeState?.tasks.filter((task) => task.group?.groupId === groupId) : employeeState?.tasks;
-        const matched = matchScope && latestChat && !quotedTaskId ? relatedTasks(matchScope, matchText) : [];
+        const topicTask = topicTaskId ? matchScope?.find((task) => task.id === topicTaskId) : undefined;
+        const quoted = !groupId && latestChat?.quote ? await this.store.message(key, latestChat.quote.seq) : undefined;
+        const quotedTaskId = quoted?.tasks?.length === 1 ? quoted.tasks[0].id : undefined;
+        const focusedTaskId = topicTask?.id ?? quotedTaskId;
+        const focusedTask = topicTask ?? (quotedTaskId ? await worker!.findTask(quotedTaskId) : undefined);
+        const focusedFollowUp = !!focusedTask && followUpOpen(focusedTask);
+        const matchText = groupId ? groupMessage?.text || "" : [latestChat?.text, latestChat?.quote?.text].filter(Boolean).join("\n");
+        const matched = matchScope && latestChat && !focusedTaskId && !topicTaskId ? relatedTasks(matchScope, matchText) : [];
         // shortcut: 最多注入20条匹配摘要；更多时按任务ID缩小范围，不按截断结果猜唯一任务。
         const matchedTasks = matched.length ? `\n[按标识匹配的任务候选] ${JSON.stringify({ total: matched.length, truncated: matched.length > 20, tasks: matched.slice(-20).map((task) => ({ ...taskSummary(task), ...(task.status === "done" ? { followUpOpen: followUpOpen(task) } : {}) })) })}\n匹配仅供定位，不代表授权或目标相同；比较原目标、用户最新意图与任务详情。追问已授权却遗漏的环节时，结合原目标与上下文判断是否需要在原任务补做并继续；不要只新建眼前一步。多个候选仍不能区分或列表被截断时先问用户或按任务ID查询。纯粹询问状态不自动执行，不绕过审批或用户停止。\n` : "";
         const taskIndex = employeeState ? "\n当前任务索引（内容已节选；完整内容、进度和结果用employee_status传taskId查看）：" + JSON.stringify(employeeState.tasks.slice(-30).map((task) => ({ id: task.id, text: [...task.text].slice(0, 120).join(""), status: task.status, ...(task.key ? { dedupeKey: task.key } : {}) }))) : "";
-        const taskContext = quotedTaskId
-          ? `\n[本次引用关联任务] ${JSON.stringify(quotedTask ? { ...taskSummary(quotedTask), ...(quotedTask.status === "done" ? { followUpOpen: quotedFollowUp } : {}) } : { id: quotedTaskId, status: "unavailable" })}\n${quotedFollowUp ? `[近期已交付、可在原任务续做] ${JSON.stringify([taskSummary(quotedTask!)])}\n` : ""}引用消息已唯一指明该任务：默认以它为本次回复和任务操作的对象，不要先根据上下文搜索或处理其他任务；仅当本次消息明确要求其他任务或多个任务时才处理这些任务。先判断用户是在询问、补充、续做还是停止；纯粹询问状态不自动执行，追问已授权但遗漏的环节时结合上下文判断是否应在原任务补做并继续。用户要求继续同一目标且 followUpOpen=true 时用 employee_task_manage 的 resume 带 supplement 在原任务续做，保留原目标及已知回执。操作仍受任务状态和审批约束，不按交付时间设期限。关联任务不存在或不可访问时如实说明，不用相似任务替代；需要详情或用户明确要求其他任务时用 employee_status 查询。\n`
+        const taskContext = focusedTaskId
+          ? `\n${topicTask ? "[本次话题关联群任务]" : "[本次引用关联任务]"} ${JSON.stringify(focusedTask ? { ...taskSummary(focusedTask), ...(focusedTask.status === "done" ? { followUpOpen: focusedFollowUp } : {}) } : { id: focusedTaskId, status: "unavailable" })}\n${focusedFollowUp ? `[近期已交付、可在原任务续做] ${JSON.stringify([taskSummary(focusedTask!)])}\n` : ""}当前${topicTask ? "话题" : "引用消息"}已唯一指明该任务：默认以它为本次回复和任务操作的对象，不要先根据上下文搜索或处理其他任务；仅当本次消息明确要求其他任务或多个任务时才处理这些任务。先判断用户是在询问、补充、续做还是停止；纯粹询问状态不自动执行，追问已授权但遗漏的环节时结合上下文判断是否应在原任务补做并继续。用户要求继续同一目标且 followUpOpen=true 时用 employee_task_manage 的 resume 带 supplement 在原任务续做，保留原目标及已知回执。操作仍受任务状态和审批约束，不按交付时间设期限。关联任务不存在或不可访问时如实说明，不用相似任务替代；需要详情或用户明确要求其他任务时用 employee_status 查询。\n`
           : matchedTasks + taskIndex + (employee && !session.taskId ? taskDigest : "") + (!session.groupId && latestChat?.quote ? "\n[引用消息未唯一关联任务] 只能根据本次消息和上下文寻找；多个候选仍无法确定时先向用户澄清。\n" : "");
         const supplement = session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : "";
         let dynamic = memories + taskContext + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || ""));
@@ -1392,7 +1395,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         if (!reply.calls?.length && worker && session.groupId && !session.taskId && !state.steer.length) {
           // The member's answer goes into the group (and on to whoever it @mentions).
           answered = true;
-          await this.groups.replied(session, worker.employeeId, said, [], hop);
+          await this.groups.replied(session, worker.employeeId, said, [], hop, false, matched.length === 1 ? matched[0].id : undefined);
           said = "";
                   }
         if (!reply.calls?.length) {

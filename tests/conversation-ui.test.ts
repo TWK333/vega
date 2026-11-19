@@ -6,7 +6,7 @@ import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
 import { employeeChatMessages, continuesPrevious } from "../web/src/conversation.js";
-import { attachmentPayload, isImage } from "../web/src/attachments.js";
+import { attachmentPayload, isImage, useAttachmentInput } from "../web/src/attachments.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
 const between = (start: string, end: string) => chat.slice(chat.indexOf(start), chat.indexOf(end));
@@ -14,7 +14,7 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   const messages = ref<any[]>([]), running = ref(false), hasMore = ref(false);
   const history = createChatHistory({ api, path: () => "/employees/fixture/chat", messages, running, hasMore });
   const context: any = {
-    console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false),
+    console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false), uploading: ref(false), artifactSession: ref(""),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", attachments: [], quote: undefined }) },
     employeeChatMessages, continuesPrevious, attachmentPayload, isImage, seenSeq: () => 0, markSeen: () => {},
   };
@@ -23,13 +23,34 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
     between("const draft = computed", "const visible ="),
     between("const visible =", "const history ="),
     between("const nearBottom =", "/** Prepend one older page"),
-    between("async function refresh(apply", "async function upload("),
+    between("async function refresh(apply", "const { uploading, upload, paste }"),
     between("async function send()", "async function stop()"),
     between("function handleEvent(event)", "watch(() => props.revision"),
     "({ refresh, handleEvent, finishTurn, send, retry, outbox, displayed, visible, typingContinued })",
   ].join("\n"), context);
   return { ...context, ...methods, dispose: () => { context.disposed = true; } };
 }
+
+test("pasting an image feeds the attachment picker, but text paste keeps its native behavior", async () => {
+  const image = new File(["pixels"], "screenshot.png", { type: "image/png" });
+  const doc = new File(["words"], "notes.txt", { type: "text/plain" });
+  const picked: File[][] = [];
+  const { paste, upload, uploading } = useAttachmentInput(async (files: File[]) => { picked.push(files); });
+  let prevented = 0;
+  const event = (clipboardData: any) => ({ clipboardData, preventDefault: () => prevented++ });
+  assert.equal(paste(event({ files: [doc], items: [{ kind: "string", type: "text/plain" }] })), undefined);
+  assert.equal(prevented, 0);
+  const pending = paste(event({ files: [image, doc], items: [{ kind: "file", type: "image/png", getAsFile: () => image }] }));
+  assert.equal(uploading.value, true);
+  await pending;
+  assert.equal(uploading.value, false);
+  await paste(event({ items: [{ kind: "file", type: "image/png", getAsFile: () => image }] }));
+  const target = { value: "selected", files: [doc] };
+  await upload({ target });
+  assert.equal(target.value, "");
+  assert.equal(prevented, 2);
+  assert.deepEqual(picked, [[image], [image], [doc]], "clipboard PNGs and selected files share the same attachment reader");
+});
 
 test("employee sends leave older history immediately and reveal the sent message after refresh", async () => {
   let release!: () => void, latest = false;

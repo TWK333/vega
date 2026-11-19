@@ -1,3 +1,5 @@
+import { ref } from "vue";
+
 // Composer attachments: any file, at most 16 per message, 25MiB each and 64MiB in total (the server enforces the same).
 // Images the models read as pixels go as `images`; everything else goes as `files`.
 export const IMAGE_MIMES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"];
@@ -18,6 +20,31 @@ export async function readAttachments(picked, current = []) {
 }
 
 export const isImage = (item) => IMAGE_MIMES.includes(item.mime);
+
+export function useAttachmentInput(add) {
+  const uploading = ref(false);
+  async function read(picked) {
+    if (!picked.length || uploading.value) return;
+    uploading.value = true;
+    try { await add(picked); } finally { uploading.value = false; }
+  }
+  function upload(event) {
+    const picked = [...event.target.files];
+    event.target.value = "";
+    return read(picked);
+  }
+  function paste(event) {
+    const clipboard = event.clipboardData;
+    const files = [...(clipboard?.files || [])].filter((file) => file.type.startsWith("image/"));
+    const images = files.length ? files : [...(clipboard?.items || [])]
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile()).filter(Boolean);
+    if (!images.length) return;
+    event.preventDefault();
+    return read(images);
+  }
+  return { uploading, upload, paste };
+}
 
 /** The message body fields for composer items (a file's size is only shown on the unsent copy; the server measures it). */
 export function attachmentPayload(items = []) {

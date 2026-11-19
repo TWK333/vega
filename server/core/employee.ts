@@ -59,7 +59,7 @@ export type Task = Obj & {
 /** Who said something in a group chat: a user or an employee. */
 export type GroupAuthor = { kind: "user" | "employee"; id: string; name: string };
 /** byOwner: the request came from this employee's owner (anyone else may only work with tasks, never memories; the vault is always the employee's own). */
-export type TaskGroup = { groupId: string; name: string; hop: number; requester: GroupAuthor; byOwner: boolean };
+export type TaskGroup = { groupId: string; name: string; hop: number; requester: GroupAuthor; byOwner: boolean; sourceSeqs?: number[] };
 export type EmployeeState = {
   id: string;
   name: string;
@@ -130,6 +130,12 @@ const unfinishedSteps = (plan: Obj[] | undefined) => (plan || []).flatMap((step,
 const unfinishedText = (steps: { index: number; content: string }[]) =>
   steps.length ? `未完成步骤：\n${steps.map((step) => `${step.index}. ${step.content}`).join("\n")}\n` : "";
 const partialKey = (t: Task, steps: { index: number; content: string }[]) => JSON.stringify({ revision: t.revision || 0, steps });
+const outlineSteps = (t: Task, unfinished = unfinishedSteps(t.plan)) =>
+  [...new Set<string>([...(t.outlineReferences || []), ...unfinished.map((step) => step.content.trim())])];
+type OutlineDraft = {
+  token: string; scope: string; evidence: string; summary?: string; deliverableRef?: number | number[];
+  review: Obj[]; missing: string[];
+};
 /** Model-authored reply text in a task session that complete() may cite as the deliverable body. */
 /** task_progress tellUser: key milestones only; at most 12 times per task (no time gap). */
 const TELL_USER_MAX = 12;
@@ -369,7 +375,7 @@ export type EmployeeRuntime = {
   };
 };
 export class Employee {
-  busy = new Map<string, { computer: boolean; session: string }>();
+  busy = new Map<string, { computer: boolean; session: string; outlineDraft?: OutlineDraft }>();
   writers = new Map<string, { taskId: string; hold: boolean }>();
   members = new Map<string, Employee>();
   membersLoaded = false;
@@ -1026,27 +1032,46 @@ export class Employee {
             }
             case "complete": {
               assert(t && t.side !== "computer", "Complete requires the main task session");
+              const run = this.busy.get(t.id);
               if (t.supplementPending) {
+                if (run) delete run.outlineDraft;
                 t.supplementPending = false;
                 return { ok: false, supplement: t.answer, next: "Apply the user's latest supplement, update and verify the plan before completing." };
               }
+              const since = t.deliveries?.at(-1)?.finishedAt || 0;
+              const scope = () => JSON.stringify([t.revision, t.planRevision, t.plan, t.outlineReferences, t.workSession,
+                since, t.text, t.answer, t.approvedPartial, principlesText(s.instruction)]);
+              const retry = a.outlineReviewRetry !== undefined;
+              const draft = retry ? run?.outlineDraft : undefined;
+              if (retry) {
+                if (!draft || draft.token !== a.outlineReviewRetry || draft.scope !== scope()) {
+                  return { ok: false, code: "outline_review_retry_expired", changedSteps: outlineSteps(t), next: "复核草稿已失效；按当前任务和计划，用 evidence 和完整 outlineReview 重新交付，不传 outlineReviewRetry。" };
+                }
+                assert(a.text === undefined && a.summary === undefined && a.deliverableRef === undefined &&
+                  Array.isArray(a.outlineReview) && a.outlineReview.length,
+                "复核补交只传 outlineReviewRetry 和缺项 outlineReview；如需修改原交付内容，请完整提交。");
+              } else if (run) {
+                delete run.outlineDraft;
+              }
+              const evidence = draft?.evidence ?? content;
+              const summary = draft ? draft.summary : a.summary;
+              const deliverableRef = draft ? draft.deliverableRef : a.deliverableRef;
               const pending = planUnresolved(t.plan);
               const settleHint = pending.length
                 ? "若用户已要求按现有结果收尾/交付，用task_progress将不再需要的步骤标为cancelled（并在evidence/summary写明未覆盖项）后再task_complete；不要把未验证步骤假标completed。"
                 : "不要仅为通过校验把步骤标completed，也不要原样重试。";
               assert(
-                content && t.plan?.length && !pending.length && (t.planRevision || 0) === (t.revision || 0),
-                `task_complete requires a settled plan for the latest requirements and result evidence. 尚未交付：evidence=${content ? "非空" : "空"}，plan=${t.plan?.length || 0}步，未验证步骤=${pending.join("、") || "无"}，planRevision=${t.planRevision || 0}，revision=${t.revision || 0}。请在evidence补齐实际结果与验证证据；未完成步骤继续执行，真实验证后再用task_progress提交对应最新要求的完整plan。${settleHint}`,
+                evidence && t.plan?.length && !pending.length && (t.planRevision || 0) === (t.revision || 0),
+                `task_complete requires a settled plan for the latest requirements and result evidence. 尚未交付：evidence=${evidence ? "非空" : "空"}，plan=${t.plan?.length || 0}步，未验证步骤=${pending.join("、") || "无"}，planRevision=${t.planRevision || 0}，revision=${t.revision || 0}。请在evidence补齐实际结果与验证证据；未完成步骤继续执行，真实验证后再用task_progress提交对应最新要求的完整plan。${settleHint}`,
               );
-              const length = typeof a.summary === "string" ? [...a.summary].length : 0;
-              const summaryError = a.summary !== undefined && !(typeof a.summary === "string" && a.summary.trim() && length <= 400)
-                ? `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof a.summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–200字符），只保留结果、重要限制与需用户处理事项；完整证据放evidence，不要原样重试或直接截断。`
+              const length = typeof summary === "string" ? [...summary].length : 0;
+              const summaryError = summary !== undefined && !(typeof summary === "string" && summary.trim() && length <= 400)
+                ? `Delivery summary requires 1–400 characters; received ${length} (type: ${typeof summary}). 尚未交付：summary须为非空、非全空白的字符串，中英文、标点、空格与换行均计数。请先填写或精简summary（建议100–150字符），只保留结果、重要限制与需用户处理事项；完整证据放evidence，不要原样重试或直接截断。`
                 : "";
               const sessionRows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
-              const since = t.deliveries?.at(-1)?.finishedAt || 0;
               const stepOutputs = (t.stepOutputs || []).filter((output: Obj) => output.session === t.workSession);
               const excludeAuto = stepOutputs.map((output: Obj) => output.ref);
-              const cited = resolveDeliverable(sessionRows, a.deliverableRef, { since, confirmEmpty: t.deliverableNeeded?.emptyGuard, excludeAuto, stepOutputs });
+              const cited = resolveDeliverable(sessionRows, deliverableRef, { since, confirmEmpty: t.deliverableNeeded?.emptyGuard, excludeAuto, stepOutputs });
               if (cited.error) {
                 // The refusal rolls this transaction back; only this record is kept (see the catch around update).
                 refused = {
@@ -1062,8 +1087,8 @@ export class Employee {
               // One refusal names every problem, so a single retry fixes the summary and the citation together.
               assert(!summaryError && !cited.error, [summaryError, cited.error && "尚未交付：" + cited.error].filter(Boolean).join("\n另外："));
               const unfinished = unfinishedSteps(t.plan);
-              const references = [...new Set([...(t.outlineReferences || []), ...unfinished.map((step) => step.content.trim())])];
-              const review = a.outlineReview;
+              const references = outlineSteps(t, unfinished);
+              const review = draft ? [...draft.review, ...a.outlineReview] : a.outlineReview;
               if (review !== undefined) {
                 assert(Array.isArray(review) && review.length > 0 && review.length <= 100 && review.every((item: Obj) =>
                   item && typeof item.requirement === "string" && item.requirement.trim() && item.requirement.length <= 500 &&
@@ -1071,6 +1096,8 @@ export class Employee {
                   typeof item.evidence === "string" && item.evidence.trim() && item.evidence.length <= 2000),
                 "outlineReview 须逐项填写大纲要求、状态和依据（1–100项）");
                 assert(review.reduce((size: number, item: Obj) => size + item.requirement.length + item.evidence.length, 0) <= 32000, "outlineReview exceeds 32000 characters");
+                if (draft) assert(a.outlineReview.every((item: Obj) => draft.missing.includes(item.requirement.trim())),
+                  "复核补交仅允许填写上次返回的 changedSteps；如需修改已列项，请完整提交。");
               }
               if ((t.outlineReviewRequired || unfinished.length) && !review) {
                 return {
@@ -1082,7 +1109,19 @@ export class Employee {
                 };
               }
               const unchecked = references.filter((reference) => !(review || []).some((item: Obj) => item.requirement.trim() === reference));
-              if (unchecked.length) return { ok: false, code: "outline_review_incomplete", changedSteps: unchecked, next: "每条变更/取消的旧步骤须在 outlineReview 的 requirement 原样列出，说明被替代、已完成或不再适用的依据；旧步骤可以改写，不必恢复原计划。" };
+              if (unchecked.length) {
+                // A draft lives only in this run; no rejected delivery is saved or published as a result.
+                const token = run && review ? id("r") : undefined;
+                if (run && token) run.outlineDraft = { token, scope: scope(), evidence, summary, deliverableRef, review, missing: unchecked };
+                return {
+                  ok: false, code: "outline_review_incomplete", changedSteps: unchecked,
+                  ...(token ? { outlineReviewRetry: token } : {}),
+                  next: token
+                    ? "保留本次摘要、证据和已提交的复核项。下一次 task_complete 只传 outlineReviewRetry 和 changedSteps 中缺项的 outlineReview，逐条按原文填写状态和依据；不要重发整份。"
+                    : "每条变更/取消的旧步骤须在 outlineReview 的 requirement 原样列出，说明被替代、已完成或不再适用的依据；旧步骤可以改写，不必恢复原计划。",
+                };
+              }
+              if (run) delete run.outlineDraft;
               const unmet = (review || []).flatMap((item: Obj, index: number) => item.status === "unmet" ? [{ index: index + 1, content: item.requirement }] : []);
               const partial = partialKey(t, unmet);
               const acceptedPlan = unfinished.length > 0 && t.approvedPartial === partialKey(t, unfinished) &&
@@ -1093,7 +1132,7 @@ export class Employee {
               }
               if (unmet.length && !accepted) {
                 t.status = "approval";
-                t.approval = "任务大纲仍有未完成要求，是否接受现有成果并放弃这些要求？拒绝后继续原任务。\n当前成果：" + (a.summary?.trim() || clip(content, 400)) + "\n" + unfinishedText(unmet);
+                t.approval = "任务大纲仍有未完成要求，是否接受现有成果并放弃这些要求？拒绝后继续原任务。\n当前成果：" + (summary?.trim() || clip(evidence, 400)) + "\n" + unfinishedText(unmet);
                 t.partialDelivery = partial;
                 delete t.approvedPartial;
                 this.note(s, t, "confirm", "系统", t.approval);
@@ -1105,8 +1144,8 @@ export class Employee {
               if (review) t.outlineReview = review;
               delete t.outlineReviewRequired;
               delete t.outlineReferences;
-              t.summary = a.summary?.trim() || "";
-              t.completion = content;
+              t.summary = summary?.trim() || "";
+              t.completion = evidence;
               t.completedRevision = t.revision || 0;
               t.deliverableRefs = cited.refs;
               t.deliverable = cited.texts.join("\n\n");
@@ -1116,7 +1155,7 @@ export class Employee {
 
               const candidates = extractMemoryCandidates({
                 summary: t.summary,
-                result: content,
+                result: evidence,
                 taskText: t.text,
                 cwd: t.cwd || s.cwd,
                 scene: t.side === "computer" || t.profile === "computer" ? "computer" : "coding",
@@ -1190,6 +1229,8 @@ export class Employee {
                     // shortcut: 最近50条变更线索；完整计划版本仍在会话工具记录，需要全量浏览时读原记录。
                     t.outlineReferences = [...new Set([...(t.outlineReferences || []), ...missing.map((step: Obj) => step.content.trim())])].slice(-50);
                   }
+                  const run = this.busy.get(t.id);
+                  if (run?.outlineDraft && JSON.stringify(t.plan) !== JSON.stringify(a.plan)) delete run.outlineDraft;
                   t.plan = a.plan;
                   t.planRevision = t.revision || 0;
                   for (const step of a.plan) {
@@ -1205,6 +1246,9 @@ export class Employee {
                 t.progress ??= [];
                 t.progress.push({ at: now, text: content });
                 t.progress = t.progress.slice(-50);
+                const reviewHint = a.plan && !planUnresolved(t.plan).length && (t.outlineReviewRequired || unfinishedSteps(t.plan).length)
+                  ? { outlineReviewRequired: true, changedSteps: outlineSteps(t) }
+                  : {};
                 // After a failed task_complete (bad deliverableRefs), block no-progress progress loops.
                 if (t.deliverableNeeded && !a.stepOutput && !planUnresolved(t.plan).length && t.plan?.length) {
                   const rows = t.workSession ? (await this.store.sharedMessages(t.workSession)).rows : [];
@@ -1263,20 +1307,20 @@ export class Employee {
                       await this.toChat(s.chatSession, t.group, { role: "assistant", text: content, quote, progress: true, stepOutput: artifact, tasks: [{ id: t.id, title: t.text.slice(0, 80), status: t.status }] }, false);
                     }
                   }
-                  return { ok: true, stepOutput: { step: output.step, ref, duplicate }, next: "Step output saved; continue the remaining work, then complete the task separately." };
+                  return { ok: true, stepOutput: { step: output.step, ref, duplicate }, ...reviewHint, next: "Step output saved; continue the remaining work, then complete the task separately." };
                 }
-                if (a.tellUser !== true) return { ok: true, toldUser: false, next: "Continue the current step" };
+                if (a.tellUser !== true) return { ok: true, toldUser: false, ...reviewHint, next: "Continue the current step" };
                 // Key milestones only; progress is saved either way. Ordinary progress has no task card;
                 // waiting/approval and final delivery attach the bound task (see complete()).
                 const told: number[] = t.toldUserAt || [];
                 const skipped = !s.chatSession && !t.group ? "没有沟通会话"
                   : told.length >= TELL_USER_MAX ? `本任务已告知 ${TELL_USER_MAX} 次，不再发送`
                   : "";
-                if (skipped) return { ok: true, toldUser: false, tellUserSkipped: skipped, next: "Progress saved; continue the current step" };
+                if (skipped) return { ok: true, toldUser: false, tellUserSkipped: skipped, ...reviewHint, next: "Progress saved; continue the current step" };
                 t.toldUserAt = [...told, now];
                 const quote = !t.group && t.chatSource?.session === s.chatSession && await this.store.message(s.chatSession!, t.chatSource.seq) ? await this.store.quote(s.chatSession!, t.chatSource.seq) : undefined;
-                pendingTell = { session: s.chatSession || "", message: { role: "assistant", text: content, quote, progress: true }, group: t.group };
-                return { ok: true, toldUser: true, next: "Continue the current step" };
+                pendingTell = { session: s.chatSession || "", message: { role: "assistant", text: content, quote, progress: true, topicTaskId: t.group ? t.id : undefined }, group: t.group };
+                return { ok: true, toldUser: true, ...reviewHint, next: "Continue the current step" };
               }
               if (action === "ask") {
                 delete t.partialDelivery;

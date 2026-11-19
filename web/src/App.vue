@@ -25,7 +25,7 @@ import Icon from "./Icon.vue";
 import DebugSessions from "./DebugSessions.vue";
 import BrowserView from "./BrowserView.vue";
 import Accounts from "./Accounts.vue";
-import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
+import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
 import { useUnread } from "./unread.js";
 import { ADMIN_PAGES, parseRoute, formatRoute } from "./router.js";
 import {
@@ -47,7 +47,6 @@ const narrow = ref(false),
   navigation = ref(null),
   menuButton = ref(null),
   imageInput = ref(null),
-  uploading = ref(false),
   onlineClients = ref([]),
   clientListReady = ref(false);
 const localConnected = computed(() => onlineClients.value.length > 0);
@@ -839,20 +838,16 @@ function messageKey(event) {
   event.preventDefault();
   void send();
 }
-async function upload(event) {
-  if (uploading.value) return;
-  uploading.value = true;
+const { uploading, upload, paste } = useAttachmentInput(async (picked) => {
   const target = composer.value,
     id = current.value?.id || "",
     account = csrfToken.value;
   await attempt(async () => {
-    const items = await readAttachments(event.target.files, target.attachments);
+    const items = await readAttachments(picked, target.attachments);
     if (csrfToken.value !== account || drafts.get(id) !== target) return;
     target.attachments.push(...items);
   });
-  event.target.value = "";
-  uploading.value = false;
-}
+});
 async function scrollBottom() {
   await nextTick();
   if (transcript.value)
@@ -1493,11 +1488,11 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
         </div>
         <p v-if="!canWriteCurrent" class="context-note">历史会话仅供查阅；继续工作请交给牛马，执行会话由牛马管理。</p>
         <div v-if="canWriteCurrent" class="composer-wrap">
-          <form class="composer" @submit.prevent="send">
+          <form class="composer" @paste="paste" @submit.prevent="send">
             <div v-if="attachments.length" class="attachments"><button v-for="(item, i) in attachments" :key="i" type="button" :title="'移除 ' + item.name" @click="attachments.splice(i, 1)"><Icon :name="isImage(item) ? 'image' : 'file'" :size="12" />{{ item.name }}<Icon name="close" :size="12" /></button></div>
-            <textarea v-model="draft" aria-label="消息" :placeholder="isRunning ? '补充当前任务的约束，不会重开任务…' : '输入消息，Enter 发送…'" rows="2" enterkeyhint="enter" @keydown="messageKey"></textarea>
+            <textarea v-model="draft" class="chat-draft" aria-label="消息" :placeholder="isRunning ? '补充当前任务的约束，不会重开任务…' : '输入消息，Enter 发送…'" rows="2" enterkeyhint="enter" @keydown="messageKey"></textarea>
             <div class="composer-bottom">
-              <button type="button" class="attach icon" aria-label="添加附件" title="附件（图片或文件）" :disabled="uploading" @click="imageInput.click()"><Icon name="paperclip" /></button>
+              <button type="button" class="attach icon" aria-label="添加附件" title="附件（可粘贴图片）" :disabled="uploading" @click="imageInput.click()"><Icon name="paperclip" /></button>
               <input ref="imageInput" type="file" multiple hidden @change="upload" />
               <span class="hint">Enter 发送 · Shift + Enter 换行</span>
               <button v-if="isRunning" type="button" class="danger-text" @click="attempt(() => api(`/sessions/${current.id}/cancel`, 'POST', {}))"><Icon name="stop" :size="14" />停止</button>

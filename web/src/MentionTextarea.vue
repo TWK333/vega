@@ -57,7 +57,7 @@ defineExpose({ focus: () => box.value?.focus(), mention: mentionMember });
 </script>
 <template>
   <div class="mention-wrap">
-    <textarea ref="box" :value="modelValue" :rows="rows" :maxlength="maxlength" :placeholder="placeholder" :disabled="disabled"
+    <textarea ref="box" class="chat-draft" :value="modelValue" :rows="rows" :maxlength="maxlength" :placeholder="placeholder" :disabled="disabled"
       role="combobox" aria-autocomplete="list" :aria-expanded="open" :aria-controls="listId" :aria-activedescendant="open && active >= 0 ? listId + '-' + active : undefined"
       @input="input" @compositionend="refresh" @keydown="keydown" @click="refresh" @blur="mention = null"></textarea>
     <ul v-if="open" :id="listId" class="mention-menu" role="listbox" :style="{ bottom: 'calc(100% + 4px)', left: Math.max(0, position.left) + 'px' }">

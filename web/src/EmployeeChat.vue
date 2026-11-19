@@ -3,7 +3,8 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue"
 import ChatMessage from "./ChatMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
-import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
+import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
+import ComposerQuote from "./ComposerQuote.vue";
 import { employeeChatMessages, continuesPrevious } from "./conversation";
 import { createChatHistory, loadStepOutput } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
@@ -62,10 +63,9 @@ async function onRemember(message) {
   const short = [...claim].slice(0, 200).join("");
   await props.remember({ claim: short, memoryKind: "preference", memoryScene: "chat", source: "ui" });
 }
-function quoteMessage(message) {
-  const text = (message.displayText || message.text || "[图片]").replace(/[`*_#>]/g, "").replace(/\s+/g, " ").trim();
-  quoted.value = { seq: message.seq, role: message.role, text: text.length > 160 ? text.slice(0, 160) + "…" : text };
-  void nextTick(() => input.value?.focus());
+function quoteMessage(quote) {
+  quoted.value = quote;
+  input.value?.focus();
 }
 const findMessage = (seq) => [...(transcript.value?.querySelectorAll("[data-message-seq]") || [])].find((element) => Number(element.dataset.messageSeq) === seq);
 async function jumpTo(seq) {
@@ -142,13 +142,16 @@ function finishTurn() {
     running.value = false;
   });
 }
-async function upload(event) {
+const { uploading, upload, paste } = useAttachmentInput(async (picked) => {
+  const composer = props.composer;
   error.value = "";
-  try { files.value = [...files.value, ...await readAttachments(event.target.files, files.value)]; } catch (e) { error.value = e.message; }
-  event.target.value = "";
-}
+  try {
+    const items = await readAttachments(picked, composer.attachments);
+    composer.attachments.push(...items);
+  } catch (e) { error.value = e.message; }
+});
 async function send() {
-  if (props.readonly || (!draft.value.trim() && !files.value.length)) return;
+  if (props.readonly || uploading.value || (!draft.value.trim() && !files.value.length)) return;
   if (outbox.value.length >= 16) { error.value = "请先重发未送达的消息（最多保留16条）"; return; }
   error.value = "";
   // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
@@ -267,15 +270,15 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
       </div>
     </div>
     <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号只能查看这个牛马的对话和任务。</p>
-    <form v-else class="chat-composer" @submit.prevent="send">
-      <div v-if="quoted" class="composer-quote"><Icon name="reply" :size="14" /><button type="button" @click="jumpTo(quoted.seq)"><strong>引用 {{ quoted.role === 'user' ? '我' : name }}</strong><span>{{ quoted.text }}</span></button><button type="button" class="icon sm" aria-label="取消引用" @click="quoted = undefined"><Icon name="close" :size="14" /></button></div>
+    <form v-else class="chat-composer" @paste="paste" @submit.prevent="send">
+      <ComposerQuote v-if="quoted" :quote="quoted" :name="name" @jump="jumpTo" @remove="quoted = undefined" />
       <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
       <div class="composer-row">
         <input ref="fileInput" type="file" hidden multiple @change="upload" />
-        <button type="button" class="icon attach" aria-label="添加附件" title="附件（图片或文件）" @click="fileInput.click()"><Icon name="paperclip" /></button>
-        <textarea ref="input" v-model="draft" aria-label="给牛马的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
+        <button type="button" class="icon attach" aria-label="添加附件" title="附件（可粘贴图片）" :disabled="uploading" @click="fileInput.click()"><Icon name="paperclip" /></button>
+        <textarea ref="input" v-model="draft" class="chat-draft" aria-label="给牛马的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
-        <button class="primary send" :disabled="!draft.trim() && !files.length" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
+        <button class="primary send" :disabled="uploading || (!draft.trim() && !files.length)" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
       </div>
       <p class="composer-hint">/new 开启新会话（不再参考之前的对话） · Enter 发送 · Shift + Enter 换行</p>
     </form>
@@ -312,17 +315,13 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 .chat-composer { flex: none; width: calc(100% - 48px); max-width: 772px; margin: 0 auto 12px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--sh-sm); }
 .chat-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .composer-row { display: flex; align-items: flex-end; gap: 4px; }
-.composer-row textarea { flex: 1; min-height: 36px; max-height: 200px; padding: 8px 4px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
+.composer-row textarea { flex: 1; min-height: 36px; padding: 8px 4px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
 .composer-row textarea:focus, .composer-row textarea:focus-visible { box-shadow: none; outline: none; }
 .attach { width: 36px; min-height: 36px; color: var(--muted); }
 .send { width: 36px; min-height: 36px; padding: 0; border-radius: 10px; }
 .stop { min-height: 36px; padding: 0 10px; border-color: var(--border); color: var(--danger); font-size: 12px; }
 .chat-notice { margin: 4px auto 14px; max-width: 80%; color: var(--muted); font-size: 11px; text-align: center; }
 .composer-hint { padding: 0 8px 0 44px; color: var(--faint); font-size: 11px; }
-.composer-quote { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 4px 4px 4px 10px; border-left: 3px solid var(--accent); border-radius: 4px var(--r-md) var(--r-md) 4px; background: var(--surface-2); color: var(--muted); }
-.composer-quote > button:nth-child(2) { display: grid; justify-content: stretch; flex: 1; gap: 1px; min-width: 0; height: auto; min-height: 0; padding: 2px 0; border: 0; background: transparent; font-weight: 400; text-align: left; }
-.composer-quote strong { color: var(--text-2); font-size: 11px; }
-.composer-quote span { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .attachments { padding: 2px 4px 6px; }
 .attachments button { gap: 4px; }
 @media (max-width: 767px) {

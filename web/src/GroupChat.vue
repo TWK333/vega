@@ -1,5 +1,5 @@
 <script setup vapor>
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
 import PageHeader from "./PageHeader.vue";
 import ChatMessage from "./ChatMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
@@ -9,9 +9,10 @@ import MentionTextarea from "./MentionTextarea.vue";
 import Icon from "./Icon.vue";
 import GroupWork from "./GroupWork.vue";
 import { continuesPrevious } from "./conversation";
-import { loadStepOutput } from "./chat-history.js";
+import { loadStepOutput, mergeMessages } from "./chat-history.js";
 import { groupMembers, groupMentionPeople } from "./group.js";
-import { attachmentPayload, isImage, readAttachments } from "./attachments.js";
+import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
+import ComposerQuote from "./ComposerQuote.vue";
 import { markSeen, seenSeq } from "./seen.js";
 import PressMention from "./PressMention.vue";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
@@ -19,8 +20,23 @@ const props = defineProps({ api: Function, user: Object, groupId: String, myEmpl
 const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel", "read"]);
 // Work panel: side-by-side from 768px (GroupWork stops overlaying); drawers stay closed until opened.
 const roomy = () => typeof matchMedia === "function" && matchMedia("(min-width: 768px)").matches;
-const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), draft = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null), files = ref([]);
-const taskFocus = ref(null);
+const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null);
+const taskFocus = ref(null), topic = ref(null), viewMode = ref("topic"), olderReferences = ref([]), historyLoading = ref(false), topicUnavailable = ref(false);
+const activeTopic = computed(() => viewMode.value === "topic" ? topic.value : null);
+const preferenceKey = () => `vega:group-chat-view:${props.user?.id}`;
+watch(() => props.user?.id, () => {
+  try { viewMode.value = localStorage.getItem(preferenceKey()) === "main" ? "main" : "topic"; } catch { viewMode.value = "topic"; }
+}, { immediate: true });
+function chooseView(mode) {
+  viewMode.value = mode;
+  try { localStorage.setItem(preferenceKey(), mode); } catch {}
+}
+const emptyComposer = () => reactive({ text: "", attachments: [], quote: undefined });
+const mainComposer = emptyComposer(), topicDrafts = new Map();
+const composer = computed(() => activeTopic.value ? topicDrafts.get(activeTopic.value.taskId) : mainComposer);
+const draft = computed({ get: () => composer.value.text, set: (text) => { composer.value.text = text; } });
+const files = computed(() => composer.value.attachments);
+const quoted = computed({ get: () => composer.value.quote, set: (quote) => { composer.value.quote = quote; } });
 const directory = ref([]), form = ref({ name: "", bulletin: "", users: [], employees: [] }), edit = ref({ name: "", bulletin: "" }), invite = ref(""), bring = ref("");
 const readonly = computed(() => props.user?.role === "viewer");
 const members = computed(() => groupMembers(group.value, props.user?.id));
@@ -28,19 +44,19 @@ provide("mentions", { people: computed(() => groupMentionPeople(group.value)), o
 // Authors carry ids and names; avatars come from the current member list (a member who left keeps the initial / default bot).
 const avatars = computed(() => new Map([...(group.value?.users || []), ...(group.value?.employees || [])].map((p) => [p.id, p.avatar || ""])));
 const shown = computed(() => {
-  const rows = messages.value.filter((m) => m.notice || m.text?.trim() || m.tasks?.length || m.images?.length || m.files?.length)
+  const rows = mergeMessages(olderReferences.value, messages.value).filter((m) => m.notice || m.text?.trim() || m.tasks?.length || m.images?.length || m.files?.length)
     .map((m) => m.author ? { ...m, author: { ...m.author, avatar: avatars.value.get(m.author.id) || "" } } : m);
-  return rows.map((message, index) => ({ message, continued: !message.notice && continuesPrevious(rows[index - 1], message) }));
+  return rows.map((message, index) => ({ message, continued: rows[index - 1]?.seq === message.seq - 1 && continuesPrevious(rows[index - 1], message) }));
 });
 // 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
 const newFrom = seenSeq(props.user?.id, props.groupId);
 const markGone = ref(false);
-const newAt = computed(() => newFrom > 0 ? shown.value.findIndex(({ message }) => message.seq > newFrom) : -1);
+const newAt = computed(() => !activeTopic.value && newFrom > 0 ? shown.value.findIndex(({ message }) => message.seq > newFrom) : -1);
 const lastSeq = computed(() => messages.value.at(-1)?.seq || 0);
 let settled = false, baseSeq = 0;
-watch(lastSeq, (seq) => { if (settled && seq > baseSeq) markGone.value = true; });
-watch(shown, (rows) => { if (props.groupId) markSeen(props.user?.id, props.groupId, rows.at(-1)?.message.seq); });
-const runningMembers = computed(() => (group.value?.employees || []).filter((e) => group.value.running?.includes(e.id)));
+watch(lastSeq, (seq) => { if (!activeTopic.value && settled && seq > baseSeq) markGone.value = true; });
+watch(shown, (rows) => { if (props.groupId && !activeTopic.value) markSeen(props.user?.id, props.groupId, rows.at(-1)?.message.seq); });
+const runningMembers = computed(() => (group.value?.employees || []).filter((e) => group.value.running?.includes(e.id) && (!activeTopic.value || activeTopic.value.employeeId === e.id)));
 const available = computed(() => (props.myEmployees || []).filter((e) => !group.value?.employees.some((m) => m.id === e.id)));
 const invitable = computed(() => directory.value.filter((u) => !group.value?.users.some((m) => m.id === u.id)));
 // Both add rows always show, so users find them; when empty they say why.
@@ -60,24 +76,41 @@ function nearBottom() {
   const el = transcript.value;
   return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 120;
 }
+let historyRequest = 0;
 async function load(scroll = false) {
   if (!props.groupId) return;
-  const id = props.groupId, stick = scroll || nearBottom();
-  const result = await props.api(`/groups/${id}/messages?limit=200&stepSummaries=1`);
-  if (props.groupId !== id) return;
-  messages.value = result.messages;
-  if (!settled) { settled = true; baseSeq = lastSeq.value; }
-  taskStatus.value = result.taskStatus || {};
-  group.value = result.group;
-  edit.value = { name: result.group.name, bulletin: result.group.bulletin };
-  void markRead();
-  if (stick) { await nextTick(); transcript.value?.scrollTo({ top: transcript.value.scrollHeight }); }
+  const id = props.groupId, topicId = activeTopic.value?.taskId, request = ++historyRequest, stick = scroll || nearBottom();
+  const current = () => props.groupId === id && activeTopic.value?.taskId === topicId && historyRequest === request;
+  const filter = topicId ? `topicTaskId=${encodeURIComponent(topicId)}` : "limit=200";
+  if (scroll) historyLoading.value = true;
+  try {
+    const result = await props.api(`/groups/${id}/messages?${filter}&stepSummaries=1`);
+    if (!current()) return;
+    messages.value = result.messages;
+    topicUnavailable.value = false;
+    taskStatus.value = result.taskStatus || {};
+    group.value = result.group;
+    edit.value = { name: result.group.name, bulletin: result.group.bulletin };
+    if (!topicId) {
+      if (!settled) { settled = true; baseSeq = lastSeq.value; }
+      void markRead();
+    }
+    if (stick) { await nextTick(); if (current()) transcript.value?.scrollTo({ top: transcript.value.scrollHeight }); }
+  } catch (e) {
+    if (!current()) return;
+    if (topicId && [403, 404].includes(e.status)) { topicUnavailable.value = true; messages.value = []; olderReferences.value = []; }
+    throw e;
+  } finally { if (current()) historyLoading.value = false; }
 }
+watch(() => activeTopic.value?.taskId, () => {
+  messages.value = []; olderReferences.value = []; topicUnavailable.value = false;
+  void run(() => load(true));
+});
 // Open and visible: everything loaded so far is read (one marker per user on the server).
 let readSeq = 0;
 async function markRead() {
   const id = props.groupId, last = messages.value.at(-1)?.seq || 0;
-  if (!id || document.hidden || last <= readSeq) return;
+  if (!id || activeTopic.value || document.hidden || last <= readSeq) return;
   readSeq = last;
   try { await props.api(`/groups/${id}/read`, "POST", {}); if (props.groupId === id) emit("read", id); } catch { readSeq = 0; }
 }
@@ -87,24 +120,54 @@ onBeforeUnmount(() => document.removeEventListener("visibilitychange", visibilit
 async function loadDirectory() {
   try { directory.value = (await props.api("/groups/directory")).filter((u) => u.id !== props.user?.id); } catch { directory.value = []; }
 }
-async function upload(event) {
-  await run(async () => { files.value = [...files.value, ...await readAttachments(event.target.files, files.value)]; });
-  event.target.value = "";
+function quoteMessage(quote) {
+  quoted.value = quote;
+  input.value?.focus();
 }
+async function jumpTo(seq) {
+  const root = transcript.value, id = props.groupId, taskId = activeTopic.value?.taskId;
+  const current = () => props.groupId === id && transcript.value === root && activeTopic.value?.taskId === taskId;
+  if (!root || !Number.isSafeInteger(seq) || seq < 1 || seq === Number.MAX_SAFE_INTEGER) return;
+  const find = () => root.querySelector(`[data-message-seq="${seq}"]`);
+  await run(async () => {
+    if (!find()) {
+      const result = await props.api(`/groups/${id}/messages?before=${seq + 1}&limit=1&stepSummaries=1`);
+      if (!current()) return;
+      const source = result.messages.find((row) => row.seq === seq);
+      if (source) olderReferences.value = mergeMessages(olderReferences.value, [source]);
+      await nextTick();
+    }
+    if (!current()) return;
+    const target = find();
+    if (!target) throw Error("原消息暂不可见或已不存在");
+    target.scrollIntoView({ block: "center", behavior: "instant" });
+    target.focus({ preventScroll: true });
+  });
+}
+const { uploading, upload, paste } = useAttachmentInput(async (picked) => {
+  const id = props.groupId, target = composer.value;
+  await run(async () => {
+    const items = await readAttachments(picked, target.attachments);
+    if (props.groupId === id) target.attachments.push(...items);
+  });
+});
 async function send() {
-  const text = draft.value.trim(), items = files.value;
-  if ((!text && !items.length) || sending.value) return;
+  const target = composer.value, id = props.groupId, topicTaskId = activeTopic.value?.taskId;
+  const original = target.text, text = original.trim(), items = [...target.attachments], quote = target.quote;
+  if ((!text && !items.length) || readonly.value || topicUnavailable.value || sending.value || uploading.value) return;
   sending.value = true;
   await run(async () => {
     // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
     const clientMessageId = [...crypto.getRandomValues(new Uint8Array(16))].map((n) => n.toString(16).padStart(2, "0")).join("");
-    await props.api(`/groups/${props.groupId}/messages`, "POST", { text, ...attachmentPayload(items), clientMessageId });
-    draft.value = "";
-    if (files.value === items) files.value = [];
-    await load(true);
+    await props.api(`/groups/${id}/messages`, "POST", { text, ...attachmentPayload(items), quoteSeq: quote?.seq, topicTaskId, clientMessageId });
+    if (props.groupId !== id) return;
+    if (target.text === original) target.text = "";
+    target.attachments = target.attachments.filter((file) => !items.includes(file));
+    if (target.quote === quote) target.quote = undefined;
+    if (composer.value === target) await load(true);
   });
   sending.value = false;
-  input.value?.focus();
+  if (composer.value === target) input.value?.focus();
 }
 function keydown(event) {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !matchMedia("(pointer: coarse)").matches) { event.preventDefault(); void send(); }
@@ -135,11 +198,17 @@ async function create() {
     emit("created", created.id);
   });
 }
+function selectTopic({ employeeId, taskId, title }) {
+  if (!topicDrafts.has(taskId)) topicDrafts.set(taskId, emptyComposer());
+  topic.value = { employeeId, taskId, title };
+  taskFocus.value = { member: employeeId, task: taskId };
+  panel.value = false;
+  work.value = true;
+}
 function openTask(message, taskId) {
   const author = group.value?.employees.find((e) => e.id === message.author?.id);
   if (!author) { error.value = "该牛马已离开群聊，任务请联系它的归属人"; return; }
-  if (author.mine) emit("open-task", { employeeId: author.id, taskId });
-  else { panel.value = false; work.value = true; taskFocus.value = { member: author.id, task: taskId }; }
+  selectTopic({ employeeId: author.id, taskId, title: message.tasks?.find((task) => task.id === taskId)?.title });
 }
 // 工作面板: the group's tasks by member, reloaded with the group (task status changes bump the revision too).
 async function loadWork() {
@@ -152,7 +221,12 @@ async function loadWork() {
 function toggleWork() { work.value = !work.value; if (work.value) panel.value = false; }
 watch(panel, (open) => { if (open) work.value = false; });
 watch([work, () => props.groupId], () => { if (work.value) void run(loadWork); }, { immediate: true });
-watch(() => props.groupId, () => { readSeq = 0; group.value = null; messages.value = []; panel.value = false; work.value = roomy(); workMembers.value = []; taskFocus.value = null; draft.value = ""; void run(() => load(true)); });
+watch(() => props.groupId, () => {
+  readSeq = 0; settled = false; group.value = null; messages.value = []; olderReferences.value = []; panel.value = false;
+  work.value = roomy(); workMembers.value = []; taskFocus.value = null; topic.value = null; topicDrafts.clear();
+  mainComposer.text = ""; mainComposer.attachments = []; mainComposer.quote = undefined; topicUnavailable.value = false;
+  void run(() => load(true));
+});
 watch(() => props.revision, () => { void run(() => load()); void run(loadWork); });
 watch(panel, (open) => { if (open && !directory.value.length) void loadDirectory(); });
 onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadDirectory(); });
@@ -184,13 +258,18 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
       <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span><button class="icon" aria-label="关闭" @click="error = ''"><Icon name="close" :size="14" /></button></p>
       <div class="group-body">
         <section class="group-chat">
-          <div ref="transcript" class="chat-scroll" aria-live="polite">
+          <nav v-if="topic" class="group-chat-tabs" aria-label="群聊视图">
+            <button type="button" :aria-pressed="!activeTopic" @click="chooseView('main')">主聊天</button>
+            <button type="button" class="topic-tab" :aria-pressed="!!activeTopic" :title="topic.title" @click="chooseView('topic')"><span>话题</span><span v-if="topic.title" class="topic-title">{{ topic.title }}</span></button>
+          </nav>
+          <div ref="transcript" class="chat-scroll" aria-live="polite" :aria-busy="historyLoading">
             <div class="chat-column">
-              <div v-if="group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
+              <div v-if="!activeTopic && group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
+              <p v-if="activeTopic && !shown.length" class="group-notice">{{ historyLoading ? '正在加载话题…' : topicUnavailable ? '此任务话题已不可用。' : '还没有关联消息，可以直接在此开始讨论。' }}</p>
               <template v-for="({ message, continued }, index) in shown" :key="message.seq">
                 <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
+                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
                 <span class="chat-avatar" aria-hidden="true"><PressMention :name="e.name" :disabled="readonly" @press="mentionMember"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></PressMention></span>
@@ -202,18 +281,19 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
             </div>
           </div>
           <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />只读账号只能查看群聊。</p>
-          <form v-else class="chat-composer" @submit.prevent="send">
+          <form v-else-if="!topicUnavailable" class="chat-composer" @paste="paste" @submit.prevent="send">
+            <ComposerQuote v-if="quoted" :quote="quoted" @jump="jumpTo" @remove="quoted = undefined" />
             <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
             <div class="composer-row">
               <input ref="fileInput" type="file" hidden multiple @change="upload" />
-              <button type="button" class="icon attach" aria-label="添加附件" title="附件（图片或文件）" @click="fileInput.click()"><Icon name="paperclip" /></button>
-              <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" placeholder="输入消息，@ 牛马让它干活…" @keydown="keydown" />
-              <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
+              <button type="button" class="icon attach" aria-label="添加附件" title="附件（可粘贴图片）" :disabled="uploading" @click="fileInput.click()"><Icon name="paperclip" /></button>
+              <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" :placeholder="activeTopic ? '回复当前任务话题…' : '输入消息，@ 牛马让它干活…'" @keydown="keydown" />
+              <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending || uploading" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
             </div>
-            <p class="composer-hint">@ 牛马让它回复，不 @ 时旁白判断交给谁 · /new 开启新会话 · Enter 发送 · Shift + Enter 换行</p>
+            <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天' : '回复牛马或 @ 它让它回应 · /new 开启新会话' }} · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
-        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @open="emit('open-task', $event)" @changed="run(loadWork)" @close="work = false" />
+        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @open="emit('open-task', $event)" @changed="run(loadWork)" @close="work = false" />
         <aside v-if="panel && group" class="group-panel" aria-label="群成员与公告">
           <section>
             <h3>群公告</h3>
@@ -258,6 +338,11 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
 .header-avatar { display: inline-grid; width: 24px; height: 24px; border-radius: 6px; overflow: hidden; }
 .group-body { display: flex; flex: 1; min-height: 0; }
 .group-chat { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--surface); }
+.group-chat-tabs { display: flex; flex: none; align-items: center; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+.group-chat-tabs button { min-height: 28px; padding: 0 8px; border-color: transparent; background: transparent; font-size: 12px; }
+.group-chat-tabs button[aria-pressed="true"] { background: var(--accent-soft); color: var(--accent-text); }
+.topic-tab { justify-content: start; min-width: 0; max-width: 42rem; }
+.topic-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
 .chat-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; }
 .chat-column { max-width: 820px; margin: 0 auto; padding: 16px 24px 8px; }
 .group-bulletin { display: flex; gap: 8px; margin: 0 0 16px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); color: var(--text-2); font-size: 12px; }
@@ -280,8 +365,8 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
 .chat-composer { flex: none; width: calc(100% - 48px); max-width: 772px; margin: 0 auto 12px; padding: 6px; border: 1px solid var(--border-strong); border-radius: 14px; background: var(--surface); box-shadow: var(--sh-sm); }
 .chat-composer:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .composer-row { display: flex; align-items: flex-end; gap: 4px; }
-.composer-input { flex: 1; }
-.composer-input :deep(textarea) { min-height: 36px; max-height: 200px; padding: 8px 6px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
+.composer-input { flex: 1; min-width: 0; }
+.composer-input :deep(textarea) { min-height: 36px; padding: 8px 6px; border: 0; box-shadow: none; resize: none; font-size: 14px; line-height: 1.45; }
 .composer-input :deep(textarea:focus), .composer-input :deep(textarea:focus-visible) { box-shadow: none; outline: none; }
 .send { width: 36px; min-height: 36px; padding: 0; border-radius: 10px; }
 .attach { width: 36px; min-height: 36px; color: var(--muted); }
