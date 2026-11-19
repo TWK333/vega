@@ -7,7 +7,7 @@ test("token usage is recorded per user and totalled over the whole range in SQL"
   try {
     await store.recordTokenUsage({ userId: "alice", at: 1000, model: "p/m", input: 10, output: 4, cacheRead: 2, cacheWrite: 1, session: "s1" });
     await store.recordTokenUsage({ userId: "bob", at: 2000, model: "p/n", input: 3, output: 1, session: "s2" });
-    assert.deepEqual(await store.tokenUsageSummary({ userId: "alice" }), { n: 1, input: 10, output: 4, cacheRead: 2, cacheWrite: 1, total: 17, users: ["alice", "bob"] });
+    assert.deepEqual(await store.tokenUsageSummary({ userId: "alice" }), { n: 1, input: 10, output: 4, cacheRead: 2, cacheWrite: 1, total: 17, cost: { reportedUsd: null, estimatedUsd: null, unknown: 1, missingUsage: 0 }, users: ["alice", "bob"] });
     const all = await store.tokenUsageSummary();
     assert.deepEqual([all.n, all.input, all.output, all.cacheRead, all.cacheWrite, all.total], [2, 13, 5, 2, 1, 21]);
     assert.deepEqual(all.users, ["alice", "bob"]);
@@ -35,10 +35,10 @@ test("token usage per task is paged by task creation time, with missing tasks la
     await store.recordTokenUsage({ userId: "bob", at: 9000, session: "s3", input: 2, total: 2 });
     // The newer task comes first despite the older task having more tokens and later first and last requests.
     const first = await store.tokenUsageTasks({ userId: "alice", pageSize: 1 });
-    assert.deepEqual(first.tasks, [{ user: "alice", task: "t2", employee: "e1", n: 1, input: 7, output: 0, cacheRead: 0, cacheWrite: 0, total: 7, first: 1000, last: 1000 }]);
+    assert.deepEqual(first.tasks, [{ user: "alice", task: "t2", employee: "e1", n: 1, input: 7, output: 0, cacheRead: 0, cacheWrite: 0, total: 7, cost: { reportedUsd: null, estimatedUsd: null, unknown: 1, missingUsage: 0 }, first: 1000, last: 1000 }]);
     assert.deepEqual([first.total, first.page, first.pageSize], [3, 1, 1]);
     const rest = await store.tokenUsageTasks({ userId: "alice", page: 2, pageSize: 1 });
-    assert.deepEqual(rest.tasks, [{ user: "alice", task: "t1", employee: "e1", n: 2, input: 11, output: 6, cacheRead: 3, cacheWrite: 0, total: 20, first: 2000, last: 5000 }]);
+    assert.deepEqual(rest.tasks, [{ user: "alice", task: "t1", employee: "e1", n: 2, input: 11, output: 6, cacheRead: 3, cacheWrite: 0, total: 20, cost: { reportedUsd: null, estimatedUsd: null, unknown: 2, missingUsage: 0 }, first: 2000, last: 5000 }]);
     assert.equal((await store.tokenUsageTasks({ userId: "alice", page: 3, pageSize: 1 })).tasks[0].task, "deleted");
     assert.equal((await store.tokenUsageTasks({ userId: "alice", page: 4, pageSize: 1 })).tasks.length, 0);
     // Missing task records and ordinary chats are retained after all known tasks, newest usage first.

@@ -35,6 +35,8 @@ export async function initialize(pageScript: string) {
     bridge = new ChromeBridge(),
     chrome = new Chrome(store, bridge, pageScript),
     engine = await Engine.create(store, catalog, chrome);
+  catalog.refreshPrices = true;
+  void catalog.modelMetadata(true);
   const token = process.env.VEGA_TOKEN || randomBytes(32).toString("base64url");
   if (token.length < 16)
     throw Error("VEGA_TOKEN must be at least16 characters");

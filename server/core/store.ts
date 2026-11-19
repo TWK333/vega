@@ -7,6 +7,21 @@ import { Files } from "./files";
 import type { FileRef } from "./attachments";
 import { assert, id, type Obj } from "./util";
 import { quoteOf, type ChatAuthor, type ChatQuote } from "../../shared/chat-quote";
+import type { RequestUsage, UsageCounts, UsageScope } from "./request-usage";
+
+type UsageRow = UsageScope & UsageCounts & { at?: number; model?: string };
+const usageFields = ["input", "output", "cacheRead", "cacheWrite", "total"];
+const feeFields = ["reportedNanos", "estimatedNanos"];
+const usageTotals = (row: Obj) => ({
+  n: Number(row.n) || 0, input: Number(row.input) || 0, output: Number(row.output) || 0,
+  cacheRead: Number(row.cacheRead) || 0, cacheWrite: Number(row.cacheWrite) || 0, total: Number(row.total) || 0,
+  cost: {
+    reportedUsd: row.reportedNanos == null ? null : Number(row.reportedNanos) / 1e9,
+    estimatedUsd: row.estimatedNanos == null ? null : Number(row.estimatedNanos) / 1e9,
+    unknown: Number(row.unknownCost) || 0,
+    missingUsage: Number(row.missingUsage) || 0,
+  },
+});
 /** Unread counts stop here (the badge shows 99+). */
 export const UNREAD_MAX = 100;
 export type Part = { type: string; [key: string]: any };
@@ -583,19 +598,7 @@ export class Store {
     await this.db.exec(`CREATE TABLE token_usage(id ${auto},user ${K} NOT NULL,at ${I} NOT NULL,data ${T} NOT NULL)${table}`);
     await this.db.exec("CREATE INDEX token_usage_user ON token_usage(user,at)");
   }
-  async recordTokenUsage(row: {
-    userId?: string;
-    at?: number;
-    model?: string;
-    input?: number;
-    output?: number;
-    cacheRead?: number;
-    cacheWrite?: number;
-    total?: number;
-    session?: string;
-    employee?: string;
-    task?: string;
-  }) {
+  async recordTokenUsage(row: UsageRow | (RequestUsage & { estimatedNanos?: number })) {
     if (!row.userId) return;
     const at = row.at || Date.now();
     const total = row.total ?? (row.input || 0) + (row.output || 0) + (row.cacheRead || 0) + (row.cacheWrite || 0);
@@ -614,22 +617,23 @@ export class Store {
     if (opts.to) { where.push("at<=?"); params.push(opts.to); }
     return { filter: where.length ? " WHERE " + where.join(" AND ") : "", params };
   }
+  private usageTotalsSql() {
+    const sum = (key: string) => `COALESCE(SUM(${this.json("$." + key)}),0) ${key}`;
+    // Cast money explicitly: MySQL's JSON extraction returns text, and implicit SUM rounds via double.
+    const money = (key: string) => `SUM(CAST(${this.json("$." + key)} AS ${this.db.dialect === "mysql" ? "DECIMAL(30,0)" : "INTEGER"})) ${key}`;
+    const absent = feeFields.map((key) => `${this.json("$." + key)} IS NULL`).join(" AND ");
+    return ["COUNT(*) n", ...usageFields.map(sum), ...feeFields.map(money),
+      `SUM(CASE WHEN ${absent} THEN 1 ELSE 0 END) unknownCost`,
+      `SUM(CASE WHEN ${this.json("$.usageComplete")} ${this.db.dialect === "mysql" ? "= 'false'" : "= 0"} THEN 1 ELSE 0 END) missingUsage`].join(",");
+  }
   /** Totals for every row in the range, summed in SQL so a range never loads its rows into the process. */
   async tokenUsageSummary(opts: { userId?: string; from?: number; to?: number } = {}) {
     await this.ensureTokenUsageTable();
     const { filter, params } = this.usageFilter(opts);
-    const sum = (key: string) => `COALESCE(SUM(${this.json("$." + key)}),0) ${key}`;
-    const row = (await this.one(
-      `SELECT COUNT(*) n,${["input", "output", "cacheRead", "cacheWrite", "total"].map(sum).join(",")} FROM token_usage${filter}`,
-      ...params,
-    ))!;
+    const row = (await this.one(`SELECT ${this.usageTotalsSql()} FROM token_usage${filter}`, ...params))!;
     const scope = this.usageFilter(opts, false);
     const users = (await this.all(`SELECT DISTINCT user FROM token_usage${scope.filter} ORDER BY user`, ...scope.params)).map((item) => String(item.user));
-    return {
-      n: Number(row.n) || 0, input: Number(row.input) || 0, output: Number(row.output) || 0,
-      cacheRead: Number(row.cacheRead) || 0, cacheWrite: Number(row.cacheWrite) || 0, total: Number(row.total) || 0,
-      users,
-    };
+    return { ...usageTotals(row), users };
   }
   /** One page of per-task totals; grouping, ordering and paging all run in SQL. */
   async tokenUsageTasks(opts: { userId?: string; from?: number; to?: number; page?: number; pageSize?: number } = {}) {
@@ -637,16 +641,15 @@ export class Store {
     const { filter, params } = this.usageFilter(opts);
     const page = Math.max(Math.trunc(opts.page || 1), 1), pageSize = Math.min(Math.max(Math.trunc(opts.pageSize || 20), 1), 100);
     const task = this.json("$.task"), employee = this.json("$.employee");
-    const sum = (key: string) => `COALESCE(SUM(${this.json("$." + key)}),0) ${key}`;
     // Rows from plain chats carry no task: they group per user and 牛马 instead of being added together.
-    const group = `SELECT user,${task} task,${employee} employee,COUNT(*) n,MIN(at) firstAt,MAX(at) lastAt,${["input", "output", "cacheRead", "cacheWrite", "total"].map(sum).join(",")} FROM token_usage${filter} GROUP BY user,${task},${employee}`;
+    const keys = ` FROM token_usage${filter} GROUP BY user,${task},${employee}`;
+    const group = `SELECT user,${task} task,${employee} employee,MIN(at) firstAt,MAX(at) lastAt,${this.usageTotalsSql()}${keys}`;
     const rows = await this.all(`SELECT g.* FROM (${group}) g LEFT JOIN employee_tasks t ON t.id=g.task ORDER BY (t.created IS NULL),t.created DESC,g.lastAt DESC,g.user,g.task,g.employee LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, ...params);
-    const total = Number((await this.one(`SELECT COUNT(*) n FROM (${group}) g`, ...params))!.n);
+    const total = Number((await this.one(`SELECT COUNT(*) n FROM (SELECT user,${task} task,${employee} employee${keys}) g`, ...params))!.n);
     return {
       tasks: rows.map((row) => ({
         user: String(row.user), task: row.task ? String(row.task) : "", employee: row.employee ? String(row.employee) : "",
-        n: Number(row.n) || 0, input: Number(row.input) || 0, output: Number(row.output) || 0,
-        cacheRead: Number(row.cacheRead) || 0, cacheWrite: Number(row.cacheWrite) || 0, total: Number(row.total) || 0,
+        ...usageTotals(row),
         first: Number(row.firstAt), last: Number(row.lastAt),
       })),
       total, page, pageSize,

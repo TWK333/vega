@@ -9,12 +9,12 @@ import {
   clip,
   object,
   bounded,
-  request,
   sse,
   nativeArguments,
   type Obj,
 } from "./util";
 import { devinStream } from "./devin";
+import { RequestMeter, type UsageScope, type UsageSink } from "./request-usage";
 export type Tool = { name: string; description: string; parameters: Obj };
 export function normalizeUsage(api: string, u: Obj) {
   if (typeof u.input === "number" && typeof u.output === "number") return u;
@@ -447,6 +447,8 @@ export async function bodyFor(
   body[options.max_tokens_field || "max_tokens"] = budget;
   delete body.max_tokens_field;
   body.stream_options = { include_usage: true };
+  if (api === "openai-completions" && new URL(model.baseURL).origin === "https://openrouter.ai")
+    body.usage = { ...object(body.usage), include: true };
   if (tools.length)
     body.tools = tools.map((t) => ({
       type: "function",
@@ -548,6 +550,7 @@ export class Providers {
     for (const key of this.checkpoints.keys())
       if (key.startsWith(session + ":")) this.checkpoints.delete(key);
   }
+  onRequestUsage?: UsageSink;
   async chat(
     model: Model,
     system: string,
@@ -559,6 +562,21 @@ export class Providers {
     cacheKey?: string,
     // Only conversation turns can return tool-error receipts; one-shot model judges stay strict.
     deferToolErrors = false,
+    usageScope?: UsageScope,
+  ): Promise<Message> {
+    const meter = new RequestMeter(model, usageScope, this.onRequestUsage);
+    try {
+      const reply = await this.generate(model, system, messages, tools, signal, emit, session, cacheKey, deferToolErrors, meter);
+      await meter.finish("completed");
+      return reply;
+    } catch (error) {
+      await meter.finish(signal.aborted ? "interrupted" : "failed");
+      throw error;
+    }
+  }
+  private async generate(
+    model: Model, system: string, messages: Message[], tools: Tool[], signal: AbortSignal,
+    emit: Emit, session: string, cacheKey: string | undefined, deferToolErrors: boolean, meter: RequestMeter,
   ): Promise<Message> {
     const promptCacheKey = cacheKey || session;
     const { path, body } = await bodyFor(
@@ -569,15 +587,11 @@ export class Providers {
           this.resolveImage,
           promptCacheKey,
         );
-    if (model.api === "devin")
-      return usableReply(await devinStream(
-        model,
-        body,
-        model.options.__devinVersion || "3000.11.228",
-        signal,
-        emit,
-        deferToolErrors,
-      ));
+    if (model.api === "devin") {
+      const reply = await devinStream(model, body, model.options.__devinVersion || "3000.11.228", signal, emit, deferToolErrors, meter);
+      signal.throwIfAborted();
+      return usableReply(reply);
+    }
     const headers: Obj = {
       "Content-Type": "application/json",
       Accept: "text/event-stream",
@@ -650,24 +664,17 @@ export class Providers {
       if (this.checkpoints.size > 512)
         this.checkpoints.delete(this.checkpoints.keys().next().value!);
     }
-    let response = await request(
-      model.baseURL + path,
-      {
-        method: "POST",
-        redirect:
-          model.localAuth || model.api === "codebuddy" ? "manual" : "follow",
-        headers,
-        body: JSON.stringify(body),
-        signal,
-      },
-      0,
-    );
+    const send = (path: string, body: Obj, redirect: RequestRedirect = model.localAuth || model.api === "codebuddy" ? "manual" : "follow") => meter.send(model.baseURL + path, {
+      method: "POST", redirect,
+      headers, body: JSON.stringify(body), signal,
+    });
+    let response = await send(path, body);
     if (
       !response.ok &&
       continuation &&
       [400, 404, 409, 422].includes(response.status)
     ) {
-      await bounded(response, 4096);
+      meter.observeError(await bounded(response, 4096));
       delete body.previous_response_id;
       body.input = (await bodyFor(
               model,
@@ -676,18 +683,7 @@ export class Providers {
               tools,
               this.resolveImage,
             )).body.input;
-      response = await request(
-        model.baseURL + path,
-        {
-          method: "POST",
-          redirect:
-            model.localAuth || model.api === "codebuddy" ? "manual" : "follow",
-          headers,
-          body: JSON.stringify(body),
-          signal,
-        },
-        0,
-      );
+      response = await send(path, body);
       continuation = false;
       const state = this.checkpoints.get(checkpointKey);
       if (state?.owner === owner) state.disabled = true;
@@ -706,6 +702,7 @@ export class Providers {
       signedRows
     ) {
       const bytes = await bounded(response, 4096);
+      meter.observeError(bytes);
       if (/invalid.*signature/i.test(bytes.toString())) {
         const unsigned = messages.map((m) => ({
           ...m,
@@ -721,11 +718,7 @@ export class Providers {
                 tools,
                 this.resolveImage,
               );
-        response = await request(
-          model.baseURL + retry.path,
-          { method: "POST", headers, body: JSON.stringify(retry.body), signal },
-          0,
-        );
+        response = await send(retry.path, retry.body, "manual");
       } else
         response = new Response(bytes, {
           status: 400,
@@ -733,8 +726,9 @@ export class Providers {
         });
     }
     if (!response.ok) {
-      const data = (await bounded(response, 4096))
-        .toString()
+      const bytes = await bounded(response, 4096);
+      meter.observeError(bytes);
+      const data = bytes.toString()
         .split(model.apiKey || "\u0000")
         .join("[redacted]");
       throw new ProviderError(
@@ -766,6 +760,7 @@ export class Providers {
     };
     if (!response.headers.get("content-type")?.includes("text/event-stream")) {
       const data = JSON.parse((await bounded(response)).toString());
+      meter.observe(data.usage ?? data.error?.usage, data.model, true);
       result = this.jsonResult(model, data, deferToolErrors);
       complete = true;
     } else {
@@ -782,6 +777,16 @@ export class Providers {
         } catch {
           throw new ProviderError("Malformed provider stream");
         }
+        const type = data.type || frame.event;
+        if (model.api === "anthropic-messages") {
+          if (type === "message_start") meter.observe(data.message?.usage, data.message?.model);
+          if (type === "message_delta") meter.observe(data.usage, undefined, !!data.delta?.stop_reason);
+        } else if (model.api === "openai-responses") {
+          meter.observe(data.response?.usage ?? data.usage, data.response?.model, ["response.completed", "response.failed", "response.incomplete"].includes(type));
+        } else {
+          const choices = Array.isArray(data.choices) ? data.choices : [];
+          meter.observe(data.usage ?? data.error?.usage, data.model, !!finish || !choices.length || choices.some((choice: Obj) => !!choice.finish_reason));
+        }
         if (data.error)
           throw new ProviderError(
             model.localAuth || model.api === "codebuddy"
@@ -793,7 +798,6 @@ export class Providers {
                   1000,
                 ),
           );
-        const type = data.type || frame.event;
         if (model.api === "anthropic-messages") {
           const index = data.index || 0;
           if (type === "message_start")

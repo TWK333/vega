@@ -3,6 +3,7 @@ import type { Message } from "./store";
 import { sceneModels } from "./config";
 import { estimate } from "./context";
 import { nameKey } from "./names";
+import type { UsageScope } from "./request-usage";
 
 /**
  * 群聊旁白: decides who a user's group message without an @ is for. It keeps its own hidden session per group so the
@@ -52,6 +53,7 @@ export type NarratorTurn = {
   /** Earlier group messages (one line each): all since the previous judgement, or the last few for a fresh session. */
   notes: () => Promise<{ since: string[]; carry: string[] }>;
   message: string;
+  usage?: UsageScope;
   /** Create a new hidden session. */
   open: () => Promise<string>;
 };
@@ -77,7 +79,8 @@ export async function narrate(engine: Engine, turn: NarratorTurn, signal?: Abort
       input = { role: "user", text: session
         ? `${notes.since.length ? `[上次判断之后的群消息]\n${notes.since.join("\n")}\n` : ""}[新消息] ${turn.message}`
         : `[本群设定]\n${turn.setup}\n${notes.carry.length ? `[此前的群消息]\n${notes.carry.join("\n")}\n` : ""}[新消息] ${turn.message}` };
-      reply = await engine.providers.chat(model, NARRATOR_SYSTEM, [...history, input], [routeTool as any], abort, undefined, session || undefined);
+      reply = await engine.providers.chat(model, NARRATOR_SYSTEM, [...history, input], [routeTool as any], abort, undefined, session || undefined, undefined, false,
+        turn.usage ? { ...turn.usage, session: session || turn.usage.session } : undefined);
       break;
     } catch (error) { if (abort.aborted) throw error; failure = error; }
   }

@@ -9,6 +9,7 @@ import {
   type Obj,
 } from "./util";
 import type { Model } from "./config";
+import type { RequestMeter } from "./request-usage";
 const LIMIT = 32 << 20;
 export const varint = (value: number | bigint) => {
   let n = BigInt(value);
@@ -272,12 +273,13 @@ export async function devinStream(
   signal: AbortSignal,
   emit: (type: string, data: any) => void,
   deferToolErrors = false,
+  meter?: RequestMeter,
 ) {
   const url = new URL(
     "/exa.api_server_pb.ApiServerService/GetChatMessage",
     model.baseURL,
   ).href;
-  const response = await request(url, {
+  const init: RequestInit = {
     method: "POST",
     body: encodeDevin(body, model.apiKey, version),
     headers: {
@@ -287,8 +289,12 @@ export async function devinStream(
       "connect-accept-encoding": "gzip",
     },
     signal,
-  }, 0);
-  assert(response.ok, `Devin upstream HTTP ${response.status}`);
+  };
+  const response = meter ? await meter.send(url, init) : await request(url, init, 0);
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw Error(`Devin upstream HTTP ${response.status}`);
+  }
   assert(
     response.headers
       .get("content-type")
@@ -361,11 +367,14 @@ export async function devinStream(
               cacheWrite: 0,
               totalTokens: (u[2] || 0) + (u[3] || 0),
             };
+            meter?.observe({ input: u[2] === undefined ? undefined : usage.input, output: u[3], cacheRead: usage.cacheRead, cacheWrite: 0,
+              totalTokens: u[2] === undefined || u[3] === undefined ? undefined : u[2] + u[3] });
           }
         }
       }
     }
     decoder.finish();
+    meter?.completeUsage();
   } finally {
     await reader.cancel().catch(() => {});
   }

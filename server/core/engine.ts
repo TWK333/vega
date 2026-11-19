@@ -41,6 +41,7 @@ import { TaskBrowserTabs } from "./task-browser-tabs";
 import { Vault, migrateVaultOwnership } from "./vault";
 import { Triggers } from "./triggers";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
+import { usageScope } from "./request-usage";
 
 /**
  * Model for a session about to run. Task sessions always follow the scene's current primary
@@ -353,6 +354,10 @@ export class Engine {
     public chrome: Chrome,
   ) {
     this.providers.resolveImage = (im) => this.store.imageData(im);
+    this.providers.onRequestUsage = async (usage) => {
+      const estimatedNanos = await this.catalog.requestEstimate(usage).catch(() => undefined);
+      await this.store.recordTokenUsage({ ...usage, estimatedNanos });
+    };
     this.events.setMaxListeners(256);
     this.vault = new Vault(store);
     this.triggers = new Triggers(store, this.vault, async (userId, scope) => {
@@ -959,6 +964,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           ],
           [],
           tools.signal,
+          undefined, undefined, undefined, false, usageScope(tools.session),
         );
         carry = summary.text || "";
       }
@@ -1331,6 +1337,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               key,
               session.promptCacheKey || key,
               true,
+              usageScope(session),
             );
             offered = names;
             break;
@@ -1425,14 +1432,6 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
         assert(reply, "Provider retry exhausted");
         await tools.context.recordUsage(view, reply.usage || {}, canonicalView);
-        await this.store.recordTokenUsage({
-          userId: session.ownerId,
-          model: (outputRecovery || model).selection,
-          session: key,
-          employee: session.employeeId,
-          task: session.taskId,
-          ...(reply.usage || {}),
-        });
         const savedReply = await this.store.append(key, redactMessage(reply, redact));
         if (session.employeeId && !session.taskId && !session.groupId) this.employeeMessage(session.employeeId, key, savedReply);
         emit("message_end", reply);

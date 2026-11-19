@@ -1,4 +1,6 @@
 import { convertCatalog } from "./model-capabilities";
+import { estimateCost, modelPriceIndex } from "./model-prices";
+import type { RequestUsage } from "./request-usage";
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -11,16 +13,64 @@ import { catalogContextModels, modelContext, validateContextRules } from "../../
 import { Subscriptions } from "./subscriptions";
 import {
   assert,
+  bounded,
   clone,
   expand,
   httpURL,
   jsonRequest,
   localJSON,
   object,
+  request,
   type Obj,
 } from "./util";
 const exec = promisify(execFile);
+type ModelsDev = { at: number; data: Obj };
+const METADATA_TTL_MS = 6 * 60 * 60 * 1000;
+
 export class Catalog {
+  private metadata?: Promise<ModelsDev | null>;
+  private metadataRefresh?: Promise<ModelsDev | null>;
+  private nextMetadataAttempt = 0;
+  private priceIndex?: { data: Obj; lookup: ReturnType<typeof modelPriceIndex> };
+  refreshPrices = false;
+
+  async modelMetadata(refresh = false) {
+    const cached = await (this.metadata ??= this.store.get<ModelsDev | null>("models.dev", null).catch(() => null));
+    if (!refresh || (cached && Date.now() - cached.at < METADATA_TTL_MS)) return cached;
+    if (this.metadataRefresh) return this.metadataRefresh;
+    if (Date.now() < this.nextMetadataAttempt) return cached;
+    this.nextMetadataAttempt = Date.now() + 5 * 60000;
+    this.metadataRefresh = (async () => {
+      try {
+        // Public catalog only: no model request, credential or account is sent here.
+        const response = await request("https://models.dev/api.json", {}, 20000);
+        if (!response.ok) {
+          await response.body?.cancel().catch(() => {});
+          return cached;
+        }
+        const data = object(JSON.parse((await bounded(response, 16 << 20)).toString("utf8")));
+        if (!Object.values(data).some((provider) => Object.keys(object(provider?.models)).length)) return cached;
+        const fresh = { at: Date.now(), data };
+        await this.store.put("models.dev", fresh);
+        this.metadata = Promise.resolve(fresh);
+        return fresh;
+      } catch { return cached; }
+    })().finally(() => { this.metadataRefresh = undefined; });
+    return this.metadataRefresh;
+  }
+
+  async requestEstimate(usage: RequestUsage) {
+    if (usage.reportedNanos !== undefined || !usage.usageComplete) return;
+    const metadata = await this.modelMetadata();
+    if (this.refreshPrices && (!metadata || Date.now() - metadata.at >= METADATA_TTL_MS)) {
+      // Use the last quote without waiting on a network refresh in the model's path.
+      void this.modelMetadata(true);
+    }
+    // shortcut: use the most recent available catalog and store the estimate at settlement; do not retroactively price old receipts.
+    if (!metadata) return;
+    if (this.priceIndex?.data !== metadata.data) this.priceIndex = { data: metadata.data, lookup: modelPriceIndex(metadata.data) };
+    return estimateCost(this.priceIndex.lookup(usage.modelId), usage);
+  }
   cache = new Map<
     string,
     { at: number; models: Obj; version?: string; raw?: Obj[] }
@@ -237,24 +287,10 @@ export class Catalog {
       if (p.localAuth === "codex") url += "?client_version=0.134.0";
       const budget = { bytes: 16 << 20 };
       const preset = presets.find((v) => v.id === p.preset);
-      let metadata = await this.store.get<any>("models.dev", null);
       const needsMetadata =
         !!preset?.modelsDev ||
-        [
-          "commandcode",
-          "opendesign",
-                    "local-codex",
-          "local-claude-code",
-        ].includes(p.preset);
-      if (needsMetadata && (!metadata || Date.now() - metadata.at > 21600000)) {
-        try {
-          metadata = {
-            at: Date.now(),
-            data: await jsonRequest("https://models.dev/api.json", {}, 20000),
-          };
-          await this.store.put("models.dev", metadata);
-        } catch {}
-      }
+        ["commandcode", "opendesign", "local-codex", "local-claude-code"].includes(p.preset);
+      const metadata = await this.modelMetadata(needsMetadata);
       const entriesAll: Obj[] = [];
       let availability = true;
       let cursor = "";

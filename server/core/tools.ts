@@ -48,6 +48,7 @@ import {
   localShellKill,
 } from "./local-agent";
 import { assert, clip, id, workspaceFile, type Obj } from "./util";
+import { usageScope } from "./request-usage";
 import type { Config, Model } from "./config";
 import type { Tool } from "./provider";
 import {
@@ -469,7 +470,7 @@ export class Tools {
       url: vaultSite(page.url) + new URL(page.url).pathname, title: page.title || "", text: String(page.visibleText || page.text || "").slice(0, 2000),
       fields: (page.items || []).filter((item: Obj) => item.editable && item.inView !== false).slice(0, 12).map((item: Obj) => ({ name: item.name, context: item.fieldContext })),
     }));
-    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), pages }, this.signal);
+    const scope = await verifyVaultUse(this.engine, { name: entry.name, condition: entry.condition }, { purpose: a.text || (""), task: task.slice(0, 4000), ...(a.url ? { url: vaultSite(a.url) } : {}), pages }, this.signal, usageScope(this.session));
     this.signal.throwIfAborted();
     const latest = (await vault.list()).find((item) => item.id === entry.id);
     assert(latest?.name === entry.name && latest?.condition === entry.condition, "凭据使用条件已变化，请重新核对");

@@ -609,6 +609,7 @@ export class Groups {
     let opened = "";
     const result = await narrate(this.engine, {
       session: known?.session || "", current: known?.basis === basis, setup, members, message: line(message, 4000),
+      usage: { userId: group.creatorId, session: group.session },
       notes: async () => ({ since: known?.session ? await earlier(known.seq, NARRATOR.notes) : [], carry: await earlier(0, NARRATOR.carry) }),
       open: async () => (opened = (await this.store.newSession({ title: "旁白：" + group.name, ownerId: group.creatorId, groupId: group.id })).id),
     });
