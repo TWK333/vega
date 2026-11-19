@@ -7,6 +7,7 @@ import { BOT_AVATAR_COLORS, BOT_AVATAR_SHAPES, botAvatarPreset, defaultBotAvatar
 import { systemPresence, type Presence } from "./presence";
 import type { Store, Session, Message } from "./store";
 import { outsideTransaction } from "./db";
+import { backgroundResultText, type TaskSuspension } from "./background-result";
 import { resolve, posix, win32 } from "node:path";
 import { realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -55,7 +56,10 @@ export type Task = Obj & {
   proactive?: boolean;
   seenEvents?: string[];
   seenEvidence?: string[];
+  backgroundWait?: { token: string; session: string; ready?: boolean };
 };
+type LiveSuspension = { session: string; token: string; wait: TaskSuspension; ready?: { text?: string } };
+type WorkspaceWriter = { taskId: string; hold: boolean; until?: Promise<void>; release?: boolean };
 /** Who said something in a group chat: a user or an employee. */
 export type GroupAuthor = { kind: "user" | "employee"; id: string; name: string };
 /** byOwner: the request came from this employee's owner (anyone else may only work with tasks, never memories; the vault is always the employee's own). */
@@ -85,12 +89,24 @@ export type EmployeeState = {
 };
 /** The employee record alone (tasks and runs are rows, loaded by state()). */
 export type EmployeeProfile = Omit<EmployeeState, "tasks" | "runs">;
+// shortcut: leases track the bound cwd, not files arbitrary shell commands reach elsewhere; enforce that with executor isolation if needed.
 const workspaceKey = async (session: Session) => {
   const windows = ["win32", "windows"].includes(session.localAgent ? session.localPlatform || process.platform : process.platform);
   let path = (windows ? win32 : posix).resolve(session.cwd);
   if (!session.localAgent) try { path = await realpath(path); } catch {}
   return (session.localAgent ? "client:" + session.clientId : "server") + "\0" + (windows ? path.toLowerCase() : path);
 };
+function workspaceBusy(writers: ReadonlyMap<string, { taskId: string }>, key: string, taskId: string) {
+  const scope = key.slice(0, key.indexOf("\0") + 1), path = key.slice(scope.length);
+  const sep = path.startsWith("/") ? "/" : "\\";
+  const contains = (parent: string, child: string) => child.startsWith(parent.endsWith(sep) ? parent : parent + sep);
+  for (const [other, writer] of writers) {
+    if (writer.taskId === taskId || !other.startsWith(scope)) continue;
+    const dir = other.slice(scope.length);
+    if (path === dir || contains(path, dir) || contains(dir, path)) return true;
+  }
+  return false;
+}
 export const ended = (status: string) =>
   ["done", "failed", "stopped", "cancelled", "sealed"].includes(status);
 const TASK_LIST_LIMIT = 50;
@@ -348,7 +364,7 @@ export function workSlot(start: string, end: string, now: number) {
   return next;
 }
 export type EmployeeRuntime = {
-  run: (session: string, text: string, signal?: AbortSignal, input?: Message["taskInput"], attach?: Pick<Message, "images" | "files">) => Promise<void>;
+  run: (session: string, text: string, signal?: AbortSignal, input?: Message["taskInput"], attach?: Pick<Message, "images" | "files">) => Promise<void | TaskSuspension>;
   cancel: (session: string) => void;
   isRunning: (session: string) => boolean;
   /** Queue a user message on a running session; the current tool or model output finishes first. */
@@ -376,7 +392,8 @@ export type EmployeeRuntime = {
 };
 export class Employee {
   busy = new Map<string, { computer: boolean; session: string; outlineDraft?: OutlineDraft }>();
-  writers = new Map<string, { taskId: string; hold: boolean }>();
+  writers = new Map<string, WorkspaceWriter>();
+  private suspensions = new Map<string, LiveSuspension>();
   members = new Map<string, Employee>();
   membersLoaded = false;
   /** In-flight first-employee creation per owner, so two page loads cannot create two. */
@@ -621,9 +638,10 @@ export class Employee {
     const task = this.task(await this.state(), session.taskId);
     if (task.status !== "running") return false;
     const writers = (this.root || this).writers, owner = writers.get(key);
-    if (owner && owner.taskId !== task.id) {
+    if (workspaceBusy(writers, key, task.id)) {
       await this.update(state => {
                 const current = this.task(state, task.id);
+                if (current.status !== "running") return;
                 current.status = "queued";
                 current.nextCheckAt = 0;
                 current.workspaceWait = { key, hold };
@@ -633,14 +651,32 @@ export class Employee {
     }
     let moved = false;
     for (const [previous, lease] of writers) if (lease.taskId === task.id && previous !== key) { writers.delete(previous); moved = true; }
-    writers.set(key, { taskId: task.id, hold: hold || !!owner?.hold });
+    if (owner?.taskId === task.id) {
+      owner.hold ||= hold;
+      delete owner.release;
+    } else writers.set(key, { taskId: task.id, hold });
     if (moved) this.schedule();
     return true;
+  }
+  retainWorkspace(taskId: string, until: Promise<void>) {
+    const writers = (this.root || this).writers;
+    for (const [key, lease] of writers) if (lease.taskId === taskId) {
+      lease.until = until;
+      void until.then(() => {
+        if (writers.get(key) !== lease || lease.until !== until) return;
+        delete lease.until;
+        if (lease.release) { writers.delete(key); this.schedule(); }
+      });
+    }
   }
   releaseWorkspace(taskId: string, transientOnly = false) {
     const writers = (this.root || this).writers;
     let released = false;
-    for (const [key, lease] of writers) if (lease.taskId === taskId && (!transientOnly || !lease.hold)) { writers.delete(key); released = true; }
+    for (const [key, lease] of writers) if (lease.taskId === taskId && (!transientOnly || !lease.hold)) {
+      if (lease.until) { lease.release = true; continue; }
+      writers.delete(key);
+      released = true;
+    }
     if (released) this.schedule();
   }
   recover(t: Task, reason: string, now = Date.now(), waitClient?: string) {
@@ -784,10 +820,18 @@ export class Employee {
     this.closed = false;
     this.stopping = false;
     if (!await this.store.get("employee:default-deleted", false) || this.root) await this.update((s) => {
-          for (const t of s.tasks)
-            if (t.status === "running") {
+          for (const t of s.tasks) {
+            if (t.backgroundWait && !t.backgroundWait.ready && !this.suspensions.has(t.id)) {
+              delete t.backgroundWait;
+              if (!ended(t.status)) {
+                const due = t.nextCheckAt || 0;
+                this.recover(t, "服务中断，原后台结果句柄已失效。原会话续做，先核对实际状态，不自动重跑已启动的操作。");
+                if (t.status === "recovering") t.nextCheckAt = Math.max(t.nextCheckAt, due);
+              }
+            } else if (t.status === "running") {
               this.recover(t, "服务中断：原会话续做，先检查外部状态；中断不代表提交/发送未执行。");
             }
+          }
           for (const r of s.runs)
             if (r.status === "running") {
               r.status = "stopped";
@@ -803,7 +847,22 @@ export class Employee {
     clearTimeout(this.timer);
     this.wakeAt = Infinity;
     for (const run of this.busy.values()) this.runtime.cancel(run.session);
+    this.cancelSuspensions();
     if (!this.root) for (const employee of this.members.values()) employee.close();
+  }
+  cancelSuspensions() {
+    for (const [taskId, entry] of this.suspensions) this.cancelSuspension(taskId, entry.session);
+  }
+  private cancelSuspension(taskId: string, session: string) {
+    this.suspensions.get(taskId)?.wait.cancel();
+    this.suspensions.delete(taskId);
+    this.runtime.cancel(session);
+  }
+  private clearBackgroundWait(task: Task) {
+    const waiting = task.backgroundWait;
+    if (!waiting) return;
+    delete task.backgroundWait;
+    this.store.afterCommit(() => this.cancelSuspension(task.id, waiting.session));
   }
   /** Best-effort notification; a failed count (e.g. during shutdown) is not an error for the caller. */
   async emitChanged() {
@@ -1026,6 +1085,7 @@ export class Employee {
             case "done": {
               const task = get();
               assert(!this.busy.has(task.id), "Stop running task first");
+              this.clearBackgroundWait(task);
               task.status = "cancelled";
               task.finishedAt = now;
               return { ok: true };
@@ -1560,6 +1620,8 @@ export class Employee {
               t.lastSupplementSource = supplementSource;
             }
             t.lastSupplement = text;
+            if (t.backgroundWait && !t.backgroundWait.ready)
+              return { ok: true, duplicate, next: "补充已记在原任务上，后台结果返回后在原会话一起继续。" };
             if (this.busy.has(t.id) || (duplicate && ["queued", "running", "recovering", "deferred"].includes(t.status))) {
               const session = this.busy.get(t.id)?.session;
               // Same task, same run: the engine injects this after the current tool or model output, not as a new task.
@@ -1590,6 +1652,7 @@ export class Employee {
               t.workspaceWait = undefined;
               t.supplementPending = false;
               t.finishedAt ||= Date.now();
+              this.clearBackgroundWait(t);
               this.releaseWorkspace(t.id);
               for (const session of new Set([t.workSession, t.computerSession].filter(Boolean)))
                 this.runtime.cancel(session);
@@ -1600,6 +1663,7 @@ export class Employee {
               if (ended(t.status) && t.status !== "stopped") return { ok: true, status: t.status };
               t.status = "stopped";
               t.nextCheckAt = 0;
+              this.clearBackgroundWait(t);
               delete t.partialDelivery;
               delete t.approvedPartial;
               t.result = "用户停止：续做前核对外部操作，不要重放。";
@@ -1716,7 +1780,8 @@ export class Employee {
     if (a.action === "stop") {
       const task = this.task(await this.state(), a.id);
       const sessions = [this.busy.get(task.id)?.session, task.workSession, task.computerSession].filter(Boolean);
-      const stopped = () => !this.busy.has(task.id) && !sessions.some((session) => this.runtime.isRunning(session));
+      const stopped = () => !this.busy.has(task.id) && !sessions.some((session) => this.runtime.isRunning(session)) &&
+        ![...(this.root || this).writers.values()].some(lease => lease.taskId === task.id && lease.until);
       const idle = stopped();
       const deadline = Date.now() + 1500;
       while (!stopped() && Date.now() < deadline) await sleep(25);
@@ -1753,7 +1818,7 @@ export class Employee {
       id: task.id,
       key: task.key || "",
       status: task.status,
-      busy: this.busy.has(task.id) || task.status === "running",
+      busy: this.busy.has(task.id) || task.status === "running" || !!task.backgroundWait,
       seenEvidence: task.seenEvidence,
       seenEvents: task.seenEvents,
     }));
@@ -1887,6 +1952,7 @@ export class Employee {
       initial.tasks.some(
         (t) =>
           ["queued", "deferred", "recovering"].includes(t.status) &&
+          (!t.backgroundWait || t.backgroundWait.ready || this.suspensions.get(t.id)?.ready) &&
           (t.nextCheckAt || 0) <= now &&
           (t.side === "computer" || t.profile === "computer"),
       )
@@ -1914,6 +1980,19 @@ export class Employee {
         if (this.deleting || this.deleted || this.resetting) return;
         for (const task of s.tasks) {
           const session = task.side === "computer" ? task.computerSession : task.workSession;
+          const marker = task.backgroundWait, live = this.suspensions.get(task.id);
+          if (!ended(task.status) && marker && !marker.ready && marker.session === session && live?.token === marker.token && live.ready) {
+            const message = await this.store.append(marker.session, { role: "user", text: backgroundResultText(live.ready.text) });
+            marker.ready = true;
+            task.status = (task.nextCheckAt || 0) > now ? "deferred" : "queued";
+            task.queueReason = "后台结果已就绪，等待执行名额后续做。";
+            changed = true;
+            this.store.afterCommit(() => {
+              this.suspensions.delete(task.id);
+              live.wait.acknowledge?.();
+              this.runtime.emit("message_end", message, marker.session);
+            });
+          }
           if (task.status === "running" && !this.busy.has(task.id) && !this.runtime.isRunning(session)) {
             this.recover(task, "执行者已退出，修复遗留运行状态；续做前检查外部操作。", now);
             changed = true;
@@ -1924,7 +2003,7 @@ export class Employee {
           const due = t.schedule?.repeat ? t.schedule.dueAt || 0 : 0;
           if (!due || ["stopped", "cancelled", "sealed", "done"].includes(t.status)) continue;
           if (due > now) next = Math.min(next, due);
-          else if (this.busy.has(t.id) || t.status === "running") {
+          else if (this.busy.has(t.id) || t.status === "running" || t.backgroundWait) {
             if (!t.schedule!.queuedFire) {
               t.schedule!.queuedFire = { at: now, eventId: `schedule:${due}` };
               changed = true;
@@ -1939,7 +2018,7 @@ export class Employee {
         const ordered = [...s.tasks].sort((a, b) => rank(a) - rank(b));
         for (const t of ordered) {
           const canStart = ["queued", "deferred", "recovering"].includes(t.status) || (t.status === "failed" && !!t.schedule);
-          if (this.busy.has(t.id) || !canStart)
+          if (this.busy.has(t.id) || !canStart || (t.backgroundWait && !t.backgroundWait.ready))
             continue;
           // 这台设备还没回连（或已待命）：不派发、不换设备、不改到服务端执行。
           const waitClient = t.status === "recovering" ? t.recovery?.waitClient : undefined;
@@ -1951,7 +2030,7 @@ export class Employee {
           if (globalSlots <= 0 || localSlots <= 0) continue;
           if (this.runtime.isRunning(t.side === "computer" ? t.computerSession : t.workSession)) { next = Math.min(next, now + 1000); continue; }
           const computer = t.side === "computer" || t.profile === "computer";
-          if (!computer && t.workspaceWait && writers.has(t.workspaceWait.key) && writers.get(t.workspaceWait.key)!.taskId !== t.id) continue;
+          if (t.workspaceWait && workspaceBusy(writers, t.workspaceWait.key, t.id)) continue;
           if (computer) {
             if ([...this.busy.values()].some((v) => v.computer)) continue;
             if (this.locked || !desk?.available || desk.locked) {
@@ -1986,14 +2065,16 @@ export class Employee {
           this.busy.set(t.id, { computer, session: "" });
           globalSlots--;
           localSlots--;
-          if (!computer && t.workspaceWait) {
+          if (t.workspaceWait) {
             writers.set(t.workspaceWait.key, { taskId: t.id, hold: !!t.workspaceWait.hold });
             delete t.workspaceWait;
           }
           t.queueReason = "";
           t.status = "running";
           t.nextCheckAt = 0;
-          if (t.schedule) {
+          const resumingResult = !!t.backgroundWait;
+          delete t.backgroundWait;
+          if (t.schedule && !resumingResult) {
             t.wake = {
               id: `schedule:${now}`,
               kind: "schedule",
@@ -2031,6 +2112,7 @@ export class Employee {
     let session = "",
       result = "",
       lastReply: Message | undefined,
+      suspension: void | TaskSuspension = undefined,
       error: any;
     let stopMonitor = () => {};
     try {
@@ -2038,6 +2120,7 @@ export class Employee {
         planned = this.task(initial, job.id),
         computer = planned.side === "computer",
         cfg = await this.runtime.config();
+      if (planned.status !== "running") return;
       let scene = computer ? "computer" : "lightweight";
       const notes: string[] = [];
       let lostSession = "";
@@ -2140,6 +2223,7 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
       for (const x of [...attach.images, ...attach.files]) if (x.blobId) await this.store.grantBlob(x.blobId, session);
       // A supplement that landed while this prompt was built still belongs to this run.
       const live = this.task(await this.state(), job.id);
+      if (live.status !== "running") return;
       if (live.supplementPending && (live.answer || "") !== input.answer) {
         const delta = (live.answer || "").startsWith(input.answer) ? (live.answer || "").slice(input.answer.length).trim() : (live.answer || "").trim();
         if (delta) {
@@ -2151,7 +2235,7 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
           });
         }
       }
-      await this.runtime.run(session, prompt, undefined, input, attach);
+      suspension = await this.runtime.run(session, prompt, undefined, input, attach);
       const last = await this.store.lastMessage(session);
       if (last?.role === "assistant" && !last.calls?.length && last.seq! > after) {
         lastReply = last;
@@ -2163,9 +2247,11 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
     } finally {
       stopMonitor();
       this.releaseWorkspace(job.id);
-      await this.update(async (s) => {
+      let parked = false;
+      try {
+        await this.update(async (s) => {
                 const t = s.tasks.find((t) => t.id === job.id);
-                this.busy.delete(job.id);
+                this.store.afterCommit(() => this.busy.delete(job.id));
                 if (!t) return;
                 const computer = job.side === "computer" || job.profile === "computer";
                 const body = lastReply && authored(lastReply) && bodyLength(lastReply) >= BODY_CHARS ? lastReply : undefined;
@@ -2176,6 +2262,29 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                 if (t.status === "running") {
                   if (this.stopping || this.root?.stopping) {
                     t.status = "running";
+                  } else if (suspension && !error && !this.resetting) {
+                    const live: LiveSuspension = { session, token: id("w"), wait: suspension };
+                    t.backgroundWait = { token: live.token, session };
+                    t.status = "deferred";
+                    t.nextCheckAt = 0;
+                    t.queueReason = result = "已让出执行名额，后台结果返回后在原会话续做。";
+                    const notice = await this.store.append(session, { role: "assistant", notice: true, text: result });
+                    this.store.afterCommit(() => {
+                      parked = true;
+                      if (this.stopping || this.resetting || this.deleting) {
+                        live.wait.cancel();
+                        this.runtime.cancel(session);
+                        return;
+                      }
+                      this.suspensions.set(t.id, live);
+                      const ready = (text?: string) => {
+                        if (this.suspensions.get(t.id) !== live) return;
+                        live.ready = { text };
+                        this.schedule();
+                      };
+                      void live.wait.result.then(ready, () => ready());
+                      this.runtime.emit("message_end", notice, session);
+                    });
                   } else if (this.absorbStep(t)) {
                     // 这一步已经结束，才吸收期间送到的事件或被错过的一拍。
                   } else if (t.schedule?.repeat) {
@@ -2247,7 +2356,9 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                     }
                   }
                 }
-              });
+        });
+      } finally { if (!parked) suspension?.cancel(); }
+      if (parked) return;
       const state = await this.state(), task = state.tasks.find((t) => t.id === job.id);
       if (task && taskTabsFinished(task.status)) this.runtime.taskFinished?.(task.id);
       if (session && task) {

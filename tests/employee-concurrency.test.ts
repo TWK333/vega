@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../server/core/store";
@@ -34,6 +35,10 @@ test("a lightweight shell query releases its workspace lease before later model 
     } else {
       assert.equal(id, writer);
       if (model.selection === "p/light") return call("code", "switch_scene", { scene: "coding", message: "验证编码阶段可继续执行" });
+      if (!messages.some(message => message.role === "tool" && message.name === "write")) {
+        assert.equal(engine.employee.writers.size, 0, "entering coding does not reserve a writer");
+        return call("actual-write", "write", { path: "code.txt", content: "verified" });
+      }
       assert([...engine.employee.writers.values()].some(lease => lease.taskId === writer));
     }
     return employee.task(await employee.state(), id).plan?.length
@@ -59,9 +64,17 @@ test("a lightweight shell query releases its workspace lease before later model 
   }
 });
 
-test("ordinary tasks keep progressing while a shared-directory code writer is active, and a blocked writer resumes in its original session without replay", { timeout: 10000 }, async () => {
-  const cwd = await mkdtemp(join(tmpdir(), "vega-parallel-work-"));
+test("a sibling Git worktree and read-only probes run in parallel; an overlapping writer resumes without replay", { timeout: 15000 }, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "vega-parallel-work-")));
+  t.after(() => rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }));
+  const cwd = join(root, "repo"), nested = join(cwd, "nested"), worktree = join(root, "repo-topic");
+  await mkdir(nested, { recursive: true });
+  const git = (...args: string[]) => execFileSync("git", ["-C", cwd, "-c", "core.hooksPath=.git/no-hooks", ...args], { timeout: 5000 });
+  git("init", "-q");
   await writeFile(join(cwd, "input.txt"), "read-only input");
+  git("add", "input.txt");
+  git("-c", "user.name=Vega Test", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture");
+  git("worktree", "add", "--quiet", "--detach", worktree);
   const store = await Store.open(":memory:"), engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
   engine.employee.closed = true;
   await store.put("config", { model: "p/light", scenes: { lightweight: ["p/light"], coding: ["p/code"] }, provider: { p: { api: "openai-completions", baseURL: "https://unused.test", models: { light: { limit: { context: 128000, output: 8192 } }, code: { limit: { context: 128000, output: 8192 } } } } } });
@@ -69,7 +82,7 @@ test("ordinary tasks keep progressing while a shared-directory code writer is ac
   const jobs: Record<string, string> = {}, requests = new Map<string, number>();
   let release!: () => void, entered = false;
   const gate = new Promise<void>(resolve => release = resolve);
-  const add = async (name: string) => { const result = await employee.execute("", { action: "add", kind: "todo", text: name }); jobs[name] = result.value.id; return result.value.id; };
+  const add = async (name: string, directory = cwd) => { const result = await employee.execute("", { action: "add", kind: "todo", text: name, cwd: directory }); jobs[name] = result.value.id; return result.value.id; };
   const until = async (condition: () => unknown, description: string) => {
     for (let index = 0; index < 500; index++) { if (await condition()) return; await sleep(5); }
     throw Error("Task condition not reached: " + description);
@@ -78,22 +91,38 @@ test("ordinary tasks keep progressing while a shared-directory code writer is ac
     const session = await store.session(sessionId!), id = session.taskId!, task = employee.task(await employee.state(), id);
     const attempt = (requests.get(id) || 0) + 1; requests.set(id, attempt);
     assert(attempt <= 15, "task cannot loop on a blocked operation");
-    const successful = (name: string) => messages.some(message => message.role === "tool" && message.name === name && !message.error);
-    if ([jobs.writer, jobs.waiter].includes(id) && model.selection === "p/light") return call(id + "-scene-" + attempt, "switch_scene", { scene: "coding", message: "按授权修改并验证当前工作区，不重放提交" });
+    const receipts = messages.filter(message => message.role === "tool");
+    const successful = (name: string) => receipts.some(message => message.name === name && !message.error);
+    if (id !== jobs.summary && model.selection === "p/light") return call(id + "-scene-" + attempt, "switch_scene", { scene: "coding", message: "按任务范围核对和操作当前工作区" });
     if (id === jobs.writer) {
+      if (!successful("write")) return call("write-once", "write", { path: "shared.txt", content: "A verified" });
       entered = true;
       await Promise.race([gate, new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }))]);
-      if (!successful("write")) return call("write-once", "write", { path: "shared.txt", content: "A verified" });
     } else if (id === jobs.waiter) {
       assert.equal(model.selection, "p/code");
-      if (!successful("read")) return call("read-after-lock", "read", { path: "shared.txt" });
-      const original = messages.findLast(message => message.role === "tool" && message.name === "read")!.text!;
+      if (!receipts.some(message => message.name === "bash")) {
+        // A read-like prefix and a caller-supplied flag do not make arbitrary shell read-only.
+        const command = process.platform === "win32" ? "Get-Location; Set-Content -LiteralPath stamp.txt -Value ran" : "pwd; printf ran > stamp.txt";
+        return call("blocked-bash", "bash", { command, readOnly: true });
+      }
+      if (!successful("read")) return call("read-after-lock", "read", { path: "../shared.txt" });
+      const original = receipts.findLast(message => message.name === "read")!.text!;
       assert(original.includes("A verified"), "resuming a blocked writer must see the previous writer's actual result");
-      if (!successful("edit")) return call("edit-once", "edit", { path: "shared.txt", edits: [{ oldText: "A verified", newText: "A verified + C verified" }] });
-    } else {
-      assert.equal(model.selection, "p/light");
-      if (id === jobs.reader && !successful("read")) return call("read-in-parallel", "read", { path: "input.txt" });
-    }
+      if (!successful("edit")) return call("edit-once", "edit", { path: "../shared.txt", edits: [{ oldText: "A verified", newText: "A verified + C verified" }] });
+    } else if (id === jobs.reader) {
+      assert.equal(model.selection, "p/code");
+      if (!successful("workspace_probe")) return call("probe-in-parallel", "workspace_probe", { paths: ["nested", "input.txt", "missing"] });
+      const probe = JSON.parse(receipts.findLast(message => message.name === "workspace_probe")!.text!);
+      assert.equal(probe.execution, "server");
+      assert.equal(probe.platform, process.platform === "win32" ? "windows" : process.platform);
+      assert.equal(probe.cwd, cwd);
+      assert.deepEqual(probe.directories.map((entry: any) => entry.isDir), [true, false, false]);
+      if (!successful("read")) return call("read-in-parallel", "read", { path: "input.txt" });
+    } else if (id === jobs.topic) {
+      if (!successful("change_working_directory")) return call("enter-worktree", "change_working_directory", { path: worktree });
+      assert.equal(session.cwd, worktree);
+      if (!successful("write")) return call("write-worktree", "write", { path: "shared.txt", content: "linked checkout" });
+    } else assert.equal(model.selection, "p/light");
     return task.plan?.every((step: any) => step.status === "completed") && task.plan.length
       ? call("done", "employee", { action: "complete", deliverableRef: [], text: "verified actual result", summary: "已验证。" })
       : call("plan", "employee", { action: "progress", text: "verified actual result", plan: [{ content: "verify authorized result", status: "completed" }] });
@@ -102,15 +131,21 @@ test("ordinary tasks keep progressing while a shared-directory code writer is ac
     await add("writer");
     engine.employee.closed = false; await engine.employee.drain();
     await until(() => entered, "first writer holds its code phase");
-    await add("reader"); await add("waiter"); await add("summary");
+    await add("reader"); await add("waiter", nested); await add("summary");
     await engine.employee.drain();
     await until(async () => (await employee.state()).tasks.find(task => task.id === jobs.waiter)?.workspaceWait && !employee.busy.has(jobs.waiter), "second writer yields instead of retrying");
     const blocked = employee.task(await employee.state(), jobs.waiter), originalSession = blocked.workSession;
     assert.equal(blocked.status, "queued");
     assert.equal(blocked.recovery, undefined);
     assert.equal(blocked.failures || 0, 0);
-    assert((await store.messages(originalSession)).some(message => message.role === "tool" && message.text?.includes('"status":"queued"')));
+    assert((await store.messages(originalSession)).some(message => message.role === "tool" && message.name === "bash" && message.text?.includes('"status":"queued"')));
+    await assert.rejects(readFile(join(nested, "stamp.txt")), { code: "ENOENT" });
     await until(async () => { const state = await employee.state(); return [jobs.reader, jobs.summary].every((id) => employee.task(state, id).status === "done"); }, "read and summary tasks finish while writer is still active");
+    await add("topic"); await engine.employee.drain();
+    await until(async () => (await employee.findTask(jobs.topic))?.status === "done", "sibling worktree finishes while the original checkout is still locked");
+    assert.equal((await employee.findTask(jobs.topic))?.cwd, worktree);
+    assert.equal(await readFile(join(worktree, "shared.txt"), "utf8"), "linked checkout");
+    assert.equal(await readFile(join(cwd, "shared.txt"), "utf8"), "A verified");
     assert.equal(employee.task(await employee.state(), jobs.writer).status, "running");
     assert.equal(await readFile(join(cwd, "input.txt"), "utf8"), "read-only input");
     release();
@@ -118,12 +153,15 @@ test("ordinary tasks keep progressing while a shared-directory code writer is ac
     assert.equal(employee.task(await employee.state(), jobs.waiter).workSession, originalSession);
     assert.equal(await readFile(join(cwd, "shared.txt"), "utf8"), "A verified + C verified");
     assert.equal(engine.employee.writers.size, 0);
-    assert.equal((await store.sessions()).length, 4);
+    assert.equal((await store.sessions()).length, 5);
     assert.equal((await store.messages(employee.task(await employee.state(), jobs.writer).workSession)).filter(message => message.role === "tool" && message.name === "write").length, 1);
-    assert.equal((await store.messages(originalSession)).filter(message => message.role === "tool" && message.name === "edit").length, 1);
+    const waiterTools = (await store.messages(originalSession)).filter(message => message.role === "tool");
+    assert.equal(waiterTools.filter(message => message.name === "edit").length, 1);
+    assert.equal(waiterTools.filter(message => message.name === "bash").length, 1);
+    await assert.rejects(readFile(join(nested, "stamp.txt")), { code: "ENOENT" });
   } finally {
     engine.employee.closed = true; release(); await engine.close();
     for (let index = 0; index < 100 && employee.busy.size; index++) await sleep(5);
-    await store.close(); await rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    await store.close();
   }
 });

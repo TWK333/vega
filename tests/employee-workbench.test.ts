@@ -709,7 +709,8 @@ test("workspace leases distinguish execution devices and release transient comma
   try {
     const jobs = await Promise.all([task(employee, "client A"), task(employee, "client B"), task(employee, "client A other task")]);
     await employee.update(state => { for (const task of state.tasks) task.status = "running"; });
-    const sessions = await Promise.all(jobs.map(async (job, index) => await store.newSession({ taskId: job.id, employeeId: employee.employeeId, cwd: "/project", localAgent: true, clientId: index === 1 ? "b" : "a", localPlatform: "linux" })));
+    const dirs = ["D:/Projects/Repo", "D:/Projects/Repo", "d:\\projects\\REPO\\src"];
+    const sessions = await Promise.all(jobs.map(async (job, index) => await store.newSession({ taskId: job.id, employeeId: employee.employeeId, cwd: dirs[index], localAgent: true, clientId: index === 1 ? "b" : "a", localPlatform: "windows" })));
     assert.equal(await employee.claimWorkspace(sessions[0]), true);
     assert.equal(await employee.claimWorkspace(sessions[1], true), true);
     assert.equal(await employee.claimWorkspace(sessions[2]), false);

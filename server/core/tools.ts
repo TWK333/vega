@@ -54,17 +54,23 @@ import {
   BASH_YIELD_SECS,
   appendBashOutput,
   backgroundBashMessage,
+  backgroundBashResult,
+  redactBashJob,
+  bashRunning,
   completeBashJob,
   createBashJob,
   pollBash,
 } from "./bash-jobs";
 import { agentTools, isAgentTool } from "./spawn-agent";
+import { BACKGROUND_GRACE_MS, type BackgroundResult } from "./background-result";
+
 export type Outcome = {
   value: any;
   images?: Message["images"];
   error?: boolean;
   stop?: boolean;
   pause?: string;
+  background?: BackgroundResult;
   secret?: string;
   task?: NonNullable<Message["tasks"]>[number];
 };
@@ -84,6 +90,7 @@ const string = { type: "string" },
 export class Tools {
 
   setupAccess?: "provider";
+  yieldBackground = false;
   actorId?: string;
   batchCalls?: Call[];
   batchOutcomes?: Outcome[];
@@ -167,6 +174,9 @@ export class Tools {
     if ([...names].some((n) => APPUSE_TOOLS.has(n))) parts.push(APPUSE_RULES);
     if (names.has("vault_get")) parts.push("[密码本] " + VAULT_USAGE);
     if (ctx.kind === "task") parts.push(EMPLOYEE_TASK_RULES);
+    if (this.yieldBackground && names.has("bash")) parts.push("[后台结果] 有运行时句柄时先推进独立工作；只剩等结果就用一句进度结束本轮，不轮询。运行时短等后自动让出名额，结果回来在原会话续做。没有句柄、只能以后自行核对时才用 task_wait。");
+    if (names.has("workspace_probe")) parts.push("[工作区] 查执行端平台、当前目录或目录是否存在用 workspace_probe，读文件用 read，不占写锁。" +
+      (names.has("change_working_directory") ? "bash 可能写文件，不能当只读探测用。按用户授权创建或复用 worktree 后，单独用 change_working_directory 切到它，后续命令和写锁才按新目录执行；单条命令的 cd / git -C 不改变会话目录。" : ""));
     if ([...names].some((n) => CHROME_TOOLS.has(n)) && this.session.scene !== "computer" && !sceneModels(this.config, "computer").length)
       parts.push("[电脑场景未配置] 设置里没有为 computer 场景选择模型，所以本会话无法进入电脑场景，列出的 chrome_* 工具也无法执行。需要网页/浏览器操作时如实说明“computer 场景未配置模型（需选择支持图片的模型，可与其他场景共用同一个）”，请用户到设置里补上（任务中用 task_ask_user）；这不是浏览器扩展连接问题，不要让用户重连扩展，也不要用 bash 或脚本绕行。");
     if (names.has("switch_scene")) {
@@ -203,6 +213,9 @@ export class Tools {
         { path: string, offset: positive, limit: positive },
         ["path"],
       ),
+      schema("workspace_probe", "Read the bound execution platform, current directory and whether given paths are directories. Does not run a shell or take a workspace write lock.", {
+        paths: { type: "array", maxItems: 8, items: { type: "string", minLength: 1, maxLength: 4096 } },
+      }),
       schema("context_budget", "Estimated remaining context budget.", {}),
       schema(
         "acp_status",
@@ -262,17 +275,17 @@ export class Tools {
         ),
         schema(
           "bash",
-          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout 120s, max 600s. A command still running after 10 seconds is moved to the background and returns jobId immediately so the rest of the turn is not blocked: issue independent short work in the same turn, then continue other work after you have the jobId. **Backgrounded commands are waited on and auto-delivered when you stop issuing new tool calls; bash_poll is usually unnecessary.** Only poll mid-turn when you truly need the result (wait 20–30s; if still running, do other work). detach=true means a long-running service: do not wait and do not auto-deliver at end of turn. Background jobs still honor the total timeout and are killed if the session is cancelled. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; chrome_* run only in the computer scene: switch_scene(scene=computer) first. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
+          "Run development/file commands in session cwd (on the local client for local sessions). Windows uses PowerShell. Default timeout 120s, max 600s. A command still running after 10 seconds is moved to the background and returns jobId immediately so the rest of the turn is not blocked: issue independent short work in the same turn, then continue other work after you have the jobId. **Backgrounded commands are auto-delivered when you stop issuing new tool calls; bash_poll is usually unnecessary.** In a scheduled task, a result not ready after a brief wait suspends the task until ready. Poll only for a one-off observation, not back-to-back. detach=true means a long-running service: do not wait and do not auto-deliver at end of turn. Background jobs still honor the total timeout and are killed if the session is cancelled. If Chrome is not running on the task-bound client, launching its process without a navigation URL is allowed; then check its extension connection with chrome_connection. All webpage interaction MUST use the chrome_* tools through the authorized extension. Web-field fill/type and press Enter via chrome_act are permitted; chrome_* run only in the computer scene: switch_scene(scene=computer) first. NEVER control native mouse, keyboard, windows or focus, or bypass the extension with shell/scripts, Win32/user32, SendInput/SendKeys, UI Automation, AppleScript, external automation, direct CDP/WebDriver, encoded commands, saved scripts, helper programs, MCP or scene changes. If Chrome is running but the extension cannot proceed, or a native dialog is required, STOP and let the user handle it.",
           {
             command: string,
             timeout: positive,
-            detach: { type: "boolean", description: "true = after backgrounding, this turn will not wait and will not auto-deliver the result (long-running service); default waits and auto-delivers at wind-down, no bash_poll needed" },
+            detach: { type: "boolean", description: "true = long-running service, no automatic wait or delivery; by default the runtime delivers background results without bash_poll" },
           },
           ["command"],
         ),
         schema(
           "bash_poll",
-          "Fetch later output from a background bash job. bash moves a command still running after 10 seconds to the background and returns jobId; if it finishes within wait seconds, you get the result and exit code, otherwise the current tail marked running. poll is a one-shot ask, not an await: give wait 20–30 seconds, and if it is still running go do other work; do not poll the same job back-to-back. Background job records are kept for 60 seconds after timeout.",
+          "Fetch later output from a background bash job. bash moves a command still running after 10 seconds to the background and returns jobId. Use for a one-off observation, not to repeatedly wait for results. In a scheduled task, a lone poll of an auto-delivered job with wait >= 30s keeps the slot for up to 30s, then suspends the task if the job is still running. Explicit short polls and detached jobs return the result or current tail. Background job records are kept for 60 seconds after timeout.",
           {
             job_id: { type: "integer", description: "jobId returned by bash" },
             wait: { type: "integer", description: "seconds to wait, default 30; more than 60 is usually just idle waiting unless you truly have nothing else to do" },
@@ -534,6 +547,26 @@ export class Tools {
     }
     if (call.name === "read")
       return this.read(a);
+    if (call.name === "workspace_probe") {
+      const { paths = [] } = checkArgs(definition.parameters, a);
+      assert(paths.every((path: string) => !path.includes("\0")), "Invalid directory path");
+      const agent = this.agent(), cwd = this.session.cwd;
+      const directories = await Promise.all(paths.map(async (input: string) => {
+        if (agent) {
+          const result = await this.engine.localAgents.request(agent, "file", { op: "stat", cwd, path: input }, this.signal);
+          assert(typeof result.path === "string" && typeof result.isDir === "boolean", "Invalid local directory result");
+          return { input, path: result.path, isDir: result.isDir };
+        }
+        const path = resolve(cwd, input);
+        try { return { input, path, isDir: (await (this.cloud?.fs || filesystem).stat(path)).isDirectory() }; }
+        catch (error: any) {
+          if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
+          return { input, path, isDir: false };
+        }
+      }));
+      const platform = agent?.platform || (process.platform === "win32" ? "windows" : process.platform);
+      return { value: { platform, execution: agent ? "client" : "server", cwd, directories } };
+    }
     if (a.path === "sqlite:config" && call.name === "write") {
       assert(
         this.setupAccess && !this.session.readOnly,
@@ -554,9 +587,21 @@ export class Tools {
           );
       return { value: await this.engine.saveConfig(next) };
     }
+    if (call.name === "bash") {
+      assert(typeof a.command === "string" && a.command.trim(), "command required");
+      assertShellCommand(a.command);
+      // A command rejected by the execution binding is not a write attempt on this side.
+      if (this.session.employeeId) {
+        const side = await this.engine.handoffs.commandSide(this.session.employeeId, a.command);
+        const where = this.session.localAgent ? "local" : "cloud";
+        if (side && side !== where)
+          throw new Error(`这条命令固定在${side === "local" ? "本机" : "云端"}执行，而任务当前执行权在${where === "local" ? "本机" : "云端"}；本步未执行。请先交接执行权，不把同一命令放到另一端跑。`);
+      }
+    }
     if (["write", "edit", "bash"].includes(call.name) && this.session.employeeId && this.session.taskId) {
       const employee = await this.engine.employeeFor(this.session);
-      if (!await employee.claimWorkspace(this.session, this.session.scene === "coding" || call.name !== "bash")) return { value: { status: "queued", reason: employee.task(await employee.state(), this.session.taskId).queueReason || "任务已暂停，本步未执行。", next: "System resumes the same task after the workspace is released; recheck current files before continuing, never replay completed operations." }, error: true, stop: true };
+      if (!await employee.claimWorkspace(this.session, this.session.scene === "coding" || call.name !== "bash")) return { value: { status: "queued", reason: (await employee.findTask(this.session.taskId))?.queueReason || "任务已暂停，本步未执行。", next: "System resumes the same task after the workspace is released; recheck current files before continuing, never replay completed operations." }, error: true, stop: true };
+      this.signal.throwIfAborted();
     }
     if (["write", "edit"].includes(call.name)) {
       const agent = this.agent();
@@ -568,21 +613,24 @@ export class Tools {
     }
     if (call.name === "bash") {
       const agent = this.agent();
-      // 命名命令可以固定在某一端：执行权不在那一端时明确拒绝，不在另一端跑同一命令。
-      if (this.session.employeeId) {
-        const side = await this.engine.handoffs.commandSide(this.session.employeeId, String(a.command || ""));
-        const where = this.session.localAgent ? "local" : "cloud";
-        if (side && side !== where)
-          throw new Error(`这条命令固定在${side === "local" ? "本机" : "云端"}执行，而任务当前执行权在${where === "local" ? "本机" : "云端"}；本步未执行。请先交接执行权，不把同一命令放到另一端跑。`);
+      const outcome = agent
+        ? await localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal, this.session.id, this.emit)
+        : await shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.sshEnvironment(String(a.command)), this.session.id);
+      if (outcome.value?.running) {
+        const redact = this.engine.redactors.get(this.session.id);
+        if (redact) redactBashJob(this.session.id, outcome.value.jobId, text => redact.text(text));
       }
-      if (agent) return localShell(this.engine.localAgents, agent, this.session.cwd, a, this.signal, this.session.id, this.emit);
-      return shell(this.session.cwd, a, this.signal, this.emit, this.cloud, await this.sshEnvironment(String(a.command)), this.session.id);
+      return outcome;
     }
     if (call.name === "bash_poll") {
       const jobId = a.job_id ?? a.jobId;
       assert(Number.isInteger(jobId) && jobId >= 1, "job_id required");
       const wait = a.wait ?? 30;
       assert(Number.isInteger(wait) && wait >= 1 && wait <= 600, "wait must be 1–600");
+      if (this.yieldBackground && this.batchCalls?.length === 1 && wait * 1000 >= BACKGROUND_GRACE_MS) {
+        const background = backgroundBashResult(this.session.id, jobId, true);
+        if (background) return { value: { running: true, jobId, message: "已交给运行时短等；若结果仍未就绪，挂起后自动交付。" }, background };
+      }
       const result = await pollBash(this.session.id, jobId, wait, this.signal);
       return { value: result.status === "running" ? { running: true, jobId: result.jobId, output: result.text } : { jobId: result.jobId, output: result.text, exitCode: result.exitCode }, error: result.status === "finished" && !!result.error };
     }
@@ -600,9 +648,13 @@ export class Tools {
         ? await localCwdExists(this.engine.localAgents, agent, this.session.cwd, a.path, this.signal)
         : this.cloud ? await this.cloud.cwd(resolve(this.session.cwd, a.path)) : resolve(this.session.cwd, a.path);
       if (!agent && !this.cloud) assert((await stat(path)).isDirectory(), "Existing cwd directory required");
-      if (this.session.employeeId && this.session.taskId && path !== this.session.cwd) (await this.engine.employeeFor(this.session)).releaseWorkspace(this.session.taskId);
-      this.session.cwd = path;
-      await this.engine.store.saveSession(this.session);
+      if (path !== this.session.cwd) {
+        const taskId = this.session.taskId, employee = this.session.employeeId && taskId ? await this.engine.employeeFor(this.session) : undefined;
+        assert(!employee || !bashRunning(this.session.id), "当前目录仍有后台命令运行，请等它结束后再切换工作目录；本步未执行。");
+        await this.engine.store.saveSession({ ...this.session, cwd: path });
+        this.session.cwd = path;
+        if (employee) employee.releaseWorkspace(taskId!);
+      }
       return { value: { cwd: path } };
     }
     if (call.name === "compress") {
@@ -981,9 +1033,11 @@ export class Tools {
     assert(!content.includes("\0"), "Not a UTF-8 text file");
     return { value: { path, ...textSlice(content, a.offset, a.limit) } };
   }
-  async close() {
-    try { await this.keys.clear(); }
-    finally { if (this.signal.aborted) await this.engine.releaseSession(this.session.id); }
+  async close(workspaceIdle?: Promise<void>) {
+    try {
+      if (workspaceIdle) void workspaceIdle.then(() => this.keys.clear()).catch(() => {});
+      else await this.keys.clear();
+    } finally { if (this.signal.aborted) await this.engine.releaseSession(this.session.id); }
   }
 }
 export async function mutate(cwd: string, name: string, a: Obj, fs = filesystem) {
@@ -1212,6 +1266,7 @@ export async function shell(
     timeoutSecs: timeout,
     startedAt: started,
     kill: abort,
+    exited: closed,
     output,
     truncated,
   });

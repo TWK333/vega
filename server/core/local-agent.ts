@@ -7,6 +7,7 @@ import {
   consumeBashJob,
   completeBashJob,
   createBashJob,
+  retainRemoteBashExecution,
 } from "./bash-jobs";
 import type { Auth, Principal } from "./auth";
 
@@ -286,11 +287,20 @@ export async function localShell(hub: LocalAgents, agent: Agent, cwd: string, a:
     session,
     waitable: !detach,
     timeoutSecs: timeout,
-    kill: () => { void localShellKill(hub, agent, String(job.id), AbortSignal.timeout(15000)).catch(() => {}); },
+    kill: () => localShellKill(hub, agent, String(job.id), AbortSignal.timeout(15000)),
     pollRemote: (waitSecs, pollSignal) => localShellPoll(hub, agent, String(job.id), waitSecs, pollSignal || signal),
   });
-  const r = await hub.request(agent, "exec", { cwd, command: a.command, timeout, yieldSecs: 10, jobId: String(job.id), detach }, signal);
+  let r: Obj;
+  try {
+    r = await hub.request(agent, "exec", { cwd, command: a.command, timeout, yieldSecs: 10, jobId: String(job.id), detach }, signal);
+  } catch (error) {
+    // The request may have reached the client even if no launch result came back.
+    retainRemoteBashExecution(job);
+    consumeBashJob(job);
+    throw error;
+  }
   if (r.running) {
+    retainRemoteBashExecution(job);
     appendBashOutput(job, String(r.output || ""), !!r.truncated);
     return {
       value: {
@@ -311,7 +321,8 @@ export async function localShellPoll(hub: LocalAgents, agent: Agent, jobId: stri
   return { running: !!r.running, output: r.output as string | undefined, truncated: !!r.truncated, exitCode: r.exitCode as number | undefined, error: r.error ? String(r.error) : undefined };
 }
 export async function localShellKill(hub: LocalAgents, agent: Agent, jobId: string, signal: AbortSignal) {
-  try { await hub.request(agent, "exec_kill", { jobId }, signal); } catch { /* best effort */ }
+  const result = await hub.request(agent, "exec_kill", { jobId }, signal);
+  return !result.running && typeof result.exitCode === "number";
 }
 export async function localRead(hub: LocalAgents, agent: Agent, cwd: string, path: string, signal: AbortSignal, workspaceOnly = false) {
   const r = await hub.request(agent, "file", { op: workspaceOnly ? "read_workspace" : "read", cwd, path }, signal);

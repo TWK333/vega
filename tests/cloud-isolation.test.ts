@@ -97,6 +97,9 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
   await tools.execute({ id: "w", name: "write", arguments: { path: "test.txt", content: "before\n" } }, {} as any);
   await tools.execute({ id: "e", name: "edit", arguments: { path: "test.txt", edits: [{ oldText: "before", newText: "after" }] } }, {} as any);
   assert.match((await tools.read({ path: "test.txt" })).value.text, /after/);
+  const probe = await tools.execute({ id: "probe", name: "workspace_probe", arguments: { paths: [".", "unknown"] } }, {} as any);
+  assert.deepEqual(probe.value.directories.map((entry: any) => entry.isDir), [true, false]);
+  await assert.rejects(tools.execute({ id: "outside-probe", name: "workspace_probe", arguments: { paths: [ids.bob.cwd] } }, {} as any), { code: "EACCES" });
   await store.saveSession({ ...session, id: "bob-archive", ownerId: "bob", cwd: ids.bob.cwd });
   const foreignBlob = await store.blob("image/png", Buffer.from("private-bob-image"));
   await store.grantBlob(foreignBlob, "bob-archive");

@@ -127,6 +127,16 @@ test("timeout watchdog marks the job expired and poll reports the timeout text",
   assert.match(polled.text, /命令超过 1s 未结束，已终止/);
 });
 
+test("poll settles a job past its deadline even before the watchdog callback", async () => {
+  const session = "s-poll-deadline";
+  let killed = false;
+  const job = createBashJob({ session, waitable: true, startedAt: Date.now() - 2_000, timeoutSecs: 1, kill: () => { killed = true; } });
+  const polled = await pollBash(session, job.id, 1);
+  assert.equal(polled.status, "finished");
+  assert.match(polled.text, /命令超过 1s/);
+  assert.equal(killed, true);
+});
+
 test("bash_poll is one-shot: a still-running job is returned after the wait, not awaited to completion", async () => {
   const session = "s-poll";
   const job = createBashJob({ session, waitable: true, timeoutSecs: 30, kill: () => {} });
@@ -141,7 +151,7 @@ test("bash_poll is one-shot: a still-running job is returned after the wait, not
 test("backgroundBashMessage distinguishes detach from auto-delivered jobs", () => {
   const wait = backgroundBashMessage(3, 120, false);
   assert.match(wait, /job_id=3/);
-  assert.match(wait, /本轮收尾时运行时会替你等完并交回结果/);
+  assert.match(wait, /只剩等待时，结束本轮即可自动收到结果/);
   assert.doesNotMatch(wait, /不会自动交付结果/);
   const detached = backgroundBashMessage(4, 120, true);
   assert.match(detached, /detach 的长驻任务/);

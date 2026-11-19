@@ -90,6 +90,26 @@ test("one account can hold several connected devices, and each operation goes on
   assert.equal(hub.list("bob").length, 1);
 });
 
+test("a workspace probe uses only file stat on the selected Windows client", async (t) => {
+  const jobs: any[] = [], otherJobs: any[] = [], store = await Store.open(":memory:"), hub = new LocalAgents();
+  t.after(async () => { hub.close(); await store.close(); });
+  hub.connect("alice", details, wire(jobs, details.instance, job => hub.result("alice", {
+    id: job.id, instance: details.instance, result: { path: job.args.path, isDir: job.args.path === "D:/" },
+  })));
+  const other = { ...details, clientId: "e".repeat(32), instance: "b".repeat(32) };
+  hub.connect("alice", other, wire(otherJobs, other.instance));
+  const session = await store.newSession({ ownerId: "alice", cwd: details.cwd, localAgent: true, clientId: details.clientId, localPlatform: "windows" });
+  const tools = await Tools.create({ store, localAgents: hub, mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, idle(), () => {});
+  const result = await tools.execute({ id: "probe", name: "workspace_probe", arguments: { paths: ["D:/", "E:/"] } }, {} as any);
+  assert.equal(result.value.platform, "windows");
+  assert.equal(result.value.cwd, details.cwd);
+  assert.equal(result.value.execution, "client");
+  assert.deepEqual(result.value.directories.map((entry: any) => entry.isDir), [true, false]);
+  assert.equal(jobs.length, 2);
+  assert(jobs.every(({ data }) => data.op === "file" && data.args.op === "stat" && data.args.cwd === details.cwd));
+  assert.equal(otherJobs.length, 0);
+});
+
 test("unbound historical local sessions pause instead of guessing which computer to use", async () => {
   const store = await Store.open(":memory:"), hub = new LocalAgents();
   try {

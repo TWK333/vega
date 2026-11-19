@@ -1,4 +1,5 @@
-/** Background bash jobs: 10s yield, poll, end-of-turn auto-delivery. Semantics match nova tools.rs. */
+/** Background bash jobs: 10s yield, explicit polls and automatic result delivery. */
+import type { BackgroundResult } from "./background-result";
 
 export const BASH_YIELD_SECS = 10;
 export const BASH_JOB_KEEP_MS = 60_000;
@@ -22,7 +23,10 @@ export type BashJob = {
   cancelled: boolean;
   expired: boolean;
   dropped: boolean;
-  kill: () => void;
+  polling?: boolean;
+  releaseExecution?: () => void;
+  redact?: (text: string) => string;
+  kill: () => void | Promise<boolean>;
   /** Local-client poll; when set, the process lives on the client. */
   pollRemote?: (
     waitSecs: number,
@@ -33,42 +37,67 @@ export type BashJob = {
 type Waiter = () => void;
 
 const jobs = new Map<number, BashJob>();
-const waiters = new Map<number, Waiter[]>();
+const waiters = new Map<number, Set<Waiter>>();
+const executions = new Map<string, Set<Promise<void>>>();
 let seq = 1;
+
+function trackExecution(session: string, exited: Promise<void>) {
+  const active = executions.get(session) || new Set<Promise<void>>();
+  executions.set(session, active);
+  active.add(exited);
+  const remove = () => { active.delete(exited); if (!active.size) executions.delete(session); };
+  void exited.then(remove, remove);
+}
+
+export function bashWorkspaceIdle(session: string) {
+  const active = executions.get(session);
+  return active?.size ? Promise.allSettled(active).then(() => {}) : undefined;
+}
+
+export const bashExecutionSessions = () => executions.keys();
+
+function killJob(job: BashJob) {
+  try { void job.kill()?.then(confirmed => { if (confirmed) job.releaseExecution?.(); }, () => {}); }
+  catch { /* already gone */ }
+}
 
 function notify(id: number) {
   const list = waiters.get(id);
-  if (!list?.length) return;
+  if (!list?.size) return;
   waiters.delete(id);
   for (const fn of list) fn();
 }
 
 function subscribe(id: number, fn: Waiter) {
-  const list = waiters.get(id) || [];
-  list.push(fn);
+  const list = waiters.get(id) || new Set<Waiter>();
+  list.add(fn);
   waiters.set(id, list);
+  return () => {
+    list.delete(fn);
+    if (!list.size && waiters.get(id) === list) waiters.delete(id);
+  };
 }
 
 function gc(now = Date.now()) {
   for (const [id, job] of jobs) {
     if (now < job.deadline + BASH_JOB_KEEP_MS) continue;
     job.dropped = true;
-    if (!job.done) {
-      try { job.kill(); } catch { /* already gone */ }
-    }
+    if (!job.done) killJob(job);
     jobs.delete(id);
     notify(id);
   }
 }
 
+function expireJob(job: BashJob) {
+  if (terminal(job)) return;
+  job.expired = true;
+  killJob(job);
+  notify(job.id);
+}
+
 function watchdog(job: BashJob) {
   const delay = Math.max(0, job.deadline - Date.now());
-  const timer = setTimeout(() => {
-    if (job.dropped || job.done) return;
-    job.expired = true;
-    try { job.kill(); } catch { /* already gone */ }
-    notify(job.id);
-  }, delay);
+  const timer = setTimeout(() => expireJob(job), delay);
   timer.unref?.();
 }
 
@@ -77,20 +106,22 @@ export function createBashJob(opts: {
   waitable: boolean;
   timeoutSecs: number;
   startedAt?: number;
-  kill: () => void;
+  kill: BashJob["kill"];
+  exited?: Promise<void>;
   pollRemote?: BashJob["pollRemote"];
   output?: string;
   truncated?: boolean;
 }): BashJob {
   gc();
   const timeoutSecs = Math.max(1, Math.min(600, opts.timeoutSecs | 0));
+  const startedAt = opts.startedAt ?? Date.now();
   const job: BashJob = {
     id: seq++,
     session: opts.session,
     waitable: opts.waitable,
-    startedAt: opts.startedAt ?? Date.now(),
+    startedAt,
     timeoutSecs,
-    deadline: Date.now() + timeoutSecs * 1000,
+    deadline: startedAt + timeoutSecs * 1000,
     output: opts.output || "",
     truncated: !!opts.truncated,
     done: false,
@@ -101,8 +132,20 @@ export function createBashJob(opts: {
     pollRemote: opts.pollRemote,
   };
   jobs.set(job.id, job);
+  if (opts.exited) trackExecution(job.session, opts.exited);
   watchdog(job);
   return job;
+}
+
+export function retainRemoteBashExecution(job: BashJob) {
+  let resolveExit!: () => void;
+  const exited = new Promise<void>(resolve => { resolveExit = resolve; });
+  // shortcut: without an exit ack, keep the workspace through the client's hard timeout and reap allowance; replace the estimate when clients can push exit events.
+  const releaseAt = setTimeout(resolveExit, (job.timeoutSecs + 5) * 1000);
+  releaseAt.unref?.();
+  job.releaseExecution = () => { clearTimeout(releaseAt); resolveExit(); };
+  trackExecution(job.session, exited);
+  if (job.cancelled || job.expired) killJob(job);
 }
 
 export function bashJob(id: number) {
@@ -126,6 +169,7 @@ export function completeBashJob(
   if (result.truncated) job.truncated = true;
   if (result.exitCode != null) job.exitCode = result.exitCode;
   if (result.error != null) job.error = result.error;
+  job.releaseExecution?.();
   notify(job.id);
 }
 
@@ -163,6 +207,7 @@ export function hasPendingBash(session: string) {
 
 /** A yielded command is still running, so the workspace must not be checkpointed yet. */
 export function bashRunning(session: string) {
+  if (executions.has(session)) return true;
   for (const job of jobs.values())
     if (job.session === session && !job.dropped && !job.done && !job.cancelled && !job.expired) return true;
   return false;
@@ -198,34 +243,22 @@ function runningText(id: number, tail: string) {
   return text;
 }
 
-function takeJob(session: string, id: number): BashJob {
-  const job = jobs.get(id);
-  if (!job) throw new Error(`没有后台任务 ${id}：可能已结束并被清理，或不属于本会话`);
-  if (job.session !== session) throw new Error(`后台任务 ${id} 不属于本会话`);
-  jobs.delete(id);
-  return job;
-}
+const terminal = (job: BashJob) => job.done || job.cancelled || job.expired || job.dropped;
 
-function putJob(job: BashJob) {
-  if (!job.dropped) jobs.set(job.id, job);
-}
-
-async function waitLocal(job: BashJob, waitSecs: number, signal?: AbortSignal) {
-  const limit = Math.min(Math.max(1, waitSecs || 30), 600) * 1000;
-  const until = Date.now() + Math.min(limit, Math.max(0, job.deadline - Date.now()));
-  while (Date.now() < until && !job.done && !job.cancelled && !job.expired && !signal?.aborted) {
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, 50);
-      timer.unref?.();
-      const done = () => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", done);
-        resolve();
-      };
-      subscribe(job.id, done);
-      signal?.addEventListener("abort", done, { once: true });
-    });
-  }
+function waitForChange(job: BashJob, ms: number, signal?: AbortSignal) {
+  return new Promise<void>(resolve => {
+    const done = () => {
+      clearTimeout(timer);
+      unsubscribe();
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    timer.unref?.();
+    const unsubscribe = subscribe(job.id, done);
+    signal?.addEventListener("abort", done, { once: true });
+    if (signal?.aborted || terminal(job)) done();
+  });
 }
 
 export async function pollBash(
@@ -233,50 +266,37 @@ export async function pollBash(
   id: number,
   waitSecs = 30,
   signal?: AbortSignal,
+  consume = true,
 ): Promise<BashPoll> {
-  const job = takeJob(session, id);
-  const finish = (text: string, error?: boolean): BashPoll => {
-    job.dropped = true;
-    return { status: "finished", text, jobId: id, exitCode: job.exitCode, error };
-  };
+  const job = jobs.get(id);
+  if (!job || job.polling) throw new Error(`没有可查询的后台任务 ${id}：可能正被读取、已清理，或不属于本会话`);
+  if (job.session !== session) throw new Error(`后台任务 ${id} 不属于本会话`);
+  job.polling = true;
   try {
-    if (job.cancelled) return finish(cancelText(job), true);
-    if (job.expired) return finish(timeoutText(job), true);
-    if (job.done) {
-      const error = job.exitCode != null ? job.exitCode !== 0 || !!job.error : !!job.error;
-      return finish(job.error && !job.output ? job.error : formatOutput(job), error);
-    }
-    if (job.pollRemote) {
-      const wait = Math.min(Math.max(1, waitSecs || 30), 600);
+    if (Date.now() >= job.deadline) expireJob(job);
+    const wait = Math.min(Math.max(1, waitSecs || 30), 600);
+    if (!terminal(job) && job.pollRemote) {
       const remaining = Math.max(1, Math.ceil((job.deadline - Date.now()) / 1000));
       const result = await job.pollRemote(Math.min(wait, remaining), signal);
-      if (result.output != null) job.output = result.output;
-      if (result.truncated) job.truncated = true;
-      if (result.error) job.error = result.error;
-      if (result.exitCode != null) job.exitCode = result.exitCode;
-      if (job.cancelled) return finish(cancelText(job), true);
-      if (job.expired) return finish(timeoutText(job), true);
-      if (!result.running) {
-        job.done = true;
-        const error = (result.exitCode != null && result.exitCode !== 0) || !!result.error;
-        return finish(result.error && !job.output ? result.error : formatOutput(job), error);
+      if (!result.running) completeBashJob(job, result);
+      else {
+        if (result.output != null) job.output = result.output;
+        if (result.truncated) job.truncated = true;
       }
-      putJob(job);
-      return { status: "running", text: runningText(id, job.output.slice(-4000)), jobId: id };
+    } else {
+      const until = Math.min(job.deadline, Date.now() + wait * 1000);
+      while (!terminal(job) && !signal?.aborted && Date.now() < until)
+        await waitForChange(job, until - Date.now(), signal);
     }
-    await waitLocal(job, waitSecs, signal);
-    if (job.cancelled) return finish(cancelText(job), true);
-    if (job.expired) return finish(timeoutText(job), true);
-    if (job.done) {
-      const error = job.exitCode != null ? job.exitCode !== 0 || !!job.error : !!job.error;
-      return finish(formatOutput(job), error);
-    }
-    putJob(job);
-    return { status: "running", text: runningText(id, job.output.slice(-4000)), jobId: id };
-  } catch (e: any) {
-    if (!job.done && !job.dropped) putJob(job);
-    throw e;
-  }
+    // When the poll timer beats the watchdog, returning "running" past the deadline would spin the waiter and starve the watchdog.
+    if (Date.now() >= job.deadline) expireJob(job);
+    const safe = job.redact || ((text: string) => text);
+    if (!terminal(job)) return { status: "running", text: safe(runningText(id, job.output.slice(-4000))), jobId: id };
+    const text = job.cancelled ? cancelText(job) : job.expired ? timeoutText(job) : job.error && !job.output ? job.error : formatOutput(job);
+    const error = job.cancelled || job.expired || !!job.error || (job.exitCode != null && job.exitCode !== 0);
+    if (consume && !signal?.aborted) consumeBashJob(job);
+    return { status: "finished", text: safe(text), jobId: id, exitCode: job.exitCode, error };
+  } finally { job.polling = false; }
 }
 
 /** End-of-turn delivery: wait for the earliest waitable job; one job per call, like nova. */
@@ -287,30 +307,51 @@ export async function awaitPendingBash(
 ): Promise<string | undefined> {
   const id = pendingBash(session);
   if (id == null) return;
+  const job = jobs.get(id)!;
+  return readReceipt(job, 1, signal, interrupted, true);
+}
+
+async function readReceipt(job: BashJob, wait: number, signal?: AbortSignal, interrupted?: () => boolean, consume = false) {
+  const { id, session } = job;
   const others = pendingBashAll(session).length - 1;
-  const note = others > 0 ? `（还有 ${others} 个后台任务在跑，收尾时继续交付）` : "";
-  while (true) {
-    if (signal?.aborted || interrupted?.()) return;
-    let done: BashPoll;
+  const note = others > 0 ? `（还有 ${others} 个后台任务结果未交付）` : "";
+  while (!signal?.aborted && !interrupted?.()) {
     try {
-      done = await pollBash(session, id, 1, signal);
+      const done = await pollBash(session, id, wait, signal, consume);
+      if (signal?.aborted) return;
+      if (done.status === "finished") {
+        return done.error && done.exitCode === undefined
+          ? `[后台任务 ${id} 未能取回结果] ${done.text}`
+          : `[后台任务 ${id} ${done.error ? "执行失败" : "已完成"}] exit=${done.exitCode ?? (done.error ? -1 : 0)}${note}\n${done.text}`;
+      }
     } catch (e: any) {
-      return `[后台任务 ${id} 已结束] ${e.message || e}`;
-    }
-    if (signal?.aborted) return;
-    if (done.status === "finished") {
-      return done.error && done.exitCode === undefined
-        ? `[后台任务 ${id} 未能取回结果] ${done.text}`
-        : `[后台任务 ${id} ${done.error ? "执行失败" : "已完成"}] exit=${done.exitCode ?? (done.error ? -1 : 0)}${note}\n${done.text}`;
+      if (signal?.aborted) return;
+      if (consume) consumeBashJob(job);
+      const text = String(e.message || e);
+      return `[后台任务 ${id} 未能取回结果；先核对实际状态，不要重跑] ${job.redact?.(text) ?? text}`;
     }
   }
 }
 
+export function backgroundBashResult(session: string, id = pendingBash(session), runningOnly = false): BackgroundResult | undefined {
+  const job = id == null ? undefined : jobs.get(id);
+  if (!job?.waitable || job.session !== session || (runningOnly && terminal(job))) return;
+  return {
+    wait: signal => readReceipt(job, 30, signal),
+    acknowledge: () => consumeBashJob(job),
+  };
+}
+
+export function redactBashJob(session: string, id: number, redact: (text: string) => string) {
+  const job = jobs.get(id);
+  if (job?.session === session) job.redact = redact;
+}
+
 export function cancelSessionBash(session: string) {
   for (const job of jobs.values()) {
-    if (job.session !== session) continue;
+    if (job.session !== session || job.done || job.cancelled) continue;
     job.cancelled = true;
-    try { job.kill(); } catch { /* already gone */ }
+    killJob(job);
     notify(job.id);
   }
 }
@@ -319,7 +360,7 @@ export function backgroundBashMessage(id: number, timeoutSecs: number, detach: b
   let text = `命令超过 ${BASH_YIELD_SECS}s 仍未结束，已转到后台：job_id=${id}。${
     detach
       ? "这是 detach 的长驻任务，本轮不会等它，也不会自动交付结果。"
-      : "现在先处理不依赖它的工作；本轮收尾时运行时会替你等完并交回结果，不必轮询 bash_poll（中途确实要结果再 bash_poll，wait 20–30 秒）。"
+      : "现在先处理不依赖它的工作；只剩等待时，结束本轮即可自动收到结果，无需轮询 bash_poll。调度任务若短等后仍未就绪，会挂起并让出执行名额。"
   }后台仍受 timeout=${timeoutSecs}s 限制，到点强杀，会话被取消时同样被杀。`;
   if (tail.trim()) text += "\n--- 已有输出尾部 ---\n" + tail;
   return text;

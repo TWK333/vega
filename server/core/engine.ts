@@ -17,7 +17,8 @@ import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
 import { EMPLOYEE_CHAT_RULES, EMPLOYEE_CONTINUITY_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, expandSkillCommand, steerPrompt, clampPromptCacheKey, BOOST } from "./prompt";
 import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, isAgentTool, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
-import { awaitPendingBash, bashRunning, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished } from "./bash-jobs";
+import { awaitPendingBash, backgroundBashResult, bashExecutionSessions, bashRunning, bashWorkspaceIdle, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished } from "./bash-jobs";
+import { BACKGROUND_GRACE_MS, backgroundResultText, type BackgroundResult, type TaskSuspension } from "./background-result";
 import { EventEmitter } from "node:events";
 import { rm, stat } from "node:fs/promises";
 import { keyDir } from "./key-files";
@@ -137,15 +138,14 @@ export type AgentEvent = {
   taskId?: string;
   data?: any;
 };
+type TurnState = { control: AbortController; steer: Message[]; context?: Context; wakeBackground?: () => void };
 export class Engine {
   events = new EventEmitter();
-  active = new Map<
-    string,
-    { control: AbortController; steer: Message[]; context?: Context }
-  >();
+  active = new Map<string, TurnState>();
   private chatSubmissions = new Map<string, { message: Message; done: Promise<void> }>();
   redactors = new Map<string, Redactor>();
   providers = new Providers();
+  readonly backgroundResults: ((session: string) => BackgroundResult | undefined)[] = [backgroundBashResult];
   employee: Employee;
   /** 任务执行权调度：本地客户端与云端之间的交接、检查点与回传。 */
   handoffs!: TaskHandoffs;
@@ -191,9 +191,9 @@ export class Engine {
   }
   async clientInUse(clientId: string) {
     if (this.relay.inUse(clientId)) return true;
-    for (const key of [...this.active.keys(), ...this.fire.running.keys()]) {
-      const session = await this.store.session(key);
-      if (session.localAgent && session.clientId === clientId) return true;
+    for (const key of new Set([...this.active.keys(), ...this.fire.running.keys(), ...bashExecutionSessions()])) {
+      const session = await this.store.session(key).catch(() => undefined);
+      if (session?.localAgent && session.clientId === clientId) return true;
     }
     return false;
   }
@@ -363,7 +363,7 @@ export class Engine {
       return true;
     });
     const runtime: EmployeeRuntime = {
-      run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal),
+      run: (s, text, signal, taskInput, attach) => this.run(s, { role: "user", text, taskInput, images: attach?.images?.length ? attach.images : undefined, files: attach?.files?.length ? attach.files : undefined }, undefined, signal, true),
       cancel: (s) => this.cancel(s),
       isRunning: (s) => this.active.has(s),
       steer: (session, message) => this.steer(session, message),
@@ -414,7 +414,7 @@ export class Engine {
       employees: () => this.employee.all(),
       employeeFor: (employeeId) => this.employee.for(employeeId),
       agents: this.localAgents,
-      isRunning: (session) => !!session && (this.active.has(session) || this.fire.running.has(session)),
+      isRunning: (session) => !!session && (this.active.has(session) || this.fire.running.has(session) || bashRunning(session)),
       cloud: (ownerId) => ownerId ? cloudFor({ ownerId }) : undefined,
       browsers: {
         local: (session) => this.localBrowsers.get(session),
@@ -586,6 +586,7 @@ export class Engine {
     assert(run, "Session not running");
     assert(run.steer.length < 16, "Steer queue full");
     run.steer.push({ ...m, role: "user" });
+    run.wakeBackground?.();
   }
   /** A work supplement already present in a persisted taskInput must not be steered again. */
   private async admitWorkSteer(session: Session, message: Message) {
@@ -651,10 +652,10 @@ export class Engine {
   }
   async close() {
     this.closing = true;
+    this.employee.close();
     await this.taskTabs.close();
     this.localAgents.close();
     await this.fire.close();
-    this.employee.close();
     for (const run of this.active.values())
       run.control.abort(Error("Server shutting down"));
     while (this.active.size) await sleep(25);
@@ -683,7 +684,11 @@ export class Engine {
     employee.deleting = true;
     try {
       await beforeRemove();
-      for (const session of sessions) await this.releaseSession(session.id);
+      employee.cancelSuspensions();
+      for (const session of sessions) {
+        this.cancel(session.id);
+        await this.releaseSession(session.id);
+      }
       // Browser profile is per owner; deleting one employee must not wipe siblings' shared Chromium.
       await this.store.transaction(async () => {
                 for (const session of sessions) {
@@ -711,6 +716,7 @@ export class Engine {
     try {
       // Every chat and task session of an employee carries its employeeId.
       const sessions = async () => await this.store.sessionsBy("employee", key);
+      employee.cancelSuspensions();
       // Same abort as 停止; keep cancelling until every run (including one that was just starting) has exited.
       for (const deadline = Date.now() + 15000; employee.busy.size || (await sessions()).some((session) => this.active.has(session.id));) {
         for (const run of employee.busy.values()) if (run.session) this.cancel(run.session);
@@ -719,7 +725,10 @@ export class Engine {
         await sleep(25);
       }
       const chatId = (await employee.state()).chatSession, work = (await sessions()).filter((session) => session.id !== chatId);
-      for (const session of work) await this.releaseSession(session.id);
+      for (const session of work) {
+        this.cancel(session.id);
+        await this.releaseSession(session.id);
+      }
       await this.store.transaction(async () => {
                 for (const session of work) {
                   await this.store.run("DELETE FROM sessions WHERE id=?", session.id);
@@ -982,7 +991,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         `<turn_aborted>\n上一轮因${cause}而中断，并非已完成。工具可能只执行了一部分；先检查现场和历史回执，不得自动重放发送、提交、上传或结果不确定的操作。除非用户明确改变目标，原任务仍然有效；仅在收到继续指令或任务调度器续做时接着完成，停止或审批等待不授权自动重启。\n</turn_aborted>` });
     }
   }
-  async run(key: string, input?: Message, onStart?: () => void, signal?: AbortSignal) {
+  async run(key: string, input?: Message, onStart?: () => void, signal?: AbortSignal): Promise<void>;
+  async run(key: string, input: Message, onStart: undefined, signal: AbortSignal | undefined, scheduled: true): Promise<void | TaskSuspension>;
+  async run(key: string, input?: Message, onStart?: () => void, signal?: AbortSignal, scheduled = false): Promise<void | TaskSuspension> {
     assert(!this.executionSwitches.has(key), "执行位置正在切换，请完成后再发送消息");
     assert(
       !this.closing && !this.active.has(key),
@@ -992,15 +1003,20 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     const abort = () => control.abort(signal?.reason);
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
-    const state = { control, steer: [] as Message[] };
+    const state: TurnState = { control, steer: [] };
     this.active.set(key, state);
     const redact = new Redactor();
     this.redactors.set(key, redact);
-    const emit: Emit = (type, data) =>
-      this.emit({ type, session: key, taskId: session?.taskId, data });
+    const emit: Emit = (type, data) => {
+      // A job can outlive its turn; don't stream output using another turn's redactor.
+      if (type !== "tool_progress" || this.active.get(key) === state)
+        this.emit({ type, session: key, taskId: session?.taskId, data });
+    };
     let session: Session | undefined,
       original: { model?: string; scene?: string } | undefined,
       tools: Tools | undefined,
+      workspaceOwner: Employee | undefined,
+      suspension: TaskSuspension | undefined,
       clientAway: { clientId: string; ownerId: string } | undefined,
       error: any;
     // A member's turn in a group chat: its latest text goes to the group when the turn ends.
@@ -1058,6 +1074,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       if (input?.text && session.employeeId && !session.taskId && !session.groupId)
         await (await this.employeeFor(session)).acceptUserSchedule(input.text);
       tools = await Tools.create(this, session, config, control.signal, emit);
+      tools.yieldBackground = scheduled;
       tools.actorId = input?.actorId;
       this.active.get(key)!.context = tools.context;
       // Group chat text is data: it never runs a built-in command.
@@ -1094,7 +1111,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           config = latest;
           session!.model = target.selection;
           session!.scene = f.scene;
-          if (session!.employeeId && session!.taskId && f.scene === "lightweight") (await this.employeeFor(session!)).releaseWorkspace(session!.taskId);
+          if (session!.employeeId && session!.taskId && f.scene === "lightweight" && !bashRunning(key)) (await this.employeeFor(session!)).releaseWorkspace(session!.taskId);
           try {
             const folded = await tools!.context.sceneFold(from, f.scene!);
             if (folded?.block) this.emit({ type: "compacted", session: key, data: await tools!.context.folds() });
@@ -1109,7 +1126,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       };
       let overflowRecovered = false,
         trimRecovered = false;
-      const worker = session.employeeId ? await this.employeeFor(session) : undefined;
+      const worker = workspaceOwner = session.employeeId ? await this.employeeFor(session) : undefined;
       const employee = await worker?.state();
       // Recall by the last three user turns so a short follow-up ("好的，继续") still carries its topic.
       const recentAsk = async () => (await this.store.messages(key)).filter((message) => message.role === "user").slice(-3)
@@ -1176,7 +1193,6 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           await reinforceMemory();
           emit("steer", m);
         }
-        if (session.employeeId && session.taskId && session.scene === "coding" && !await (await this.employeeFor(session)).claimWorkspace(session, true)) return;
         const skills = await loadSkills(config, this.store, session.cwd, cloudFor({ ownerId: session.ownerId }));
         const employeeState = await worker?.state();
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
@@ -1400,7 +1416,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
                   }
         if (!reply.calls?.length) {
           if (state.steer.length) continue;
-          if (await this.settleBackground(session, emit, redact, control, state)) continue;
+          const settled = await this.settleBackground(session, emit, redact, control, state, scheduled);
+          if (typeof settled === "object") return suspension = settled;
+          if (settled) continue;
           const caller = frames.findLastIndex((f) => f.resume);
           if (caller >= 0) {
             const [f] = frames.splice(caller);
@@ -1470,10 +1488,6 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               }
             }
             assert(target, lastError);
-            if (mainTask && session.employeeId && a.scene === "coding" && !await (await this.employeeFor(session)).claimWorkspace(session, true)) {
-              await this.outcome(key, call, { value: { status: "queued", reason: "工作区写入占用，原任务已保存，释放后自动续做；本步未执行。" }, error: true, stop: true }, emit, redact);
-              return;
-            }
             let handoff = a.message;
             if (returning >= 0) {
               const pending = frames.splice(returning).map(frame => frame.resume).filter(Boolean);
@@ -1491,7 +1505,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             session.model = target.selection;
             session.scene = a.scene;
             await keepFrames();
-            if (mainTask && session.employeeId && a.scene === "lightweight") (await this.employeeFor(session)).releaseWorkspace(session.taskId!);
+            if (mainTask && worker && a.scene === "lightweight" && !bashRunning(key)) worker.releaseWorkspace(session.taskId!);
             this.providers.reset(key);
             let folded: Obj | undefined;
             try {
@@ -1520,12 +1534,12 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const outcomes = await this.batch(tools, calls, model, offered, (i, outcome) => {
           if (outcome.secret) return;
           settled.add(i);
-          const { secret, ...publicResult } = outcome;
+          const { secret, background, ...publicResult } = outcome;
           emit("tool_end", { call: calls[i], outcome: publicResult });
         });
         // 工具批次已经结束（含暂停、等待、审批）。只确认文件基线，不切换执行权，也不据此续做。
         await this.confirmWorkspace(session, outcomes, control.signal);
-        if (session.employeeId && session.taskId && session.scene !== "coding" && reply.calls.some(call => ["write", "edit", "bash"].includes(call.name))) (await this.employeeFor(session)).releaseWorkspace(session.taskId, true);
+        if (worker && session.taskId && session.scene !== "coding" && !bashRunning(key) && calls.some(call => ["write", "edit", "bash", "bash_poll"].includes(call.name))) worker.releaseWorkspace(session.taskId, true);
         let stop = false;
         for (const [i, outcome] of outcomes.entries()) {
           // Dispatch/resume links are not attached to chat bubbles (ordinary chat).
@@ -1571,6 +1585,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
                           });
           }
         }
+        if (scheduled && !stop && outcomes.length === 1 && outcomes[0]?.background && !state.steer.length) {
+          const settled = await this.waitForBackground(session, outcomes[0].background, emit, redact, control, state);
+          if (typeof settled === "object") return suspension = settled;
+        }
         // User already steered during this tool batch: keep the same run so the next
         // model request sees it immediately, instead of ending and hoping a relaunch wins the race.
         if (stop && !state.steer.length) return;
@@ -1594,10 +1612,12 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       throw error;
     } finally {
       if (error || control.signal.aborted) cancelSessionAgents(key);
+      const workspaceIdle = scheduled ? bashWorkspaceIdle(key) : undefined;
+      if (workspaceOwner && session?.taskId && workspaceIdle) workspaceOwner.retainWorkspace(session.taskId, workspaceIdle);
       try {
         if (session && turnStarted && (error || control.signal.aborted))
           await this.recoverPending(key, control.signal.aborted ? "stopped" : "error");
-        try { await tools?.close(); }
+        try { await tools?.close(workspaceIdle); }
         finally { await this.localBrowsers.release(key); this.taskTabs.retry(); }
         if (control.signal.aborted) {
           cancelSessionBash(key);
@@ -1615,6 +1635,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const browser = session?.localBrowser ? this.localBrowsers.peek(key) : session?.ownerId && (session.employeeId || session.taskId || cloudFor(session)) ? this.browsers.peek(this.browserProfileKey(session.ownerId)) : session?.employeeId ? undefined : this.chrome;
         if (browser) await (await browser.experiencesFor(key)).finish(key, !error);
       } catch (cleanupError: any) {
+        suspension?.cancel();
         cancelSessionAgents(key);
         if (session && turnStarted) {
           await this.recoverPending(key, "error").catch(() => {});
@@ -1711,7 +1732,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           });
     const context = this.active.get(key)?.context;
     if (context) this.budget(key, context, emit);
-    const { secret, ...publicResult } = o;
+    const { secret, background, ...publicResult } = o;
     if (event) emit("tool_end", { call, outcome: publicResult });
   }
   async launch(key: string, input: Message) {
@@ -1726,13 +1747,51 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     });
   }
 
-  async settleBackground(session: Session, emit: Emit, redact: Redactor, control: AbortController, state: { steer: Message[] }) {
+  private async waitForBackground(session: Session, handle: BackgroundResult, emit: Emit, redact: Redactor, control: AbortController, state: Pick<TurnState, "steer" | "wakeBackground">): Promise<boolean | TaskSuspension> {
+    const watcher = new AbortController(), signal = AbortSignal.any([control.signal, watcher.signal]);
+    const result = Promise.resolve().then(() => handle.wait(signal)).then(
+      text => text === undefined ? undefined : redact.text(text),
+      error => signal.aborted ? undefined : redact.text(`未能取回后台结果；先核对实际状态，不要重跑。${error?.message || error}`),
+    );
+    const later = Symbol("background not ready");
+    let wake!: () => void;
+    const grace = new Promise<typeof later>(resolve => { wake = () => resolve(later); });
+    const timer = setTimeout(wake, BACKGROUND_GRACE_MS);
+    state.wakeBackground = wake;
+    control.signal.addEventListener("abort", wake, { once: true });
+    if (control.signal.aborted || state.steer.length) wake();
+    let current: string | undefined | typeof later;
+    try { current = await Promise.race([result, grace]); }
+    finally {
+      clearTimeout(timer);
+      delete state.wakeBackground;
+      control.signal.removeEventListener("abort", wake);
+    }
+    control.signal.throwIfAborted();
+    if (current === later) {
+      if (!state.steer.length) return { result, cancel: () => watcher.abort(), acknowledge: () => handle.acknowledge?.() };
+      watcher.abort();
+      await result;
+      return true;
+    }
+    if (current === undefined) return false;
+    const message = await this.store.append(session.id, { role: "user", text: backgroundResultText(current) });
+    handle.acknowledge?.();
+    emit("message_end", message);
+    return true;
+  }
+
+  async settleBackground(session: Session, emit: Emit, redact: Redactor, control: AbortController, state: Pick<TurnState, "steer" | "wakeBackground">, scheduled = false): Promise<boolean | TaskSuspension> {
     if (control.signal.aborted || state.steer.length) return false;
     const ready = takeReadyAgents(session.id);
     if (ready.length) {
       const message = await this.store.append(session.id, redactMessage({ role: "user", text: formatAgentHandoff(ready) }, redact));
       emit("message_end", message);
       return true;
+    }
+    if (scheduled) for (const source of this.backgroundResults) {
+      const handle = source(session.id);
+      if (handle) return this.waitForBackground(session, handle, emit, redact, control, state);
     }
     if (pendingBash(session.id) != null && pendingBashFinished(session.id))
       return await this.deliverPendingBash(session, emit, redact, control, state);
@@ -1986,6 +2045,7 @@ export function dependencies(raw: any, index: number) {
 const barrier = (name: string) =>
   !CHROME_TOOLS.has(name) && ![
     "read",
+    "workspace_probe",
     "write",
     "edit",
     "bash",
