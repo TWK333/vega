@@ -406,6 +406,7 @@ test("oversized Chrome results stay prunable after archiving", () => {
   const rows: Message[] = [];
   const observe = (id: string, big: boolean) => {
     const value = {
+      status: "needs_review", inputAttempted: true, completedActions: 1,
       tabTag: "C1", snapshotId: id, documentPath: "/files/" + id + ".json",
       images: [{ path: id, frameStream: "C1:viewport" }],
       pages: [{ text: (id + " ").repeat(big ? 20000 : 1) }],
@@ -420,6 +421,7 @@ test("oversized Chrome results stay prunable after archiving", () => {
   observe("big", true);
   const archived = JSON.parse(rows[1].text!);
   assert.equal(archived.tabTag, "C1");
+  assert.deepEqual([archived.status, archived.inputAttempted, archived.completedActions], ["needs_review", true, 1]);
   assert.equal(archived.archivePath, "/files/output-big.json");
   assert(archived.preview.length < 33000 && archived.preview.includes("big big"));
   assert.equal(archived.images[0].frameStream, "C1:viewport");

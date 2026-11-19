@@ -27,6 +27,51 @@ async function fixture(t: TestContext) {
   return { store, engine, session };
 }
 
+test("coding → computer → coding preserves the caller checkpoint, without replaying DOM or image data", async t => {
+  const { store, engine, session } = await fixture(t), requests: any[] = [];
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString()));
+    const n = requests.length, calls = [
+      ["read", { path: "package.json" }],
+      ["switch_scene", { scene: "computer", message: "check title only", resume: "finish in coding" }],
+      ["chrome_inspect", { tabTag: "tab" }],
+      ["workspace_probe", {}], // Another browser turn: the previous screenshot must not even be loaded again.
+    ] as const;
+    const event = n <= calls.length ? { type: "response.output_item.done", output_index: 0, item: {
+      type: "function_call", call_id: `call-${n}`, name: calls[n-1][0], arguments: JSON.stringify(calls[n-1][1]),
+    } } : { type: "response.output_text.delta", delta: n === 5 ? "verified title" : "done" };
+    res.setHeader("Content-Type", "text/event-stream");
+    res.end([event, { type: "response.completed", response: { status: "completed", id: `r${n}` } }]
+      .map(e => `data: ${JSON.stringify(e)}\n\n`).join(""));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); }));
+  const cfg = structuredClone(config);
+  cfg.provider.p.api = "openai-responses";
+  cfg.provider.p.baseURL = `http://127.0.0.1:${(server.address() as any).port}`;
+  await store.put("config", cfg);
+  await store.saveSession({ ...session, scene: "coding" });
+  const screenshot = { path: "/fixture/shot.webp", url: "/api/files/shot.webp" };
+  const inspect = t.mock.method(engine.chrome, "execute", async () => ({ tabTag: "tab", pages: [{ text: "large DOM".repeat(2400) }], images: [screenshot] }));
+  const image = t.mock.method(engine.providers, "resolveImage", async () => ({ mime: "image/webp", data: "x".repeat(65536) }));
+  await engine.run(session.id, { role: "user", text: "Read the manifest, then check the title; do not submit." });
+  assert.equal(inspect.mock.callCount(), 1);
+  assert.equal(image.mock.callCount(), 1);
+  assert.deepEqual(requests.map(b => b.previous_response_id), [undefined, "r1", undefined, "r3", "r4", "r2"]);
+  assert.equal(new Set(requests.map(b => b.prompt_cache_key)).size, 1);
+  const browser = requests[3].input, returned = requests[5].input;
+  assert.match(JSON.stringify(browser), /large DOM/);
+  assert.doesNotMatch(JSON.stringify(returned), /large DOM|input_image/);
+  assert.match(JSON.stringify(returned), /verified title/);
+  assert.match(JSON.stringify(returned), /finish in coding/);
+  const size = (v: unknown) => Buffer.byteLength(JSON.stringify(v));
+  const before = size(browser), after = size(returned.filter((x: any) => x.call_id === "call-3" && x.type === "function_call_output"));
+  assert(after > 2 && after < before / 50);
+  t.diagnostic(`mock browser receipt on wire (including screenshot): ${before} bytes in computer; ${after} bytes returned to coding`);
+});
+
 test("retained runtime snapshots and notices enter token accounting exactly once", async (t) => {
   const { store, engine, session } = await fixture(t), ctx = await Context.open(store, session.id), fixed = 100;
   await store.append(session.id, { role: "user", text: "one" });

@@ -105,7 +105,7 @@ export class Tools {
   private localSsh?: Promise<string>;
   sceneStack: string[] = [];
   static async create(engine: Engine, session: Session, config: Config, signal: AbortSignal, emit: (type: string, data: any) => void) {
-    const context = await Context.open(engine.store, session.id, config.contextMode === "acp" ? "acp" : "auto");
+    const context = await Context.open(engine.store, session.id, config.contextMode === "acp" ? "acp" : "auto", session.scene);
     return new Tools(engine, session, config, signal, emit, context, await engine.mcpFor(session, config));
   }
   private constructor(
@@ -310,7 +310,7 @@ export class Tools {
         ),
         schema(
           "switch_scene",
-          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome (same session, no new browser session). Employee main tasks may use lightweight/coding/computer and return; system auto-folds unrelated context (decompress/recall/search_context still restore details). resume only for concrete caller work, not repeating a summary: it survives interruptions, and a plain reply (no tool call) or task_complete in the callee scene returns there automatically. After delivery the session returns to the scene computer was entered from. Do not use task_relay_computer.",
+          "Switch within SAME session/shared history. Call alone. coding for development; computer for Chrome (same session, no new browser session). Employee main tasks may use lightweight/coding/computer and return; other scenes see compact tool receipts, not large tool bodies. Pass verified facts, constraints and evidence refs in message; recall(positions) reads originals. resume only for concrete caller work, not repeating a summary: it survives interruptions, and a plain reply (no tool call) or task_complete in the callee scene returns there automatically. After delivery the session returns to the scene computer was entered from. Do not use task_relay_computer.",
           {
             scene: {
               type: "string",
