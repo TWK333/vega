@@ -29,14 +29,14 @@ test("Docker builds exactly the client platforms offered by Resources before bun
   assert(clients.every((client) => client.name && client.arch));
   assert.match(docker, /FROM --platform=\$BUILDPLATFORM golang:1\.26-bookworm AS clients/);
   assert.match(docker, /COPY local\/go\.mod local\/go\.sum \.\/\s+RUN go mod download/);
-  assert.match(docker, /COPY local\/\*\.go local\/\*\.html local\/\*\.js local\/\*\.syso local\/\*\.ico local\/VERSION \.\/\s+COPY local\/extension \.\/extension/);
+  assert.match(docker, /COPY local\/\*\.go local\/\*\.html local\/\*\.js local\/\*\.syso local\/\*\.ico local\/VERSION \.\/\s+COPY local\/resources\/grok \.\/resources\/grok\s+COPY local\/extension \.\/extension/);
   assert.match(docker, /RUN set -eu;/, "a failed cross-build must stop the image build");
   assert.match(docker, /CGO_ENABLED=0 GOOS="\$os" GOARCH="\$arch" go build -trimpath/);
   assert.match(docker, /if \[ "\$os" = windows \]; then flags="\$flags -H=windowsgui"; suffix="\.exe"; fi/);
   assert.match(docker, /-o "\/out\/vega-local-\$os-\$arch\$suffix"/);
   assert.match(docker, /COPY --from=clients \/out \.\/web\/public\/clients\s+RUN node scripts\/client-manifest\.mjs web\/public\/clients\s+RUN npm run build/);
   const ignore = readFileSync(".dockerignore", "utf8");
-  for (const input of ["local/", "local/*.go", "local/go.mod", "local/go.sum", "local/icon.ico", "local/VERSION"])
+  for (const input of ["local/", "local/*.go", "local/go.mod", "local/go.sum", "local/icon.ico", "local/VERSION", "local/resources/", "local/resources/grok/", "local/resources/grok/**"])
     assert(ignore.split(/\r?\n/).includes("!" + input));
   assert(ignore.split(/\r?\n/).includes("web/public/clients/"), "host binaries must not enter the build context");
   assert(!ignore.includes("!local/**"), "allow Go inputs, not local credentials or host executables");

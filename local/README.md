@@ -27,7 +27,9 @@ The client listens on the first free loopback port in `47753–47762`; the exten
 
 ## 蝴蝶窗口 (Windows)
 
-The taskbar butterfly is now a launcher for a real **window** instead of a click-popover bubble: clicking the butterfly (or tray → **蝴蝶助理**) opens a 900×720 window hosting the same BOT conversation page, with remembered size and position (clamped into the monitor's work area) and kept out of the taskbar — the butterfly and the tray remain its entry points. The in-page **×** hides the window (it stays warm); the title-bar **×** closes it, and the next click reopens it. Its header **⚙** opens 设置 — the local permission page described above — which links back to the conversation. The **hint bubbles** above the butterfly (正在操作这台电脑 / 需要你核对) still appear before desktop input and after an uncertain result; they can be turned off in 设置 → 电脑 along with the butterfly itself.
+在 Windows 上，点击任务栏蝴蝶或托盘 **蝴蝶助理** 打开内置的 Grok 风格窗口（需要 Microsoft Edge WebView2 Runtime）。它使用现有 Vega 站点的设备授权，不登录 Grok，也不改网页的 OAuth 登录。未授权时先在托盘 **设置** 启动并完成本站授权。窗口记住大小和位置。
+
+新版可以选择已有牛马、查看最近对话、发送文本并自动刷出已保存的回复。现有设备 API 不提供逐字流式输出或更早的历史分页（最多最近 200 条原始消息），创建、编辑牛马和停止回复请用 Vega 网页。托盘 **经典面板** 继续提供群聊、任务确认和产物下载；缺少 WebView2 时也可在系统浏览器打开经典面板。任务栏提示气泡和设置照旧。
 
 ## Device credentials and revocation
 
@@ -69,6 +71,6 @@ Windows (system tray only, no console window):
 go test ./...
 go build -ldflags="-H=windowsgui" -o vega-local.exe .
 ```
-Use the rebuilt `.exe`, not an older download or `go run .`. Windows detaches the client from any console at startup without closing the parent terminal, and shell commands use `CREATE_NO_WINDOW`. A plain console-mode build may still flash before startup; the GUI build avoids that entirely.
+Use the rebuilt `.exe`, not an older download or `go run .`. For a local build, put the target site's `instance.json` beside the executable (use the one from the site's ZIP, or `{ "origin": "http://127.0.0.1:8080" }` for a server running at that local address). Windows detaches the client from any console at startup without closing the parent terminal, and shell commands use `CREATE_NO_WINDOW`. A plain console-mode build may still flash before startup; the GUI build avoids that entirely.
 
 CI builds Windows tray and Linux/macOS headless binaries. Linux/macOS use `go build -o vega-local .`; if opening a browser is unavailable, use the authorization address printed by the client.

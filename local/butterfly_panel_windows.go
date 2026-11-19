@@ -3,7 +3,7 @@
 package main
 
 // 蝴蝶面板：点任务栏蝴蝶后出现的对话窗，里面是本地内置的助理界面（数据走本站点的客户端通道）。
-// 对齐 Nova 的气泡：无边框圆角、置顶、不占任务栏、贴在蝴蝶上方、失焦自动收起，再点蝴蝶唤回。
+// 对话窗保留原生缩放能力，由新版前端提供标题栏和窗口按钮，不置顶、不自动收起。
 // 进程在客户端启动时就拉起来预热：窗口建在屏幕外、页面先加载好，点开只是把它挪出来（没有白框闪现）。
 // 单独开进程：WebView2 是第三方 COM 组件，初始化失败也只关掉这一个小窗，不带走托盘和正在跑的任务。
 
@@ -27,8 +27,8 @@ import (
 const (
 	butterflyPanelTitle = "Vega 蝴蝶助理"
 	// 现在是普通窗口，不是气泡：默认给够面积放得下对话和设置，用户拖过就按上次的大小打开。
-	butterflyPanelWidth        = 900
-	butterflyPanelHeight       = 720
+	butterflyPanelWidth        = 1080
+	butterflyPanelHeight       = 780
 	butterflyPanelMinWidth     = 560
 	butterflyPanelMinHeight    = 420
 	butterflyPanelMargin       = 8
@@ -96,13 +96,10 @@ func butterflyPanelOpen(url string) bool {
 		_, _, _ = procPanelPost.Call(hwnd, panelShowMsg, 0, 0)
 		return true
 	}
-	if butterflyPanelSpawn.opened {
-		return true // 还在预热：窗口一出来就自己冒头（下面的轮询会补上这一下）
-	}
-	if !butterflyPanelLaunch(url) {
+	if !butterflyPanelSpawn.opened && !butterflyPanelLaunch(url) {
 		return false
 	}
-	// 第一次点击时进程才刚起来：等它把窗口建好，再让它挪到蝴蝶上方。
+	// 第一次点击可能正好撞上预热；等窗口可用再让它出现。
 	go func() {
 		for i := 0; i < 240; i++ {
 			if hwnd := panelWindow(); hwnd != 0 {
@@ -117,6 +114,9 @@ func butterflyPanelOpen(url string) bool {
 
 // butterflyPanelLaunch 起面板进程（调用方持有 butterflyPanelSpawn 锁）。
 func butterflyPanelLaunch(url string) bool {
+	if version, err := webviewloader.GetInstalledVersion(); err != nil || version == "" {
+		return false
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return false
@@ -235,9 +235,12 @@ func panelNavigate(hwnd windows.Handle) {
 		return
 	}
 	if browser := panelHostBrowser(); browser != nil {
+		modeChanged := panelUsesGrok(panelCurrentURL) != panelUsesGrok(target)
 		panelCurrentURL = target
+		if modeChanged {
+			butterflyPanelChrome(hwnd)
+		}
 		browser.Navigate(target)
-		panelLog("面板翻到 %s", target)
 		return
 	}
 	panelHost.Lock()
@@ -245,8 +248,8 @@ func panelNavigate(hwnd windows.Handle) {
 	panelHost.Unlock()
 }
 
-// butterflyPanelChrome 现在它是一个普通窗口：标题栏、可缩放、不置顶、不自动收起；
-// 仍不进任务栏（入口是任务栏蝴蝶和图盘），免得屏幕外预热时多出一个按钮。
+// butterflyPanelChrome 保留原生缩放、最小/最大化能力，经典面板和设置还使用系统标题栏。
+// 仍不进任务栏（入口是任务栏蝴蝶和托盘），免得屏幕外预热时多出一个按钮。
 func butterflyPanelChrome(hwnd windows.Handle) {
 	gwlStyle, gwlExStyle := ^uintptr(15), ^uintptr(19) // GWL_STYLE = -16, GWL_EXSTYLE = -20
 	const (

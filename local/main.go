@@ -157,15 +157,21 @@ func main() {
 	// 默认用客户端自己的无头 Chrome；设置里选「我自己的 Chrome」就不拉起。
 	a.applyBrowserMode()
 	go headlessReclaim(ctx)
-	configure := func() {
-		url := "http://" + localAddress + "/config/" + a.configToken
-		// 设置也在蝴蝶窗口里开：先把目标页写给面板，面板不在时退回系统浏览器。
+	showPanel := func(url, fallback string) {
 		butterflyPanelTarget(a.dataDir, url)
 		if !butterflyPanelOpen(url) {
-			openBrowser(url)
+			openBrowser(fallback)
 		}
 	}
-	// 面板在启动时就预热好（窗口停屏幕外、页面先加载），点蝴蝶秒开，没有初始化白框。
+	configure := func() {
+		url := "http://" + localAddress + "/config/" + a.configToken
+		showPanel(url, url)
+	}
+	classic := func() {
+		url := a.assistantBase()
+		showPanel(url, url)
+	}
+	// 已授权才预热对话，避免把首次启动时的无授权页面留在 WebView2。
 	go func() {
 		time.Sleep(2 * time.Second)
 		butterflyPanelWarm(a.assistantURL())
@@ -176,11 +182,7 @@ func main() {
 			configure()
 			return
 		}
-		// 蝴蝶面板里就是网页里的 BOT 会话；WebView2 不可用时退回系统浏览器。
-		butterflyPanelTarget(a.dataDir, url)
-		if !butterflyPanelOpen(url) {
-			openBrowser(url)
-		}
+		showPanel(url, a.assistantBase())
 	})
 	fmt.Fprintln(os.Stderr, "vega-local: connection settings at http://"+localAddress+"/config/"+a.configToken)
 	a.clientLog("本地端口 %s 已启用（浏览器需在同一台电脑打开站点）", localAddress)
@@ -200,7 +202,7 @@ func main() {
 		os.Exit(0)
 	}
 	go a.autoUpdate(ctx, quit)
-	systrayRun(configure, quit)
+	systrayRun(configure, classic, quit)
 }
 
 type job struct {

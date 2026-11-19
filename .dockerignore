@@ -23,6 +23,9 @@
 !local/go.sum
 !local/icon.ico
 !local/VERSION
+!local/resources/
+!local/resources/grok/
+!local/resources/grok/**
 !local/extension/
 !local/extension/**
 !scripts/

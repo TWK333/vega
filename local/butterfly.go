@@ -62,7 +62,13 @@ func butterflyPanelTarget(dir, url string) {
 
 // assistantURL 蝴蝶面板打开的地址：本地内置的助理界面（不用登录网站，也不加载站点前端）。
 func (a *Agent) assistantURL() string {
-	return a.assistantBase()
+	if assistantGrokAssets == nil {
+		return a.assistantBase()
+	}
+	if _, _, paired := a.assistantCredential(); !paired {
+		return ""
+	}
+	return a.assistantBase() + assistantGrokPath
 }
 
 // threadURL 面板里直达某条会话：界面自己记得上次看的那条，这里仍然回到面板。
@@ -74,6 +80,7 @@ func (a *Agent) threadURL(session string) string {
 func butterflyOpenThread(thread string) {
 	if runningAgent != nil && thread != "" {
 		url := runningAgent.threadURL(thread)
+		butterflyPanelTarget(runningAgent.dataDir, url)
 		if !butterflyPanelOpen(url) {
 			openBrowser(url)
 		}

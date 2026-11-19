@@ -9,8 +9,10 @@ package main
 // SW_HIDE 把首次 ShowWindow 吞掉、合成器建在隐藏窗口上永不上屏那个坑。
 
 import (
+	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,8 +29,60 @@ const (
 	panelParkY = -20000
 
 	panelShowMsg = 0x8000 + 1 // WM_APP+1：客户端点了蝴蝶，挪到任务栏上方并拿到前台
-	panelParkMsg = 0x8000 + 2 // WM_APP+2：失焦，收回屏幕外
+	panelParkMsg = 0x8000 + 2 // WM_APP+2：收回屏幕外
 )
+
+var (
+	procPanelZoomed         = panelUser32.NewProc("IsZoomed")
+	procPanelIconic         = panelUser32.NewProc("IsIconic")
+	procPanelWindowMonitor  = panelUser32.NewProc("MonitorFromWindow")
+	procPanelReleaseCapture = panelUser32.NewProc("ReleaseCapture")
+	procPanelDwmAttribute   = windows.NewLazySystemDLL("dwmapi.dll").NewProc("DwmSetWindowAttribute")
+)
+
+func panelUsesGrok(url string) bool {
+	return strings.HasPrefix(url, "http://"+localAddress+"/assistant/") && strings.HasSuffix(url, "/"+assistantGrokPath)
+}
+
+// panelWindowMessage only accepts commands for this window, never arbitrary native calls.
+func panelWindowMessage(text string) {
+	if !panelUsesGrok(panelCurrentURL) {
+		return
+	}
+	hwnd := panelHostWindow()
+	switch text {
+	case "vega-window:minimize":
+		_, _, _ = procPanelShow.Call(uintptr(hwnd), 6) // SW_MINIMIZE
+	case "vega-window:toggle-maximize":
+		command := uintptr(3) // SW_MAXIMIZE
+		if zoomed, _, _ := procPanelZoomed.Call(uintptr(hwnd)); zoomed != 0 {
+			command = 9 // SW_RESTORE
+		}
+		_, _, _ = procPanelShow.Call(uintptr(hwnd), command)
+	case "vega-window:close":
+		_, _, _ = procPanelPost.Call(uintptr(hwnd), 0x0010, 0, 0) // WM_CLOSE
+	case "vega-window:drag":
+		_, _, _ = procPanelReleaseCapture.Call()
+		_, _, _ = procPanelPost.Call(uintptr(hwnd), 0x0112, 0xF012, 0) // WM_SYSCOMMAND, SC_MOVE | HTCAPTION
+	case "vega-window:resize-left", "vega-window:resize-right", "vega-window:resize-top", "vega-window:resize-topleft", "vega-window:resize-topright", "vega-window:resize-bottom", "vega-window:resize-bottomleft", "vega-window:resize-bottomright":
+		edge := map[string]uintptr{"left": 1, "right": 2, "top": 3, "topleft": 4, "topright": 5, "bottom": 6, "bottomleft": 7, "bottomright": 8}[strings.TrimPrefix(text, "vega-window:resize-")]
+		_, _, _ = procPanelReleaseCapture.Call()
+		_, _, _ = procPanelPost.Call(uintptr(hwnd), 0x0112, 0xF000|edge, 0) // WM_SYSCOMMAND, SC_SIZE | WMSZ_*
+	case "vega-window:theme-dark", "vega-window:theme-light":
+		dark := int32(0)
+		color := edge.COREWEBVIEW2_COLOR{A: 255, R: 255, G: 255, B: 255}
+		if text == "vega-window:theme-dark" {
+			dark = 1
+			color = edge.COREWEBVIEW2_COLOR{A: 255, R: 24, G: 24, B: 24}
+		}
+		_, _, _ = procPanelDwmAttribute.Call(uintptr(hwnd), 20, uintptr(unsafe.Pointer(&dark)), 4)
+		if browser := panelHostBrowser(); browser != nil {
+			if controller := browser.GetController().GetICoreWebView2Controller2(); controller != nil {
+				_ = controller.PutDefaultBackgroundColor(color)
+			}
+		}
+	}
+}
 
 var panelHost struct {
 	sync.Mutex
@@ -64,9 +118,18 @@ func panelHostBrowser() *edge.Chromium {
 // 不用时只原样转给 DefWindowProc，不当作整数解引用。
 func panelHostWndProc(hwnd windows.Handle, message uint32, wparam uintptr, lparam *panelMinMaxInfo) uintptr {
 	switch message {
+	case 0x0083: // WM_NCCALCSIZE：新版自己画标题栏，经典面板和设置仍走系统。
+		if panelUsesGrok(panelCurrentURL) {
+			return 0
+		}
 	case 0x0005: // WM_SIZE
 		if browser := panelHostBrowser(); browser != nil {
 			browser.Resize()
+			dpi, _, _ := procPanelDpi.Call(uintptr(hwnd))
+			if dpi < 96 {
+				dpi = 96
+			}
+			browser.Eval(fmt.Sprintf("window.vegaPanelDpiScale=%g;window.dispatchEvent(new CustomEvent('vega-window-state',{detail:{isMaximized:%t}}))", float64(dpi)/96, wparam == 2))
 		}
 		return 0
 	case 0x0014: // WM_ERASEBKGND：别用系统背景刷，省得闪白
@@ -78,6 +141,17 @@ func panelHostWndProc(hwnd windows.Handle, message uint32, wparam uintptr, lpara
 		if lparam != nil {
 			dpi := butterflyDPI()
 			lparam.MinTrackSize = appuseWinPoint{X: butterflyScale(butterflyPanelMinWidth, dpi), Y: butterflyScale(butterflyPanelMinHeight, dpi)}
+			monitor, _, _ := procPanelWindowMonitor.Call(uintptr(hwnd), 2)
+			info := struct {
+				Size          uint32
+				Monitor, Work appuseWinRect
+				Flags         uint32
+			}{}
+			info.Size = uint32(unsafe.Sizeof(info))
+			if ok, _, _ := procPanelInfo.Call(monitor, uintptr(unsafe.Pointer(&info))); ok != 0 {
+				lparam.MaxPosition = appuseWinPoint{X: info.Work.Left - info.Monitor.Left, Y: info.Work.Top - info.Monitor.Top}
+				lparam.MaxSize = appuseWinPoint{X: info.Work.Right - info.Work.Left, Y: info.Work.Bottom - info.Work.Top}
+			}
 		}
 		return 0
 	case panelShowMsg:
@@ -89,6 +163,9 @@ func panelHostWndProc(hwnd windows.Handle, message uint32, wparam uintptr, lpara
 			return 0
 		}
 		panelNavigate(hwnd)
+		if minimized, _, _ := procPanelIconic.Call(uintptr(hwnd)); minimized != 0 {
+			_, _, _ = procPanelShow.Call(uintptr(hwnd), 9) // SW_RESTORE
+		}
 		_ = browser.NotifyParentWindowPositionChanged()
 		butterflyPanelPlace(hwnd)
 		return 0
@@ -138,10 +215,9 @@ func panelHostStart(url string) bool {
 		wsClip       = 0x02000000 // WS_CLIPCHILDREN
 		wsVisible    = 0x10000000
 		exTool       = 0x00000080
-		exNoRedraw   = 0x00200000
 	)
 	hwnd, _, last := procChipCreate.Call(
-		exTool|exNoRedraw, // 不进任务栏：入口是任务栏蝴蝶和托盘
+		exTool, // 不进任务栏：入口是任务栏蝴蝶和托盘
 		uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelClass))),
 		uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelTitle))),
 		wsOverlapped|wsClip|wsVisible,
@@ -155,7 +231,8 @@ func panelHostStart(url string) bool {
 	panelHost.Lock()
 	panelHost.hwnd = windows.Handle(hwnd)
 	panelHost.Unlock()
-	// 普通窗口：系统标题栏、可缩放、不置顶，不再做无边框气泡那套。
+	panelCurrentURL = url
+	// 只有新版前端使用内容内标题栏。
 	butterflyPanelChrome(windows.Handle(hwnd))
 
 	// 停在工作区外的窗口会被系统判成“被遮挡”，WebView2 会停画；关掉这类节流。
@@ -163,8 +240,7 @@ func panelHostStart(url string) bool {
 		"--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding")
 	chromium := edge.NewChromium()
 	chromium.DataPath = butterflyPanelDataDir() + `\webview`
-	chromium.MessageCallback = func(text string) { panelLog("面板页面：%s", text) }
-	chromium.SetPermission(edge.CoreWebView2PermissionKindClipboardRead, edge.CoreWebView2PermissionStateAllow)
+	chromium.MessageCallback = panelWindowMessage
 	if !chromium.Embed(hwnd) {
 		panelLog("WebView2 初始化失败")
 		_, _, _ = procChipDestroy.Call(hwnd)
@@ -173,26 +249,27 @@ func panelHostStart(url string) bool {
 	panelHost.Lock()
 	panelHost.browser = chromium
 	panelHost.Unlock()
-	// 透明背景：页面根是 background:transparent，让卡片之外透出桌面——这是 Nova 气泡的半透明感。
-	// 只是设 WebView2 的默认背景，不动窗口样式；WebView2 直绘，透明像素直接合成到桌面。
+	// 普通面板用不透明底色；提示气泡的透明合成设置不能沿用到这里。
 	if c := chromium.GetController(); c != nil {
 		if c2 := c.GetICoreWebView2Controller2(); c2 != nil {
-			_ = c2.PutDefaultBackgroundColor(edge.COREWEBVIEW2_COLOR{A: 0, R: 0, G: 0, B: 0})
+			_ = c2.PutDefaultBackgroundColor(edge.COREWEBVIEW2_COLOR{A: 255, R: 255, G: 255, B: 255})
 		}
 	}
+	chromium.Init(fmt.Sprintf("window.vegaPanelDpiScale=%g", float64(dpi)/96))
 	chromium.Resize()
+	if err := chromium.Show(); err != nil {
+		panelLog("显示 WebView2 失败：%v", err)
+		_, _, _ = procChipDestroy.Call(hwnd)
+		return false
+	}
 	chromium.Navigate(url)
-	panelCurrentURL = url
-	panelLog("面板预热完成：%s", url)
+	panelLog("面板预热完成")
 	panelHost.Lock()
-	pending, want := panelHost.pending, panelHost.want
-	panelHost.pending, panelHost.want = false, ""
+	pending := panelHost.pending
+	panelHost.pending = false
 	panelHost.Unlock()
 	if pending {
-		if want != "" && want != panelCurrentURL {
-			panelCurrentURL = want
-			chromium.Navigate(want)
-		}
+		panelNavigate(windows.Handle(hwnd))
 		butterflyPanelPlace(windows.Handle(hwnd))
 	}
 	var message chipMsg

@@ -4,6 +4,7 @@ WORKDIR /src
 COPY local/go.mod local/go.sum ./
 RUN go mod download
 COPY local/*.go local/*.html local/*.js local/*.syso local/*.ico local/VERSION ./
+COPY local/resources/grok ./resources/grok
 COPY local/extension ./extension
 RUN set -eu; mkdir -p /out; \
     for target in windows/amd64 linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
