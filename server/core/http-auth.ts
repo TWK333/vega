@@ -9,27 +9,28 @@ import {
 import { app, authenticated } from "./application";
 import { AuthError, check, equal, type Principal, type User } from "./auth";
 export const COOKIE = "vega_session";
-export function publicOrigin(event: H3Event) {
+export function publicSiteURL(event: H3Event) {
   const configured = process.env.VEGA_PUBLIC_URL;
   if (configured) {
-    const url = new URL(configured);
-    check(
-      ["http:", "https:"].includes(url.protocol) &&
-        !url.username &&
-        !url.password &&
-        url.pathname === "/" &&
-        !url.search &&
-        !url.hash,
-      500,
-      "VEGA_PUBLIC_URL must be an HTTP(S) origin",
-    );
-    return url.origin;
+    const match = /^(https?:\/\/[^/?#\\\s]+)(\/[^?#\\\s]*)?$/i.exec(configured);
+    const path = (match?.[2] || "").replace(/\/$/, "");
+    const message = "VEGA_PUBLIC_URL must be an HTTP(S) site URL with an optional directory";
+    check(match && !match[1].includes("@") && (!path || path.slice(1).split("/").every(
+      (part) => /^[A-Za-z0-9._~-]+$/.test(part) && part !== "." && part !== "..",
+    )), 500, message);
+    let url: URL;
+    try { url = new URL(match[1]); }
+    catch { throw new AuthError(500, message); }
+    return url.origin + path;
   }
   const host = getHeader(event, "host");
   check(host && !/[\\/\s]/.test(host), 400, "Valid Host header required");
   return new URL(
     ((event.node.req.socket as any).encrypted ? "https://" : "http://") + host,
   ).origin;
+}
+export function publicOrigin(event: H3Event) {
+  return new URL(publicSiteURL(event)).origin;
 }
 export function sameOrigin(event: H3Event) {
   const origin = getHeader(event, "origin");

@@ -1,13 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
+import { pipeline } from "node:stream";
 import { createServer as tcpServer } from "node:net";
 import { mkdtemp, mkdir, writeFile, readFile, rm, copyFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { strFromU8, unzipSync } from "fflate";
 import { sleep } from "../server/core/util";
 
 /**
@@ -55,15 +57,18 @@ async function readEvents(
   }
 }
 
-test("native client authorizes at the website, then runs directly without a webpage and never replays lost operations", {
+test("native client authorizes through a site directory and runs directly without replaying lost operations", {
   skip: process.env.VEGA_TEST_LOCAL_AGENT !== "1", timeout: 90000,
 }, async (t) => {
   const binary = process.env.VEGA_TEST_CLIENT_BINARY || resolve("local", process.platform === "win32" ? "vega-local.exe" : "vega-local");
   assert(existsSync(binary), "Build the updated native client first");
-  const reserved = tcpServer();
-  try { await new Promise<void>((yes, no) => { reserved.once("error", no); reserved.listen(47673, "127.0.0.1", yes); }); }
-  catch { t.skip("Local client port is in use; do not interfere with a user's client"); return; }
-  await new Promise<void>((yes) => reserved.close(() => yes()));
+  const helper = process.env.VEGA_TEST_CLIENT_HELPER === "1";
+  if (!helper) {
+    const reserved = tcpServer();
+    try { await new Promise<void>((yes, no) => { reserved.once("error", no); reserved.listen(47673, "127.0.0.1", yes); }); }
+    catch { t.skip("Local client port is in use; do not interfere with a user's client"); return; }
+    await new Promise<void>((yes) => reserved.close(() => yes()));
+  }
   const dir = await mkdtemp(join(tmpdir(), "vega-native-e2e-"));
   const clientDir = join(dir, "client"), serverDir = join(dir, "server"), configDir = join(dir, "config");
   await mkdir(clientDir); await mkdir(serverDir); await mkdir(join(configDir, "vega-local"), { recursive: true });
@@ -71,7 +76,30 @@ test("native client authorizes at the website, then runs directly without a webp
   await new Promise<void>((yes) => reserve.listen(0, "127.0.0.1", yes));
   const port = (reserve.address() as any).port;
   await new Promise<void>((yes) => reserve.close(() => yes()));
-  const base = "http://127.0.0.1:" + port, setupToken = randomBytes(32).toString("base64url");
+  const prefix = "/vega";
+  const socketStatuses: number[] = [];
+  // Match a reverse proxy that redirects old root URLs and strips the mount path internally.
+  const proxy = createServer((req, res) => {
+    const path = req.url || "/";
+    if (!path.startsWith(prefix + "/")) {
+      res.writeHead(302, { location: prefix + path }).end();
+      return;
+    }
+    const upstream = httpRequest({ host: "127.0.0.1", port, path: path.slice(prefix.length), method: req.method, headers: req.headers }, (response) => {
+      const status = response.statusCode || 502;
+      if (req.method === "GET" && path.split("?")[0] === prefix + "/api/local-agent/socket") socketStatuses.push(status);
+      res.writeHead(status, response.headers);
+      // If the backend aborts an SSE response, the native client must see the disconnect too.
+      pipeline(response, res, () => {});
+    });
+    upstream.on("error", () => res.headersSent ? res.destroy() : res.writeHead(502).end());
+    res.on("close", () => upstream.destroy());
+    req.pipe(upstream);
+  });
+  await new Promise<void>((yes) => proxy.listen(0, "127.0.0.1", yes));
+  const proxyPort = (proxy.address() as any).port;
+  const publicOrigin = "http://127.0.0.1:" + proxyPort, base = publicOrigin + prefix;
+  const setupToken = randomBytes(32).toString("base64url");
   await writeFile(join(configDir, "vega-local", "trusted-sites.json"), JSON.stringify({ trustedOrigins: [base] }));
   // >1 MiB once base64-encoded, so the client must post it to /api/local-agent/result instead of the socket.
   await writeFile(join(clientDir, "large.txt"), "x".repeat(900000));
@@ -96,9 +124,10 @@ test("native client authorizes at the website, then runs directly without a webp
   await new Promise<void>((yes) => mock.listen(0, "127.0.0.1", yes));
   const children: ChildProcess[] = [], events: any[] = [];
   let logs = "", cookie = "", csrf = "", webpage: AbortController | undefined, webpageRead: Promise<void> | undefined;
-  const backendEnv = { ...process.env, VEGA_DB: join(dir, "app.db"), VEGA_TOKEN: setupToken, VEGA_PUBLIC_URL: base, VEGA_BROWSER_MODE: "", NITRO_HOST: "127.0.0.1", NITRO_PORT: String(port), VEGA_SKILL_CACHE: join(dir, "skills") };
+  const backendEnv = { ...process.env, VEGA_DB: join(dir, "app.db"), VEGA_TOKEN: setupToken, VEGA_PUBLIC_URL: base, VEGA_BROWSER_MODE: "", NITRO_HOST: "127.0.0.1", NITRO_PORT: String(port), VEGA_SKILL_CACHE: join(dir, "skills"), VEGA_CLIENTS_DIR: clientDir };
+  const serverEntry = resolve(process.env.VEGA_TEST_SERVER_ENTRY || ".output/server/index.mjs");
   const startBackend = () => {
-    const child = spawn(process.execPath, [resolve(".output/server/index.mjs")], { windowsHide: true, stdio: "pipe", env: backendEnv });
+    const child = spawn(process.execPath, [serverEntry], { windowsHide: true, stdio: "pipe", env: backendEnv });
     child.stdout!.on("data", (b) => logs += b); child.stderr!.on("data", (b) => logs += b);
     children.push(child); return child;
   };
@@ -106,9 +135,10 @@ test("native client authorizes at the website, then runs directly without a webp
   // 否则它弹窗就退出，这里只会等到配对超时。拷一份到临时目录，别把站点信息写进仓库。
   const clientExe = join(clientDir, process.platform === "win32" ? "vega-local.exe" : "vega-local");
   await copyFile(binary, clientExe);
+  await writeFile(join(clientDir, "vega-local-package-fixture"), "test binary");
   await writeFile(join(clientDir, "instance.json"), JSON.stringify({ origin: base }));
-  const startClient = () => {
-    const child = spawn(clientExe, process.env.VEGA_TEST_CLIENT_HELPER === "1" ? ["-test.run=^TestDeviceClientFixture$"] : [], { cwd: clientDir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, APPDATA: configDir, XDG_CONFIG_HOME: configDir, VEGA_DEVICE_E2E_HELPER: process.env.VEGA_TEST_CLIENT_HELPER } });
+  const startClient = (chatOnly = false) => {
+    const child = spawn(clientExe, helper ? ["-test.run=^TestDeviceClientFixture$"] : [], { cwd: clientDir, windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, APPDATA: configDir, XDG_CONFIG_HOME: configDir, VEGA_DEVICE_E2E_HELPER: process.env.VEGA_TEST_CLIENT_HELPER, VEGA_DEVICE_E2E_CHAT_ONLY: chatOnly ? "1" : "0" } });
     child.stdout!.on("data", (b) => logs += b); child.stderr!.on("data", (b) => logs += b);
     children.push(child); return child;
   };
@@ -118,12 +148,12 @@ test("native client authorizes at the website, then runs directly without a webp
   };
   let backend = startBackend(), client = startClient();
   const api = async (path: string, method = "GET", data?: any) => {
-    const r = await fetch(base + "/api" + path, { method, headers: { cookie, "x-csrf-token": csrf, "content-type": "application/json" }, body: data === undefined ? undefined : JSON.stringify(data) });
+    const r = await fetch(base + "/api" + path, { method, headers: { cookie, "x-csrf-token": csrf, "content-type": "application/json", origin: publicOrigin }, body: data === undefined ? undefined : JSON.stringify(data) });
     const value = await r.json(); if (!r.ok) throw Error(JSON.stringify(value)); return value;
   };
   const until = async (condition: () => boolean | Promise<boolean>) => {
     for (let i = 0; i < 600; i++) { if (await condition()) return; await sleep(20); }
-    throw Error("Native client fixture timed out: " + logs);
+    throw Error("Native client fixture timed out: " + logs.replace(/client_authorization=[\w-]+/g, "client_authorization=[fixture]") + "\nSocket GET statuses: " + socketStatuses.join(", "));
   };
   const run = async (id: string, text: string) => {
     const before = (await api("/sessions/" + id)).messages.length;
@@ -142,25 +172,33 @@ test("native client authorizes at the website, then runs directly without a webp
     assert.equal(anonymous.status, 401, "device details require a website login");
     const withoutCsrf = await fetch(base + "/api/local-agent/device/decision", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ requestId, approved: true }) });
     assert.equal(withoutCsrf.status, 403, "website consent requires CSRF protection");
-    const forgedBrowser = await fetch(base + "/api/local-agent/device/token", { method: "POST", headers: { origin: base, "content-type": "application/json" }, body: "{}" });
+    const forgedBrowser = await fetch(base + "/api/local-agent/device/token", { method: "POST", headers: { origin: publicOrigin, "content-type": "application/json" }, body: "{}" });
     assert.equal(forgedBrowser.status, 403, "browser origins cannot impersonate the native token exchange");
     assert.equal((await api("/bootstrap")).clients.length, 0, "the client is offline until a user approves");
     await api("/local-agent/device/decision", "POST", { requestId, approved: true });
     await until(async () => (await api("/bootstrap")).clients.length === 1);
   };
   try {
+    const oldAddress = await fetch(publicOrigin + "/api/auth/me", { redirect: "manual" });
+    assert.equal(oldAddress.status, 302);
+    assert.equal(oldAddress.headers.get("location"), prefix + "/api/auth/me");
+    await oldAddress.body?.cancel();
     await until(async () => { try { return (await fetch(base + "/api/auth/me")).ok; } catch { return false; } });
     const setup = await fetch(base + "/api/auth/setup", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ setupToken, username: "native-fixture", password: "a-long-native-fixture-password" }) });
     assert.equal(setup.status, 200);
     cookie = setup.headers.get("set-cookie")!.split(";")[0]; const login = await setup.json(); csrf = login.csrfToken;
     const cookieAge = Number(/Max-Age=(\d+)/i.exec(setup.headers.get("set-cookie")!)?.[1]);
     assert(cookieAge >= 604790 && cookieAge <= 604800);
+    const download = await fetch(base + "/api/clients/vega-local-package-fixture.zip", { headers: { cookie } });
+    assert.equal(download.status, 200);
+    const archive = unzipSync(new Uint8Array(await download.arrayBuffer()));
+    assert.equal(JSON.parse(strFromU8(archive["instance.json"])).origin, base);
     const denied = await fetch(base + "/api/local-agent/ticket", { method: "POST", headers: { cookie, "content-type": "application/json" }, body: JSON.stringify({ instance: "a".repeat(32) }) });
     assert.equal(denied.status, 403);
     const ticket = await api("/events", "POST", {});
     // 网页那条实时通道也是 SSE：Cookie + Origin 走请求头（和浏览器一致），读流由测试自己管。
     webpage = new AbortController();
-    const eventsResponse = await fetch(base + "/api/events?ticket=" + ticket.ticket, { headers: { cookie, origin: base, accept: "text/event-stream" }, signal: webpage.signal });
+    const eventsResponse = await fetch(base + "/api/events?ticket=" + ticket.ticket, { headers: { cookie, origin: publicOrigin, accept: "text/event-stream" }, signal: webpage.signal });
     assert.equal(eventsResponse.status, 200);
     webpageRead = readEvents(eventsResponse, (value) => { events.push(value); }, webpage.signal);
     await until(() => events.some((event) => event.type === "ready"));
@@ -196,7 +234,8 @@ test("native client authorizes at the website, then runs directly without a webp
     await sleep(100);
     assert.equal(modelCalls, callsAtPause);
     await until(async () => (await api("/bootstrap")).clients.length === 0);
-    const clientConfig = join(configDir, "vega-local", `http-127.0.0.1_${port}`, "trusted-sites.json");
+    const siteKey = createHash("sha256").update(base).digest("hex").slice(0, 24);
+    const clientConfig = join(configDir, "vega-local", `http-127.0.0.1_${proxyPort}~${siteKey}`, "trusted-sites.json");
     await until(async () => { try { return !(JSON.parse(await readFile(clientConfig, "utf8")).servers || []).length; } catch { return false; } });
     await stop(client); client = startClient();
     await authorizeClient();
@@ -206,6 +245,8 @@ test("native client authorizes at the website, then runs directly without a webp
   } finally {
     webpage?.abort(); await webpageRead?.catch(() => {});
     for (const child of children) await stop(child);
+    proxy.closeAllConnections();
+    await new Promise<void>((yes) => proxy.close(() => yes()));
     await new Promise<void>((yes) => mock.close(() => yes()));
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }

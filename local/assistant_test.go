@@ -31,12 +31,16 @@ func TestAssistantCredentialFollowsTheNewestPairing(t *testing.T) {
 	if _, token, ok := agent.assistantCredential(); !ok || token != strings.Repeat("o", 43) {
 		t.Fatalf("picked %q (ok=%v), want the older pairing as fallback", token, ok)
 	}
+	agent.pinnedOrigin += "/vega"
+	if _, _, ok := agent.assistantCredential(); ok {
+		t.Fatal("a site directory must not fall back to the root site's credential")
+	}
 }
 
 func TestAssistantFileProxyPreservesLargeDownloadAndChecksOrigin(t *testing.T) {
 	const token = "fixture-device-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/local-agent/chat/file" || r.Header.Get("Authorization") != "Bearer "+token {
+		if r.URL.Path != "/vega/api/local-agent/chat/file" || r.Header.Get("Authorization") != "Bearer "+token {
 			t.Errorf("unexpected request: %s %s", r.URL.Path, r.Header.Get("Authorization"))
 		}
 		fmt.Fprint(w, `{"data":"`+strings.Repeat("Y", 9<<20)+`"}`)
@@ -46,7 +50,8 @@ func TestAssistantFileProxyPreservesLargeDownloadAndChecksOrigin(t *testing.T) {
 	if err != nil {
 		t.Skipf("token protection unavailable: %v", err)
 	}
-	agent := &Agent{pinnedOrigin: server.URL, configToken: "test", config: Config{Servers: []ServerCredential{{Origin: server.URL, UserID: "u1", Token: protected}}}}
+	base := server.URL + "/vega"
+	agent := &Agent{pinnedOrigin: base, configToken: "test", config: Config{Servers: []ServerCredential{{Origin: base, UserID: "u1", Token: protected}}}}
 	mux := http.NewServeMux()
 	agent.assistantMount(mux)
 	post := func(origin string) *httptest.ResponseRecorder {

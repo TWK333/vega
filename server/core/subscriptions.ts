@@ -171,10 +171,11 @@ export class Subscriptions {
       };
       // Devin only accepts loopback redirect URIs ("Invalid redirect URI" otherwise), so the site's own
       // callback works only when Vega itself is opened on localhost; anywhere else use the manual loopback flow.
-      const base = context.callbackOrigin ? httpURL(context.callbackOrigin, true) : undefined;
+      const base = context.callbackOrigin ? httpURL(context.callbackOrigin) : undefined;
+      if (base?.search || base?.hash) throw Error("OAuth callback base must not contain a query or fragment");
       const local = !!base && ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
       if (local) {
-        pending.callback = base!.origin + "/api/providers/callback/devin";
+        pending.callback = base!.origin + base!.pathname.replace(/\/$/, "") + "/api/providers/callback/devin";
       } else {
         const server = createServer((req, res) => {
           const u = new URL(req.url || "/", "http://127.0.0.1");

@@ -6,6 +6,7 @@ import * as h3 from "h3";
 import * as auth from "../server/core/auth";
 import {
   publicOrigin,
+  publicSiteURL,
   sameOrigin,
   setLogin,
   clearLogin,
@@ -51,7 +52,8 @@ test("login cookies are HttpOnly/SameSite Strict and Secure follows a pinned pub
   const previous = process.env.VEGA_PUBLIC_URL;
   try {
     delete process.env.VEGA_PUBLIC_URL;
-    let v = event({ "x-forwarded-proto": "https" });
+    let v = event({ "x-forwarded-proto": "https", "x-forwarded-prefix": "/untrusted" });
+    assert.equal(publicSiteURL(v.event), "http://vega.test");
     assert.equal(publicOrigin(v.event), "http://vega.test");
     setLogin(v.event, "cookie-fixture", Date.now() + 3600000);
     let cookie = String(v.values["set-cookie"]);
@@ -74,8 +76,15 @@ test("login cookies are HttpOnly/SameSite Strict and Secure follows a pinned pub
       () => sameOrigin(event({ "sec-fetch-site": "cross-site" }).event),
       { statusCode: 403 },
     );
-    process.env.VEGA_PUBLIC_URL = "https://public.example/subpath";
-    assert.throws(() => publicOrigin(v.event), { statusCode: 500 });
+    process.env.VEGA_PUBLIC_URL = "https://public.example/apps/vega/";
+    assert.equal(publicSiteURL(v.event), "https://public.example/apps/vega");
+    assert.equal(publicOrigin(v.event), "https://public.example");
+    sameOrigin(v.event);
+    assert.throws(() => sameOrigin(event({ origin: "https://public.example/apps/vega" }).event), { statusCode: 403 });
+    for (const path of ["/vega//team", "/vega/../team", "/%2e/vega", "/vega%2fteam", "/vega?", "/vega#"] ) {
+      process.env.VEGA_PUBLIC_URL = `https://public.example${path}`;
+      assert.throws(() => publicSiteURL(v.event), { statusCode: 500 });
+    }
   } finally {
     if (previous === undefined) delete process.env.VEGA_PUBLIC_URL;
     else process.env.VEGA_PUBLIC_URL = previous;

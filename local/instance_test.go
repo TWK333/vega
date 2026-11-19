@@ -13,18 +13,28 @@ func TestInstancePinIsRequiredAndValidated(t *testing.T) {
 		t.Fatalf("missing package site info must be reported: %v", err)
 	}
 	path := filepath.Join(dir, "instance.json")
-	if err := os.WriteFile(path, []byte(`{"origin":"https://vega.example/path"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readInstancePin(dir); err == nil {
-		t.Fatal("origin with a path must be rejected")
-	}
-	if err := os.WriteFile(path, []byte(`{"origin":"https://vega.example","downloadedAt":1}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"origin":"https://vega.example/apps/vega/","downloadedAt":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	pin, err := readInstancePin(dir)
-	if err != nil || pin.Origin != "https://vega.example" || pin.DownloadedAt != 1 {
+	if err != nil || pin.Origin != "https://vega.example/apps/vega" || pin.DownloadedAt != 1 {
 		t.Fatalf("valid package site info rejected: %+v %v", pin, err)
+	}
+}
+
+func TestSiteBaseRejectsAmbiguousAddresses(t *testing.T) {
+	for _, raw := range []string{
+		"https://name:password@vega.example/vega", "https://vega.example/vega?x=1", "https://vega.example/vega?",
+		"https://vega.example/vega#", "https://vega.example/vega/../other", "https://vega.example/vega/.",
+		"https://vega.example/vega//other", "https://vega.example/vega%2Fother", "https://vega.example/%2e%2e/vega",
+		`https://vega.example/vega\other`, "//vega.example/vega", "ftp://vega.example/vega",
+	} {
+		if _, err := parseSiteBase(raw); err == nil {
+			t.Errorf("accepted invalid site base %q", raw)
+		}
+	}
+	if !validSiteBase("https://vega.example") || !validSiteBase("https://vega.example/vega") || validOrigin("https://vega.example/vega") {
+		t.Fatal("accept site directories in the install pin, not in the browser Origin header")
 	}
 }
 
@@ -40,5 +50,12 @@ func TestSiteSlugKeepsSitesApart(t *testing.T) {
 		if got, err := siteSlug(origin); err != nil || got != want {
 			t.Fatalf("siteSlug(%q) = %q, %v; want %q", origin, got, err, want)
 		}
+	}
+	a, _ := siteSlug("https://vega.example/vega")
+	b, _ := siteSlug("https://vega.example/vega/")
+	c, _ := siteSlug("https://vega.example/Vega")
+	d, _ := siteSlug("https://vega.example/team/vega")
+	if a == "" || a != b || a == "vega.example" || a == c || a == d {
+		t.Fatalf("unexpected site data directories: %q %q %q %q", a, b, c, d)
 	}
 }

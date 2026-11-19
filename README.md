@@ -66,7 +66,7 @@ MySQL 需要 **8.0.19 及以上**（不支持 MariaDB），数据库须事先创
 
 ### HTTPS与反向代理
 
-网站和客户端均支持HTTP与HTTPS；公网建议使用HTTPS。`VEGA_PUBLIC_URL`设置为实际访问的HTTP(S) origin（如`http://vega.example.com:8080`或`https://vega.example.com`，不带路径），服务按该origin检查请求，仅HTTPS使用Secure Cookie。**HTTP下登录信息、设备凭据与命令明文传输，存在被窃听或篡改的风险。** 不要信任任意客户端传入的Forwarded头。反代保留Host，并让`/api/events`、`/api/chrome/live`、`/api/local-agent/socket`、`/api/local-agent/relay`的响应**不缓冲**（服务端已发`X-Accel-Buffering: no`，nginx 还需`proxy_buffering off`）；设备连接还需保留Authorization头，流量中继隧道还须转发`X-Vega-Relay`。直接本地HTTP开发可不设置此变量。
+网站和客户端均支持 HTTP 与 HTTPS；公网建议使用 HTTPS。`VEGA_PUBLIC_URL` 填用户实际访问的完整站点地址，例如 `https://vega.example.com` 或 `https://example.com/vega`。下载包会保留目录，浏览器同源检查仍只比较协议、主机和端口；仅 HTTPS 使用 Secure Cookie。对于子目录部署，反代需将 `/vega/api/...`、`/vega/clients/...` 内部转发到后端的 `/api/...`、`/clients/...`，不要对这些请求返回 30x；网页和静态资源仍沿用部署端的目录映射。**HTTP 下登录信息、设备凭据与命令明文传输。** 不要信任任意客户端传入的 Forwarded 头。反代保留 Host，并让实时事件流未经缓冲，设备连接还需保留 Authorization 头，流量中继隧道还须转发 `X-Vega-Relay`。直接本地 HTTP 开发可不设置此变量。
 
 **实时通道与超时**：网页的所有API都走普通HTTP，`/api/events`只推送事件，不再转发API请求。服务端每20秒发送一次心跳并做协议级ping，网页75秒收不到任何消息才重连；重连带上次的事件序号，2分钟/5000条以内的断线只补发漏掉的事件，不整页刷新。牵牛星客户端每5秒心跳，大于256KB的结果改为`POST /api/local-agent/result`上传（同样需要保留Authorization头，并允许最大48MB请求体）。反代请据此设置：
 

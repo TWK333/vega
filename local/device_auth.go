@@ -102,7 +102,10 @@ func (a *Agent) requestDeviceAuthorization(ctx context.Context, open func(string
 		if err == nil {
 			break
 		}
-		if status >= 300 && status < 500 || status == http.StatusOK {
+		if status >= 300 && status < 400 {
+			return ServerCredential{}, "", fmt.Errorf("站点授权地址发生跳转（HTTP %d）：请用含部署目录的实际站点地址重新下载安装包", status)
+		}
+		if status >= 400 && status < 500 || status == http.StatusOK {
 			return ServerCredential{}, "", fmt.Errorf("无法发起授权（HTTP %d），请检查服务端版本", status)
 		}
 		a.noteSite(a.pinnedOrigin, "暂时连不上站点，客户端将自动重试")

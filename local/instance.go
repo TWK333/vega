@@ -4,11 +4,13 @@ package main
 // 数据目录也按站点分开，多个站点各自独立、不会互相覆盖配置。
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -20,6 +22,32 @@ type instancePin struct {
 
 const instanceFileName = "instance.json"
 
+var sitePathSegment = regexp.MustCompile(`^[A-Za-z0-9._~-]+$`)
+
+// A pinned site may have a mount path; a browser Origin header still may not.
+func parseSiteBase(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	invalid := fmt.Errorf("站点地址必须是 HTTP(S) 地址，可带目录，不得含凭据、查询参数或片段")
+	if err != nil || u.Hostname() == "" || u.User != nil || u.RawPath != "" ||
+		(u.Scheme != "http" && u.Scheme != "https") || strings.ContainsAny(raw, "?#\\") {
+		return nil, invalid
+	}
+	u.Path = strings.TrimSuffix(u.Path, "/")
+	if u.Path != "" {
+		for _, segment := range strings.Split(u.Path[1:], "/") {
+			if !sitePathSegment.MatchString(segment) || segment == "." || segment == ".." {
+				return nil, invalid
+			}
+		}
+	}
+	return u, nil
+}
+
+func validSiteBase(base string) bool {
+	u, err := parseSiteBase(base)
+	return err == nil && u.String() == base
+}
+
 // readInstancePin 读 exe 同目录的安装包信息。没有它就不是从站点下载的安装包，直接拒绝启动。
 func readInstancePin(exeDir string) (instancePin, error) {
 	var pin instancePin
@@ -30,17 +58,19 @@ func readInstancePin(exeDir string) (instancePin, error) {
 	if err = json.Unmarshal(data, &pin); err != nil {
 		return pin, fmt.Errorf("%s 不是有效的站点信息：%w", instanceFileName, err)
 	}
-	if !validOrigin(pin.Origin) {
-		return pin, fmt.Errorf("%s 里的站点地址无效：%q", instanceFileName, pin.Origin)
+	base, err := parseSiteBase(pin.Origin)
+	if err != nil {
+		return pin, fmt.Errorf("%s：%w", instanceFileName, err)
 	}
+	pin.Origin = base.String()
 	return pin, nil
 }
 
-// siteSlug 把站点地址变成数据目录名：默认端口只留主机名，其它端口和 http 明文方案带上以免撞名。
+// siteSlug 站点根路径继续使用旧目录，子目录的配置与凭据单独存放。
 func siteSlug(origin string) (string, error) {
-	parsed, err := url.Parse(origin)
-	if err != nil || parsed.Hostname() == "" {
-		return "", fmt.Errorf("无效的站点地址：%q", origin)
+	parsed, err := parseSiteBase(origin)
+	if err != nil {
+		return "", err
 	}
 	slug := strings.ToLower(parsed.Hostname())
 	if parsed.Scheme == "http" {
@@ -58,6 +88,10 @@ func siteSlug(origin string) (string, error) {
 	}, slug)
 	if cleaned == "" || cleaned == "." || cleaned == ".." {
 		return "", fmt.Errorf("无法从站点地址生成数据目录：%q", origin)
+	}
+	if parsed.Path != "" {
+		key := sha256.Sum256([]byte(parsed.String()))
+		return fmt.Sprintf("%s~%x", cleaned, key[:12]), nil
 	}
 	return cleaned, nil
 }
@@ -79,8 +113,11 @@ func siteDataDir(origin string) (string, error) {
 	return dir, nil
 }
 
-// siteLabel 是托盘上显示的站点名（主机名，非默认端口时带端口）。
+// siteLabel 在托盘展示实际地址，避免同一主机的多个子目录站点看起来一样。
 func (a *Agent) siteLabel() string {
+	if u, err := parseSiteBase(a.pinnedOrigin); err == nil && u.Path != "" {
+		return u.Host + u.Path
+	}
 	slug, err := siteSlug(a.pinnedOrigin)
 	if err != nil {
 		return a.pinnedOrigin

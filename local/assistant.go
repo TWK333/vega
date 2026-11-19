@@ -165,17 +165,14 @@ func (a *Agent) assistantCredential() (ServerCredential, string, bool) {
 	servers := append([]ServerCredential{}, a.config.Servers...)
 	pinned := a.pinnedOrigin
 	a.mu.Unlock()
-	// 同一站点可以配多个账号，配对时新的追加在末尾：面板跟最近配对的账号走，
-	// 否则会一直用最早那个（往往早已不用的空账号，左栏永远「还没有牛马」）。
-	for _, liked := range []bool{true, false} {
-		for i := len(servers) - 1; i >= 0; i-- {
-			saved := servers[i]
-			if liked != (saved.Origin == pinned) || !validOrigin(saved.Origin) {
-				continue
-			}
-			if token, err := unprotectToken(saved.Token); err == nil && token != "" {
-				return saved, token, true
-			}
+	// 设备凭据只属于安装包指定的站点（含目录），不能回退到同主机的其它站点。
+	for i := len(servers) - 1; i >= 0; i-- {
+		saved := servers[i]
+		if saved.Origin != pinned || !validSiteBase(saved.Origin) {
+			continue
+		}
+		if token, err := unprotectToken(saved.Token); err == nil && token != "" {
+			return saved, token, true
 		}
 	}
 	return ServerCredential{}, "", false

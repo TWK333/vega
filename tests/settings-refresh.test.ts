@@ -48,7 +48,7 @@ test("employee times are Beijing regardless of server timezone, including midnig
   }
 });
 
-test("remote Devin PKCE returns to the website, is state/owner-bound and never binds a server loopback listener", async () => {
+test("Devin PKCE preserves the website callback path or falls back to manual loopback, and stays state/owner-bound", async () => {
   const store = await Store.open(":memory:"),
     auth = new Subscriptions(store, "");
   let exchanges = 0;
@@ -62,7 +62,7 @@ test("remote Devin PKCE returns to the website, is state/owner-bound and never b
   };
   try {
     const publicStart = await auth.loginStart("devin", "global", {
-      callbackOrigin: "https://vega.example",
+      callbackOrigin: "https://vega.example/vega",
       owner: "admin-one",
     });
     // Devin rejects non-loopback redirect URIs, so a public origin falls back to the manual loopback flow.
@@ -74,14 +74,14 @@ test("remote Devin PKCE returns to the website, is state/owner-bound and never b
     auth.pending.get(publicStart.state)?.close?.();
     auth.pending.delete(publicStart.state);
     const start = await auth.loginStart("devin", "global", {
-        callbackOrigin: "http://localhost:3000",
+        callbackOrigin: "http://localhost:3000/apps/vega",
         owner: "admin-one",
       }),
       url = new URL(start.url);
     assert.equal(start.manual, false);
     assert.equal(
       url.searchParams.get("redirect_uri"),
-      "http://localhost:3000/api/providers/callback/devin",
+      "http://localhost:3000/apps/vega/api/providers/callback/devin",
     );
     assert.equal(url.searchParams.get("code_challenge_method"), "S256");
     assert.throws(() =>

@@ -9,7 +9,7 @@ import {
 } from "../../core/browser-preview";
 import { externalMcpApi } from "../../core/external-mcp";
 import { triggersApi } from "../../core/triggers";
-import { publicOrigin, principal } from "../../core/http-auth";
+import { publicOrigin, publicSiteURL, principal } from "../../core/http-auth";
 import { authRoute, bodyJSON } from "../../core/http-auth-routes";
 import { AuthError, check } from "../../core/auth";
 import { sep } from "node:path";
@@ -60,7 +60,7 @@ export default defineEventHandler(async (event) => {
   // 客户端安装包仅固定站点，首次启动时由用户在站点授权设备。
   if (path[0] === "clients" && path.length === 2) {
     check(method === "GET", 405, "GET required");
-    const file = clientBaseName(path[1]), body = await clientPackage(file, publicOrigin(event));
+    const file = clientBaseName(path[1]), body = await clientPackage(file, publicSiteURL(event));
     setHeader(event, "Content-Type", "application/zip");
     setHeader(event, "Content-Disposition", `attachment; filename="${file}.zip"`);
     setHeader(event, "Cache-Control", "no-store");
@@ -598,7 +598,7 @@ export default defineEventHandler(async (event) => {
       if (path[1] === "login") {
         if (a.action === "start")
           return engine.catalog.auth.loginStart(a.source, a.site, {
-            callbackOrigin: a.manual === true ? undefined : publicOrigin(event),
+            callbackOrigin: a.manual === true ? undefined : publicSiteURL(event),
             owner: user.id,
           });
         if (a.action === "poll")

@@ -39,6 +39,8 @@ test("the install package carries the site's own origin next to the client binar
   // 另一个站点有自己的包，指向它自己。
   const other = await clientPackage(name, "https://other.example");
   assert.equal(JSON.parse(strFromU8(unzipSync(other)["instance.json"])).origin, "https://other.example");
+  const prefixed = await clientPackage(name, "https://vega.example/vega");
+  assert.equal(JSON.parse(strFromU8(unzipSync(prefixed)["instance.json"])).origin, "https://vega.example/vega");
 });
 
 test("only known client files can be packaged", async (t) => {

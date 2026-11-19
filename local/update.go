@@ -10,8 +10,8 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -57,8 +57,8 @@ func newerVersion(next, current string) bool {
 	return false
 }
 func secureUpdateOrigin(origin string) bool {
-	u, err := url.Parse(origin)
-	if err != nil || u.User != nil || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+	u, err := parseSiteBase(origin)
+	if err != nil {
 		return false
 	}
 	ip := net.ParseIP(u.Hostname())
@@ -82,14 +82,16 @@ func downloadUpdate(ctx context.Context, origin, current, target string) (*stage
 	if !secureUpdateOrigin(origin) {
 		return nil, fmt.Errorf("automatic updates require HTTPS (or loopback HTTP)")
 	}
+	base, _ := parseSiteBase(origin)
 	client := &http.Client{Timeout: 5 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 || req.URL.Scheme+"://"+req.URL.Host != origin {
-			return fmt.Errorf("cross-origin update redirect refused")
+		if len(via) >= 5 || req.URL.Scheme != base.Scheme || req.URL.Host != base.Host || req.URL.User != nil ||
+			(base.Path != "" && (req.URL.RawPath != "" || strings.ContainsAny(req.URL.Path, `\%`) || !strings.HasPrefix(path.Clean(req.URL.Path), base.Path+"/"))) {
+			return fmt.Errorf("update redirect outside the pinned site refused")
 		}
 		return nil
 	}}
 	get := func(path string) (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, origin+"/clients/"+path, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String()+"/clients/"+path, nil)
 		if err != nil {
 			return nil, err
 		}

@@ -78,7 +78,8 @@ func TestClientVersions(t *testing.T) {
 	for origin, want := range map[string]bool{
 		"https://example.test": true, "http://127.0.0.1:8080": true, "http://[::1]:8080": true,
 		"http://localhost:8080": true, "http://example.test": false, "http://127.0.0.1.evil.test": false,
-		"https://user:pass@example.test": false, "https://example.test/path": false, "file:///tmp": false,
+		"https://user:pass@example.test": false, "https://example.test/path": true, "file:///tmp": false,
+		"http://127.0.0.1:8080/vega": true, "http://example.test/vega": false,
 	} {
 		if secureUpdateOrigin(origin) != want {
 			t.Errorf("update origin %s", origin)
@@ -86,7 +87,7 @@ func TestClientVersions(t *testing.T) {
 	}
 }
 func TestUpdateDownloadValidation(t *testing.T) {
-	for _, scenario := range []string{"valid", "same", "older", "bad-version", "missing-platform", "path-traversal", "bad-hash", "short", "long", "oversized", "empty", "redirect", "bad-json", "large-manifest", "not-found"} {
+	for _, scenario := range []string{"valid", "directory", "directory-redirect", "directory-escape", "same", "older", "bad-version", "missing-platform", "path-traversal", "bad-hash", "short", "long", "oversized", "empty", "redirect", "bad-json", "large-manifest", "not-found"} {
 		t.Run(scenario, func(t *testing.T) {
 			body := []byte("new native client")
 			hash := sha256.Sum256(body)
@@ -117,11 +118,15 @@ func TestUpdateDownloadValidation(t *testing.T) {
 			if scenario != "missing-platform" {
 				manifest.Assets[runtime.GOOS+"-"+runtime.GOARCH] = asset
 			}
+			prefix := ""
+			if strings.HasPrefix(scenario, "directory") {
+				prefix = "/vega"
+			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.Header.Get("Authorization") != "" {
 					t.Error("device token must not be used for static downloads")
 				}
-				if r.URL.Path == "/clients/manifest.json" {
+				if r.URL.Path == prefix+"/clients/manifest.json" {
 					switch scenario {
 					case "bad-json":
 						fmt.Fprint(w, "{")
@@ -136,17 +141,33 @@ func TestUpdateDownloadValidation(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(manifest)
 					return
 				}
-				if scenario == "redirect" {
-					http.Redirect(w, r, "http://example.test/payload", http.StatusFound)
+				switch r.URL.Path {
+				case prefix + "/clients/" + clientFilename():
+					switch scenario {
+					case "redirect":
+						http.Redirect(w, r, "http://example.test/payload", http.StatusFound)
+						return
+					case "directory-redirect":
+						http.Redirect(w, r, prefix+"/clients/current.exe", http.StatusFound)
+						return
+					case "directory-escape":
+						http.Redirect(w, r, prefix+"-other/clients/current.exe", http.StatusFound)
+						return
+					}
+				case prefix + "/clients/current.exe":
+				default:
+					t.Errorf("unexpected path %s", r.URL.Path)
+					http.NotFound(w, r)
 					return
 				}
 				_, _ = w.Write(body)
 			}))
 			defer server.Close()
 			dir := t.TempDir()
-			update, err := downloadUpdate(context.Background(), server.URL, "0.3.0", filepath.Join(dir, "client.exe"))
+			update, err := downloadUpdate(context.Background(), server.URL+prefix, "0.3.0", filepath.Join(dir, "client.exe"))
+			valid := scenario == "valid" || scenario == "directory" || scenario == "directory-redirect"
 			switch scenario {
-			case "valid":
+			case "valid", "directory", "directory-redirect":
 				if err != nil || update == nil {
 					t.Fatalf("download: %v, %v", update, err)
 				}
@@ -164,7 +185,7 @@ func TestUpdateDownloadValidation(t *testing.T) {
 				}
 			}
 			files, _ := os.ReadDir(dir)
-			if scenario != "valid" && len(files) != 0 {
+			if !valid && len(files) != 0 {
 				t.Fatal("failed download left partial executables")
 			}
 		})
