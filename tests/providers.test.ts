@@ -180,6 +180,43 @@ test("all three standard protocols stream tools, thinking and usage", async () =
     assert.deepEqual(result.calls![0].arguments, { path: "a" }, api);
   }
 });
+function streamedCalls(...parts: any[][]) {
+  return parts.map((tool_calls) => `data: ${JSON.stringify({ choices: [{ delta: { tool_calls } }] })}\n\n`).join("") +
+    'data: {"choices":[{"finish_reason":"tool_calls"}]}\n\ndata: [DONE]\n\n';
+}
+
+test("Completions uses IDs over colliding or missing indexes and keeps independent arguments", async () => {
+  const stream = streamedCalls(
+    [{ id: "r", index: 1, function: { name: "read", arguments: '{"path":"' } },
+      { id: "b", index: 1, function: { name: "bash", arguments: '{"command":"' } }],
+    [{ id: "b", function: { arguments: 'echo"}' } },
+      { id: "r", function: { arguments: 'a"}' } },
+      { id: "w", function: { name: "write", arguments: '{"path":"b"}' } }],
+  );
+  const reply = await new Providers().chat(model("openai-completions", await http(stream)), "sys", [], [{ ...tool, name: "read" }, { ...tool, name: "bash" }, { ...tool, name: "write" }], AbortSignal.timeout(5000));
+  assert.deepEqual(reply.calls, [
+    { id: "r", name: "read", arguments: { path: "a" } },
+    { id: "b", name: "bash", arguments: { command: "echo" } },
+    { id: "w", name: "write", arguments: { path: "b" } },
+  ]);
+});
+
+test("Completions accepts anonymous fragments only with an unambiguous slot", async () => {
+  const head = (id: string, index: number) => ({ id, index, function: { name: "read", arguments: '{"path":"' } });
+  const end = (path: string, index?: number) => ({ index, function: { arguments: path + '"}' } });
+  const run = async (parts: any[][], defer = false) => new Providers().chat(
+    model("openai-completions", await http(streamedCalls(...parts))), "sys", [], [tool], AbortSignal.timeout(5000), undefined, "", undefined, defer,
+  );
+  const indices = await run([[head("second", 7), head("first", 1)], [end("a", 1), end("b", 7)]]);
+  assert.deepEqual(indices.calls?.map((c) => [c.id, c.arguments.path]), [["first", "a"], ["second", "b"]]);
+  assert.equal((await run([[head("one", 4)], [end("a")]])).calls?.[0].arguments.path, "a");
+  for (const parts of [
+    [[head("one", 1)], [end("a", 1)], [head("two", 1)]],
+    [[head("one", 1), head("two", 2)], [end("a")]],
+    [[head("one", 1)], [end("a", 3)]],
+  ]) await assert.rejects(run(parts, true), /Ambiguous streamed tool call.*no tools were dispatched/);
+});
+
 test("session turns can report undeclared calls while one-shot provider users stay strict", async () => {
   const sse = (frames: any[]) => frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join("") + "data: [DONE]\n\n";
   const cases: [string, string, string][] = [

@@ -475,6 +475,40 @@ export async function bodyFor(
   applyPromptCache(body, model, cacheKey);
   return { path: "/chat/completions", body };
 }
+type ToolFragment = { id: string; name: string; args: string };
+function completionFragments(deltas: Obj[]): ToolFragment[] {
+  const slots = new Map<string, ToolFragment & { indexes: Set<number> }>();
+  const byIndex = new Map<number, ToolFragment | null>();
+  // Resolve against the whole response: even a later reuse makes an anonymous index ambiguous.
+  for (const call of deltas) {
+    assert(call && (call.id == null || typeof call.id === "string") &&
+      (call.index == null || (Number.isSafeInteger(call.index) && call.index >= 0)), "Invalid streamed tool call ID or index");
+    if (!call.id) continue;
+    assert(call.id.trim(), "Invalid streamed tool call ID");
+    let slot = slots.get(call.id);
+    if (!slot) slots.set(call.id, slot = { id: call.id, name: "", args: "", indexes: new Set() });
+    if (call.index != null) {
+      slot.indexes.add(call.index);
+      byIndex.set(call.index, !byIndex.has(call.index) || byIndex.get(call.index) === slot ? slot : null);
+    }
+  }
+  const only = slots.size === 1 ? slots.values().next().value : undefined;
+  for (const call of deltas) {
+    const name = call.function?.name, args = call.function?.arguments;
+    assert((name == null || typeof name === "string") && (args == null || typeof args === "string"), "Invalid streamed tool call fields");
+    if (!call.id && !name && !args) continue;
+    const slot = call.id ? slots.get(call.id) : call.index == null ? only
+      : byIndex.get(call.index) ?? (!byIndex.has(call.index) && only?.indexes.size === 0 ? only : undefined);
+    assert(slot, "Ambiguous streamed tool call fragment; no tools were dispatched");
+    slot.name += name || "";
+    slot.args += args || "";
+  }
+  const ordered = [...slots.values()];
+  if (byIndex.size === ordered.length && ordered.every((slot) => slot.indexes.size === 1) && ![...byIndex.values()].includes(null))
+    ordered.sort((a, b) => a.indexes.values().next().value! - b.indexes.values().next().value!);
+  return ordered;
+}
+
 type Checkpoint = {
   response: string;
   count: number;
@@ -717,10 +751,8 @@ export class Providers {
       model: model.selection,
       usage: {},
     };
-    const fragments = new Map<
-        number,
-        { id: string; name: string; args: string }
-      >(),
+    const fragments = new Map<number, ToolFragment>(),
+      completionDeltas: Obj[] = [],
       blocks = new Map<number, Obj>(),
       itemIndexes = new Map<string, number>();
     let complete = false,
@@ -887,6 +919,18 @@ export class Providers {
             delta("text_delta", d.content || "");
             delta("thinking_delta", d.reasoning_content || d.reasoning || "");
             if (choice.finish_reason) finish = choice.finish_reason;
+            if (model.api !== "codebuddy") {
+              const ids = new Set<string>();
+              for (const call of d.tool_calls || []) {
+                if (call?.id) {
+                  assert(!ids.has(call.id), "Duplicate tool call ID in one stream delta");
+                  ids.add(call.id);
+                }
+                completionDeltas.push(call);
+              }
+              continue;
+            }
+            // CodeBuddy has its own index-based protocol and can reuse IDs across different slots.
             for (const call of d.tool_calls || []) {
               const index = call.index || 0;
               let f = fragments.get(index);
@@ -917,7 +961,10 @@ export class Providers {
       );
       const seen = new Set<string>();
       const calls: Call[] = [];
-      for (const [index, f] of [...fragments].sort(([a], [b]) => a - b)) {
+      const ordered = completionDeltas.length
+        ? completionFragments(completionDeltas).map((f, i) => [i, f] as const)
+        : [...fragments].sort(([a], [b]) => a - b);
+      for (const [index, f] of ordered) {
         assert(f.id && f.name, "Invalid tool call");
         if (seen.has(f.id) && model.api === "codebuddy")
           f.id = callID("duplicate|" + f.id + "|" + index);
