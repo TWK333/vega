@@ -1364,7 +1364,7 @@ async function applyRoute(route) {
     if (route.view === "group" && route.group && !groups.value.some((g) => g.id === route.group)) route = { view: "employee" };
     if (ADMIN_PAGES.includes(route.view) && !isAdmin.value) route = { view: "employee" };
     // 非管理员只保留个人设置；只读账号不能配置触发器。
-    if (route.view === "settings" && ((!isAdmin.value && route.sub && !["vault", "external-mcp", "triggers"].includes(route.sub)) || (route.sub === "triggers" && !canExecute.value))) route = { view: "settings" };
+    if (route.view === "settings" && ((!isAdmin.value && route.sub && !["vault", "external-mcp", "principles", "triggers"].includes(route.sub)) || (route.sub === "triggers" && !canExecute.value))) route = { view: "settings" };
     if (route.view === "group") openGroup(route.group, route.groupTask);
     else if (route.view === "chat") {
       const session = route.session && sessions.value.find((s) => s.id === route.session);

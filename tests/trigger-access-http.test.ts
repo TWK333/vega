@@ -10,7 +10,7 @@ import { sleep } from "../server/core/util";
 
 type Login = { cookie: string; csrf: string };
 
-test("deployed trigger API is available only to the owning executable account", { skip: process.env.VEGA_TEST_DEPLOYED !== "1", timeout: 60000 }, async () => {
+test("deployed personal settings are scoped to the account, and triggers require execution permission", { skip: process.env.VEGA_TEST_DEPLOYED !== "1", timeout: 60000 }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "vega-trigger-auth-"));
   const reserve = createServer();
   await new Promise<void>((done) => reserve.listen(0, "127.0.0.1", done));
@@ -54,6 +54,28 @@ test("deployed trigger API is available only to the owning executable account", 
       return loginFrom(result);
     };
     const a = await sign("operator-a"), b = await sign("operator-b"), viewer = await sign("viewer");
+    await t.test("every role can save only its own work principles", async () => {
+      const path = "/me/work-principles";
+      assert.equal((await request(path)).response.status, 401);
+      assert.equal((await request(path, "PUT", { workPrinciples: "not authorized" }, { ...a, csrf: "" })).response.status, 403);
+      for (const [login, text] of [[admin, "管理员的原则"], [a, "操作者的原则"], [viewer, "只读账号的原则"]] as const) {
+        const saved = await request(path, "PUT", { workPrinciples: `  ${text}  ` }, login);
+        assert.equal(saved.response.status, 200, JSON.stringify(saved.value));
+        assert.equal(saved.value.workPrinciples, text);
+        const loaded = await request(path, "GET", undefined, login);
+        assert.equal(loaded.value.workPrinciples, text);
+        assert.match(loaded.response.headers.get("cache-control") || "", /no-store/i);
+      }
+      assert.equal((await request(path, "GET", undefined, b)).value.workPrinciples, "");
+      const other = await request(path, "PUT", { workPrinciples: "另一账号的原则", userId: setup.value.user.id }, b);
+      assert.equal(other.response.status, 200, JSON.stringify(other.value));
+      assert.equal((await request(path, "GET", undefined, b)).value.workPrinciples, "另一账号的原则");
+      assert.equal((await request(path, "GET", undefined, admin)).value.workPrinciples, "管理员的原则");
+      assert.equal((await request(path + "/other", "PUT", { workPrinciples: "not authorized" }, b)).response.status, 403);
+      assert.equal((await request(path, "GET", undefined, a)).value.workPrinciples, "操作者的原则");
+      assert.equal((await request(path, "PUT", { workPrinciples: 1 }, a)).response.status, 400);
+      assert.equal((await request(path, "GET", undefined, a)).value.workPrinciples, "操作者的原则");
+    });
     assert.equal((await request("/me/triggers", "GET", undefined, a)).response.status, 200);
     assert.equal((await request("/me/triggers", "GET", undefined, viewer)).response.status, 403);
     const input = { name: "hook", enabled: true, condition: "employee_message", action: "http", url: "https://example.com/hook?key=secret", headers: '{"Authorization":"Bearer secret-header"}', body: '{"text":"{{message}}\\n{{taskLinks}}"}' };

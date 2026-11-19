@@ -2,6 +2,7 @@ import { updateEmployeeAvatar, updateUserAvatar } from "../../core/employee-avat
 import { userExperienceGraph } from "../../core/experience-access";
 import { chatHistory, withoutStepOutputs } from "../../core/chat-page";
 import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
+import { getWorkPrinciples, setWorkPrinciples } from "../../core/work-principles";
 import {
   browserTabs,
   browserScreenshot,
@@ -116,9 +117,10 @@ export default defineEventHandler(async (event) => {
   }
   const who = principal(event),
     user = who.user;
+  const principlesRoute = path[0] === "me" && path[1] === "work-principles" && path.length === 2;
   let a: Obj = {};
   if (["POST", "PUT", "PATCH"].includes(method))
-    a = await bodyJSON(event, 90 << 20);
+    a = await bodyJSON(event, principlesRoute ? 1 << 16 : 90 << 20);
   if (path[0] === "local-agent") {
     setHeader(event, "Cache-Control", "no-store");
     if (path[1] === "device" && path.length === 3) {
@@ -361,6 +363,12 @@ export default defineEventHandler(async (event) => {
         return result.secret ? JSON.parse(result.secret) : result.value;
       }
       check(false, 404, "Employee route not found");
+    }
+    if (principlesRoute) {
+      setHeader(event, "Cache-Control", "no-store");
+      if (method === "GET") return { workPrinciples: await getWorkPrinciples(store, user.id) };
+      check(method === "PUT", 405, "GET or PUT required");
+      return { workPrinciples: await setWorkPrinciples(store, user.id, a.workPrinciples) };
     }
     if (path[0] === "me" && path[1] === "external-mcp")
       return await externalMcpApi(engine, user, method, path.slice(2), a, publicOrigin(event));

@@ -125,8 +125,9 @@ export async function gate(event: H3Event, path: string) {
   if (/^\/api\/blobs\/[^/]+$/.test(path) && event.method === "GET") return;
   // Group chats check membership (and read-only accounts) themselves; everyone has an avatar of their own.
   if (/^\/api\/groups(?:\/|$)/.test(path)) return;
-  // 本人的密码本及其条目：密码本属于账号，不属于管理员。
+  // 本人的密码本及个人工作原则：属于账号，不要求管理员权限。
   if (/^\/api\/me\/vault(?:\/|$)/.test(path)) return;
+  if (path === "/api/me/work-principles" && ["GET", "PUT"].includes(event.method)) return;
   // 每人自己的对外 MCP：任何已登录账号都能管理自己的配置，管不了别人的，也不因此获得管理权限。
   if (/^\/api\/me\/external-mcp(?:\/|$)/.test(path)) return;
   if (role === "operator" && /^\/api\/me\/triggers(?:\/|$)/.test(path)) return;

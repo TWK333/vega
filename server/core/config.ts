@@ -22,8 +22,6 @@ export type Config = {
   skillsDirectory?: string;
   ponytail?: string;
   scheduler?: SchedulerConfig;
-  /** Site-wide 公共工作原则. Each bot's private instruction is appended after this and does not replace it. */
-  workPrinciples?: string;
 };
 export const DEFAULT_GLOBAL_SLOTS = 3;
 export const DEFAULT_PER_EMPLOYEE_SLOTS = 3;

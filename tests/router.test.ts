@@ -156,7 +156,7 @@ test("task deep links enter the task view before employee loading finishes", asy
 
 test("App routing: unknown or forbidden ids and pages fall back to the default view with replaceState; old links normalize", async () => {
   for (const [href, path] of [
-    ["https://vega.test/groups/gone", "/employees/ea"], ["https://vega.test/settings/scenes", "/settings"], ["https://vega.test/settings/principles", "/settings"],
+    ["https://vega.test/groups/gone", "/employees/ea"], ["https://vega.test/settings/scenes", "/settings"],
     ["https://vega.test/employees/hidden/tasks", "/employees/ea/tasks"], ["https://vega.test/employees/ea/vault", "/employees/ea"],
     ["https://vega.test/?employee=eb", "/employees/eb"], ["https://vega.test/nope", "/employees/ea"], ["https://vega.test/", "/employees/ea"],
   ]) {
@@ -172,8 +172,13 @@ test("App routing: unknown or forbidden ids and pages fall back to the default v
   viewer.c.canExecute.value = false;
   await viewer.c.applyRoute(parseRoute(viewer.location.href));
   assert.equal(viewer.c.pageSub.value, "");
-  const adminPrinciples = await boot("https://vega.test/settings/principles", { admin: true });
-  assert.deepEqual([adminPrinciples.c.view.value, adminPrinciples.c.pageSub.value, adminPrinciples.location.pathname], ["settings", "principles", "/settings/principles"]);
+  for (const options of [{}, { admin: true }]) {
+    const principles = await boot("https://vega.test/settings/principles", options);
+    assert.deepEqual([principles.c.view.value, principles.c.pageSub.value, principles.location.pathname], ["settings", "principles", "/settings/principles"]);
+    assert.deepEqual(principles.history, []);
+  }
+  await viewer.c.applyRoute(parseRoute("https://vega.test/settings/principles"));
+  assert.equal(viewer.c.pageSub.value, "principles", "read-only accounts can configure their own principles");
 });
 
 test("personal experiences are accessible to every role outside the admin navigation", async () => {

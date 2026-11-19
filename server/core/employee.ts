@@ -16,7 +16,7 @@ import type { FileRef } from "./attachments";
 import { assert, id, clone, clip, sleep, type Obj } from "./util";
 import { Vault, VAULT_USAGE } from "./vault";
 import { requireSceneModel, schedulerLimits, type Config } from "./config";
-import { effectiveWorkPrinciples } from "./work-principles";
+import { effectiveWorkPrinciples, getWorkPrinciples } from "./work-principles";
 import { loadRows, baseRecord, saveRows } from "./employee-rows";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
@@ -968,8 +968,8 @@ export class Employee {
     let stop = false,
       pendingTell: { session: string; message: Message; group?: Task["group"] } | undefined,
       refused: { taskId: string; needed: Obj } | undefined;
-    const workPrinciples = (await this.runtime.config()).workPrinciples;
-    const principlesText = (sInstruction: unknown) => effectiveWorkPrinciples(workPrinciples, sInstruction) || "";
+    const workPrinciples = ["list", "complete"].includes(action) ? await getWorkPrinciples(this.store, initial.ownerId) : "";
+    const principlesText = (sInstruction: unknown) => effectiveWorkPrinciples(workPrinciples, sInstruction);
     const value = await this.update(async (s) => {
           const t = caller ? this.authorize(s, caller, a) : undefined,
             now = Date.now(),
@@ -2204,13 +2204,12 @@ export class Employee {
       state = await this.update((s) => { this.task(s, job.id).recalledMemoryIds = recalled; return s; });
       task = this.task(state, job.id);
       const memoryBlock = formatMemoriesForPrompt(memories);
-      const principles = `[工作原则]\n${effectiveWorkPrinciples(cfg.workPrinciples, state.instruction) || "（无）"}`;
       const scheduleNote = task.schedule
-        ? "这是用户点名的定时，只做这一件已经记下的事，不要另找工作。缺少必要文件、遇到合并冲突、下一步会对外发送或提交、或授权范围会扩大时，停下来问用户，不要自行扩大授权。"
+        ? "\n这是用户点名的定时，只做这一件已经记下的事，不要另找工作。缺少必要文件、遇到合并冲突、下一步会对外发送或提交、或授权范围会扩大时，停下来问用户，不要自行扩大授权。"
         : "";
       const context = continuing
-        ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}\n${principles}${scheduleNote ? "\n" + scheduleNote : ""}\n当前计划和恢复点：${snapshot}${memoryBlock}`
-        : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}\n${principles}${scheduleNote ? "\n" + scheduleNote : ""}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
+        ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}${scheduleNote}\n当前计划和恢复点：${snapshot}${memoryBlock}`
+        : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}${scheduleNote}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
       const groupNote = task.group && !computer ? await this.groupTaskNote(task.group) : "";
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";

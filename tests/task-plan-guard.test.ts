@@ -266,7 +266,7 @@ test("澄清等待多次续做保留原任务、工作原则和外部回执，�
     runtime.run = async (session, prompt, _signal, input) => {
       phase++;
       assert.match(prompt, /原始任务/);
-      assert.match(prompt, /需求有疑问时在原单联系创建人/);
+      assert.match((await employee.execute(id, { action: "list" })).value.instruction, /需求有疑问时在原单联系创建人/);
       await store.append(session, { role: "user", text: prompt, taskInput: input });
       if (phase === 1) {
         await employee.execute(id, { action: "progress", text: "已发出澄清", plan });
