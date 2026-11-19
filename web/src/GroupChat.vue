@@ -1,5 +1,5 @@
 <script setup vapor>
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, shallowReactive, shallowRef, watch } from "vue";
 import PageHeader from "./PageHeader.vue";
 import ChatMessage from "./ChatMessage.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
@@ -9,7 +9,7 @@ import MentionTextarea from "./MentionTextarea.vue";
 import Icon from "./Icon.vue";
 import GroupWork from "./GroupWork.vue";
 import { continuesPrevious, chatCardVisibility } from "./conversation";
-import { loadStepOutput, mergeMessages } from "./chat-history.js";
+import { CHAT_PAGE_SIZE, loadStepOutput, mergeMessages } from "./chat-history.js";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
 import ComposerQuote from "./ComposerQuote.vue";
@@ -20,11 +20,18 @@ const props = defineProps({ api: Function, user: Object, groupId: String, select
 const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "inspect", "cancel", "read", "task-change"]);
 // Work panel: side-by-side from 768px (GroupWork stops overlaying); drawers stay closed until opened.
 const roomy = () => typeof matchMedia === "function" && matchMedia("(min-width: 768px)").matches;
-const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null);
-const topic = computed(() => props.selectedTask), topicTitle = ref(""), viewMode = ref("main"), olderReferences = ref([]), historyLoading = ref(false);
-const activeTopic = computed(() => viewMode.value === "topic" ? topic.value : null);
+const group = ref(null), error = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null);
+const topic = computed(() => props.selectedTask), topicTitle = ref(""), viewMode = ref("main"), history = shallowRef(null), historyLoading = ref(false);
+const requestedTopic = computed(() => viewMode.value === "topic" ? topic.value : null);
+const historyKey = computed(() => requestedTopic.value?.taskId || "");
+const activeTopic = computed(() => history.value?.topic || null);
+const switching = computed(() => historyKey.value !== (activeTopic.value?.taskId || ""));
+const messages = computed(() => history.value?.messages || []), taskStatus = computed(() => history.value?.taskStatus || {});
 const taskFocus = computed(() => topic.value ? { member: topic.value.employeeId, task: topic.value.taskId } : null);
-function chooseView(mode) { viewMode.value = mode; }
+function chooseView(mode) {
+  if (viewMode.value !== mode) viewMode.value = mode;
+  else if (switching.value && !historyLoading.value) void run(load);
+}
 const emptyComposer = () => reactive({ text: "", attachments: [], quote: undefined });
 const mainComposer = emptyComposer(), topicDrafts = new Map();
 const composer = computed(() => activeTopic.value ? topicDrafts.get(activeTopic.value.taskId) : mainComposer);
@@ -38,15 +45,14 @@ provide("mentions", { people: computed(() => groupMentionPeople(group.value)), o
 // Authors carry ids and names; avatars come from the current member list (a member who left keeps the initial / default bot).
 const avatars = computed(() => new Map([...(group.value?.users || []), ...(group.value?.employees || [])].map((p) => [p.id, p.avatar || ""])));
 const shown = computed(() => {
-  const rows = mergeMessages(olderReferences.value, messages.value).filter((m) => m.notice || m.text?.trim() || m.tasks?.length || m.images?.length || m.files?.length)
+  const rows = mergeMessages(history.value?.olderReferences || [], messages.value).filter((m) => m.notice || m.text?.trim() || m.tasks?.length || m.images?.length || m.files?.length)
     .map((m) => m.author ? { ...m, author: { ...m.author, avatar: avatars.value.get(m.author.id) || "" } } : m);
   const cards = chatCardVisibility(rows, taskStatus.value);
   return rows.map((message, index) => ({ message, continued: rows[index - 1]?.seq === message.seq - 1 && continuesPrevious(rows[index - 1], message), cards: cards[index] }));
 });
 // 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
-const newFrom = seenSeq(props.user?.id, props.groupId);
-const markGone = ref(false);
-const newAt = computed(() => !activeTopic.value && newFrom > 0 ? shown.value.findIndex(({ message }) => message.seq > newFrom) : -1);
+const newFrom = ref(seenSeq(props.user?.id, props.groupId)), markGone = ref(false);
+const newAt = computed(() => !activeTopic.value && newFrom.value > 0 ? shown.value.findIndex(({ message }) => message.seq > newFrom.value) : -1);
 const lastSeq = computed(() => messages.value.at(-1)?.seq || 0);
 let settled = false, baseSeq = 0;
 watch(lastSeq, (seq) => { if (!activeTopic.value && settled && seq > baseSeq) markGone.value = true; });
@@ -71,42 +77,111 @@ function nearBottom() {
   const el = transcript.value;
   return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 120;
 }
-let historyRequest = 0;
+let historyRequest = 0, scrollTop = 0;
+const groupPage = (id, query, taskId) => props.api(`/groups/${id}/messages?${query}${taskId ? `&topicTaskId=${encodeURIComponent(taskId)}` : ""}&stepSummaries=1`);
+// shortcut: keep the main chat and the last loaded topic, add a bounded cache if switching between multiple tasks becomes common.
+let mainHistory, topicHistory;
+function showHistory(page) {
+  const previous = history.value, el = transcript.value;
+  if (previous === page) return false;
+  if (previous && el) previous.top = el.scrollHeight - el.scrollTop - el.clientHeight <= 1 ? undefined : el.scrollTop;
+  history.value = page;
+  return true;
+}
+async function restoreScroll(current, top) {
+  await nextTick();
+  const el = transcript.value;
+  if (!current() || !el) return;
+  el.scrollTop = top ?? el.scrollHeight;
+  scrollTop = el.scrollTop;
+}
 async function load(scroll = false) {
   if (!props.groupId) return;
-  const id = props.groupId, topicId = activeTopic.value?.taskId, request = ++historyRequest, stick = scroll || nearBottom();
-  const current = () => props.groupId === id && activeTopic.value?.taskId === topicId && historyRequest === request;
-  const filter = topicId ? `topicTaskId=${encodeURIComponent(topicId)}` : "limit=200";
-  if (scroll) historyLoading.value = true;
+  const id = props.groupId, selection = requestedTopic.value, key = historyKey.value, request = ++historyRequest;
+  const current = () => props.groupId === id && historyKey.value === key && historyRequest === request;
+  let page = key ? (topicHistory?.topic.taskId === key ? topicHistory : undefined) : mainHistory;
+  const showing = () => props.groupId === id && historyKey.value === key && history.value === page;
+  historyLoading.value = true;
   try {
-    const result = await props.api(`/groups/${id}/messages?${filter}&stepSummaries=1`);
+    if (page) {
+      // A live refresh can supersede the request without superseding the view's scroll restoration.
+      if (showHistory(page)) await restoreScroll(showing, page.top);
+      else await nextTick();
+      if (!current()) return;
+    }
+    const follow = nearBottom(), last = page?.messages.at(-1)?.seq;
+    const result = await groupPage(id, `limit=${CHAT_PAGE_SIZE}`, key);
     if (!current()) return;
-    messages.value = result.messages;
-    taskStatus.value = result.taskStatus || {};
-    group.value = result.group;
-    edit.value = { name: result.group.name, bulletin: result.group.bulletin };
-    if (!topicId) {
+    // If more than a page arrived while away, fetch the gap rather than splicing two disjoint windows.
+    const delta = last && result.hasMore && result.messages[0]?.seq > last ? await groupPage(id, `after=${last}`, key) : null;
+    if (!current()) return;
+    const stick = scroll || (follow && nearBottom() && !page?.loadingOlder);
+    if (!page) {
+      page = shallowReactive({ topic: selection, messages: [], taskStatus: {}, olderReferences: [], hasMore: false, loadingOlder: false, olderError: "", top: undefined });
+      if (key) topicHistory = page;
+      else mainHistory = page;
+    }
+    const recent = delta ? mergeMessages(result.messages, delta.messages) : result.messages;
+    const prefix = result.hasMore ? page.messages.filter((row) => row.seq < recent[0]?.seq) : [];
+    page.messages = [...prefix, ...recent];
+    if (!prefix.length) page.hasMore = !!result.hasMore;
+    page.taskStatus = { ...(prefix.length ? page.taskStatus : {}), ...result.taskStatus, ...delta?.taskStatus };
+    group.value = (delta || result).group;
+    edit.value = { name: group.value.name, bulletin: group.value.bulletin };
+    const opened = showHistory(page);
+    if (!key) {
       if (!settled) { settled = true; baseSeq = lastSeq.value; }
       void markRead();
     }
-    if (stick) { await nextTick(); if (current()) transcript.value?.scrollTo({ top: transcript.value.scrollHeight }); }
+    if (opened || stick) await restoreScroll(opened ? showing : current, opened && !scroll ? page.top : undefined);
   } catch (e) {
     if (!current()) return;
-    if (topicId && [400, 403, 404].includes(e.status)) exitTask(true);
+    if (key && [400, 403, 404].includes(e.status)) exitTask(true);
     throw e;
   } finally { if (current()) historyLoading.value = false; }
+}
+async function loadOlder() {
+  const page = history.value, el = transcript.value, id = props.groupId, before = page?.messages[0]?.seq;
+  if (!page?.hasMore || page.loadingOlder || switching.value || !el || !before) return;
+  const current = () => props.groupId === id && history.value === page && transcript.value === el && !switching.value;
+  page.loadingOlder = true;
+  page.olderError = "";
+  try {
+    const result = await groupPage(id, `before=${before}&limit=${CHAT_PAGE_SIZE}`, page.topic?.taskId);
+    if (!current() || page.messages[0]?.seq !== before) return;
+    const top = el.getBoundingClientRect().top;
+    // Measure at response time; the reader may have moved while the request was in flight.
+    const anchor = [...el.querySelectorAll("[data-message-seq]")].find((row) => row.getBoundingClientRect().bottom > top);
+    const offset = anchor?.getBoundingClientRect().top;
+    page.messages = mergeMessages(result.messages, page.messages);
+    page.taskStatus = { ...result.taskStatus, ...page.taskStatus };
+    page.hasMore = result.messages.length > 0 && !!result.hasMore;
+    await nextTick();
+    if (current() && anchor && el.contains(anchor)) {
+      const shift = anchor.getBoundingClientRect().top - offset;
+      el.scrollTop += shift;
+      scrollTop = el.scrollTop;
+    }
+  } catch (e) {
+    if (current()) page.olderError = e.message || "加载失败";
+  } finally { page.loadingOlder = false; }
+}
+function onScroll() {
+  const top = transcript.value?.scrollTop ?? 0, movedUp = top < scrollTop;
+  scrollTop = top;
+  if (movedUp && top <= 160 && !history.value?.olderError) void loadOlder();
 }
 // Open and visible: everything loaded so far is read (one marker per user on the server).
 let readSeq = 0;
 async function markRead() {
   const id = props.groupId, last = messages.value.at(-1)?.seq || 0;
-  if (!id || activeTopic.value || document.hidden || last <= readSeq) return;
+  if (!id || activeTopic.value || historyKey.value || document.hidden || last <= readSeq) return;
   readSeq = last;
   try { await props.api(`/groups/${id}/read`, "POST", {}); if (props.groupId === id) emit("read", id); } catch { readSeq = 0; }
 }
 const visibility = () => { if (!document.hidden) void markRead(); };
 onMounted(() => document.addEventListener("visibilitychange", visibility));
-onBeforeUnmount(() => document.removeEventListener("visibilitychange", visibility));
+onBeforeUnmount(() => { historyRequest++; document.removeEventListener("visibilitychange", visibility); });
 async function loadDirectory() {
   try { directory.value = (await props.api("/groups/directory")).filter((u) => u.id !== props.user?.id); } catch { directory.value = []; }
 }
@@ -115,16 +190,16 @@ function quoteMessage(quote) {
   input.value?.focus();
 }
 async function jumpTo(seq) {
-  const root = transcript.value, id = props.groupId, taskId = activeTopic.value?.taskId;
-  const current = () => props.groupId === id && transcript.value === root && activeTopic.value?.taskId === taskId;
-  if (!root || !Number.isSafeInteger(seq) || seq < 1 || seq === Number.MAX_SAFE_INTEGER) return;
+  const root = transcript.value, id = props.groupId, page = history.value;
+  const current = () => props.groupId === id && transcript.value === root && history.value === page;
+  if (!page || !root || !Number.isSafeInteger(seq) || seq < 1 || seq === Number.MAX_SAFE_INTEGER) return;
   const find = () => root.querySelector(`[data-message-seq="${seq}"]`);
   await run(async () => {
     if (!find()) {
-      const result = await props.api(`/groups/${id}/messages?before=${seq + 1}&limit=1&stepSummaries=1`);
+      const result = await groupPage(id, `before=${seq + 1}&limit=1`);
       if (!current()) return;
       const source = result.messages.find((row) => row.seq === seq);
-      if (source) olderReferences.value = mergeMessages(olderReferences.value, [source]);
+      if (source) page.olderReferences = mergeMessages(page.olderReferences, [source]);
       await nextTick();
     }
     if (!current()) return;
@@ -132,6 +207,7 @@ async function jumpTo(seq) {
     if (!target) throw Error("原消息暂不可见或已不存在");
     target.scrollIntoView({ block: "center", behavior: "instant" });
     target.focus({ preventScroll: true });
+    scrollTop = root.scrollTop;
   });
 }
 const { uploading, upload, paste } = useAttachmentInput(async (picked) => {
@@ -144,7 +220,7 @@ const { uploading, upload, paste } = useAttachmentInput(async (picked) => {
 async function send() {
   const target = composer.value, id = props.groupId, topicTaskId = activeTopic.value?.taskId;
   const original = target.text, text = original.trim(), items = [...target.attachments], quote = target.quote;
-  if ((!text && !items.length) || readonly.value || sending.value || uploading.value) return;
+  if ((!text && !items.length) || readonly.value || sending.value || uploading.value || switching.value) return;
   sending.value = true;
   await run(async () => {
     // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
@@ -154,10 +230,10 @@ async function send() {
     if (target.text === original) target.text = "";
     target.attachments = target.attachments.filter((file) => !items.includes(file));
     if (target.quote === quote) target.quote = undefined;
-    if (composer.value === target) await load(true);
+    if (!switching.value && composer.value === target) await load(true);
   });
   sending.value = false;
-  if (composer.value === target) input.value?.focus();
+  if (!switching.value && composer.value === target) input.value?.focus();
 }
 function keydown(event) {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing && !matchMedia("(pointer: coarse)").matches) { event.preventDefault(); void send(); }
@@ -189,11 +265,16 @@ async function create() {
   });
 }
 function exitTask(replace = false) {
-  if (topic.value) emit("task-change", null, replace);
+  if (!topic.value) return;
+  if (replace && topicHistory?.topic.taskId === topic.value.taskId) {
+    if (history.value === topicHistory && !mainHistory) history.value = null;
+    topicHistory = undefined;
+  }
+  emit("task-change", null, replace);
 }
 function selectTopic(selection) {
   const same = topic.value?.taskId === selection.taskId && topic.value?.employeeId === selection.employeeId;
-  if (same) chooseView(activeTopic.value ? "main" : "topic");
+  if (same) chooseView(viewMode.value === "topic" ? "main" : "topic");
   else emit("task-change", selection);
 }
 function showTask(selection) {
@@ -220,22 +301,21 @@ async function loadWork() {
 }
 function toggleWork() { work.value = !work.value; if (work.value) panel.value = false; }
 watch(topic, showTask, { immediate: true, flush: "sync" });
-watch(() => activeTopic.value?.taskId, () => {
-  messages.value = []; olderReferences.value = [];
-  void load(true).catch((e) => { error.value = e.message; });
-});
 watch(panel, (open) => { if (open) work.value = false; });
+watch([() => props.groupId, historyKey], ([id], [previousId]) => {
+  if (id !== previousId) {
+    historyRequest++; historyLoading.value = false; history.value = mainHistory = topicHistory = null;
+    readSeq = 0; settled = false; baseSeq = 0; newFrom.value = seenSeq(props.user?.id, id); markGone.value = false;
+    group.value = null; panel.value = false; work.value = roomy(); workMembers.value = []; topicDrafts.clear(); showTask(topic.value);
+    mainComposer.text = ""; mainComposer.attachments = []; mainComposer.quote = undefined;
+  }
+  if (id) void run(load);
+});
 watch(work, (open) => { if (!open) exitTask(); });
 watch([work, () => props.groupId], () => { if (work.value) void run(loadWork); }, { immediate: true });
-watch(() => props.groupId, () => {
-  readSeq = 0; settled = false; group.value = null; messages.value = []; olderReferences.value = []; panel.value = false;
-  work.value = roomy(); workMembers.value = []; topicDrafts.clear(); showTask(topic.value);
-  mainComposer.text = ""; mainComposer.attachments = []; mainComposer.quote = undefined;
-  void run(() => load(true));
-});
-watch(() => props.revision, () => { void run(() => load()); void run(loadWork); });
+watch(() => props.revision, () => { void run(load); void run(loadWork); });
 watch(panel, (open) => { if (open && !directory.value.length) void loadDirectory(); });
-onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadDirectory(); });
+onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); });
 </script>
 <template>
   <section class="group-workspace">
@@ -265,16 +345,17 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
       <div class="group-body">
         <section class="group-chat">
           <nav v-if="topic" class="group-chat-tabs" aria-label="群聊视图">
-            <button type="button" :aria-pressed="!activeTopic" @click="chooseView('main')">主聊天</button>
-            <button type="button" class="topic-tab" :aria-pressed="!!activeTopic" :title="topicTitle" @click="chooseView('topic')"><span>话题</span><span v-if="topicTitle" class="topic-title">{{ topicTitle }}</span></button>
+            <button type="button" :aria-pressed="!activeTopic" :aria-busy="historyLoading && switching && !historyKey" @click="chooseView('main')">{{ historyLoading && switching && !historyKey ? '加载主聊天…' : '主聊天' }}</button>
+            <button type="button" class="topic-tab" :aria-pressed="activeTopic?.taskId === topic.taskId" :aria-busy="historyLoading && switching && !!historyKey" :title="topicTitle" @click="chooseView('topic')"><span>{{ historyLoading && switching && historyKey ? '加载话题…' : '话题' }}</span><span v-if="topicTitle" class="topic-title">{{ topicTitle }}</span></button>
           </nav>
-          <div ref="transcript" class="chat-scroll" aria-live="polite" :aria-busy="historyLoading">
+          <div ref="transcript" class="chat-scroll" aria-live="polite" :aria-busy="historyLoading && !history" @scroll.passive="onScroll">
             <div class="chat-column">
               <div v-if="!activeTopic && group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
-              <p v-if="activeTopic && !shown.length" class="group-notice">{{ historyLoading ? '正在加载话题…' : '还没有关联消息，可以直接在此开始讨论。' }}</p>
+              <div v-if="history?.hasMore" class="older-messages"><button type="button" class="ghost sm" :disabled="history.loadingOlder || switching" :title="history.olderError || undefined" @click="loadOlder">{{ history.loadingOlder ? '正在加载更早消息…' : history.olderError ? '加载失败，点击重试' : '加载更早消息' }}</button></div>
+              <p v-if="activeTopic && !shown.length" class="group-notice">还没有关联消息，可以直接在此开始讨论。</p>
               <template v-for="({ message, continued, cards }, index) in shown" :key="message.seq">
                 <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
-                <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
+                <p v-if="message.notice" class="group-notice" :data-message-seq="message.seq">{{ message.text }}</p>
                 <ChatMessage v-else :message="message" :continued="continued" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
@@ -294,7 +375,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
               <input ref="fileInput" type="file" hidden multiple @change="upload" />
               <button type="button" class="icon attach" aria-label="添加附件" title="附件（可粘贴图片）" :disabled="uploading" @click="fileInput.click()"><Icon name="paperclip" /></button>
               <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" :placeholder="activeTopic ? '回复当前任务话题…' : '输入消息，@ 牛马让它干活…'" @keydown="keydown" />
-              <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending || uploading" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
+              <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending || uploading || switching" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
             </div>
             <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天' : '回复牛马或 @ 它让它回应 · /new 开启新会话' }} · Enter 发送 · Shift + Enter 换行</p>
           </form>
@@ -351,6 +432,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
 .topic-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
 .chat-scroll { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: thin; }
 .chat-column { max-width: 820px; margin: 0 auto; padding: 16px 24px 8px; }
+.older-messages { display: flex; justify-content: center; margin-bottom: 12px; }
 .group-bulletin { display: flex; gap: 8px; margin: 0 0 16px; padding: 10px 12px; border-radius: var(--r-md); background: var(--surface-2); color: var(--text-2); font-size: 12px; }
 .group-bulletin p { white-space: pre-wrap; margin: 2px 0 0; }
 .group-notice { margin: 0 auto 14px; max-width: 80%; color: var(--muted); font-size: 11px; text-align: center; }

@@ -8,7 +8,7 @@ import { createServer } from "vite";
 import vue from "@vitejs/plugin-vue";
 
 const run = promisify(execFile);
-test("debug cards stay compact; group topics follow task details with pinned actions", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 90000 }, async () => {
+test("debug cards stay compact; group history pages up and topics switch without a blank frame or scroll jump", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 90000 }, async () => {
   const root = process.cwd(), temp = join(root, ".tmp");
   await mkdir(temp, { recursive: true });
   const dir = await mkdtemp(join(temp, "group-debug-ui-"));
@@ -31,11 +31,21 @@ test("debug cards stay compact; group topics follow task details with pinned act
       const group = { id: 'g1', name: '情报小分队', bulletin: '', users: [{ id: 'owner', name: '归属人' }, { id: 'requester', name: '发起人' }, { id: 'member', name: '同事' }], employees: [{ id: 'e1', name: '情报开发', mine: false, avatar: 'bot:round:blue' }], running: [] };
       const posts = [], messagePosts = [];
       const other = { ...task, id: 't-other', text: '核对账号列表', status: 'queued' };
-      const messages = [
-        { seq: 1, role: 'assistant', text: '请核对这条任务', topicTaskId: task.id, author: { kind: 'employee', id: 'e1', name: '情报开发' }, tasks: [{ id: task.id, title: task.text, status: task.status }] },
-        { seq: 2, role: 'user', text: '无关的主聊天', author: { kind: 'user', id: 'member', name: '同事' } },
-        { seq: 3, role: 'assistant', text: '另一项任务的讨论', topicTaskId: other.id, author: { kind: 'employee', id: 'e1', name: '情报开发' }, tasks: [{ id: other.id, title: other.text, status: other.status }] }
-      ];
+      const peer = { kind: 'user', id: 'member', name: '同事' };
+      const messages = Array.from({ length: 160 }, (_, i) => ({ seq: i + 1, role: 'user', text: '历史消息 ' + (i + 1), ...(i % 2 ? { topicTaskId: task.id } : {}), author: peer }));
+      const otherSeq = messages.length + 3;
+      messages.push(
+        { seq: otherSeq - 2, role: 'assistant', text: '请核对这条任务', topicTaskId: task.id, author: { kind: 'employee', id: 'e1', name: '情报开发' }, tasks: [{ id: task.id, title: task.text, status: task.status }] },
+        { seq: otherSeq - 1, role: 'user', text: '无关的主聊天', author: peer },
+        { seq: otherSeq, role: 'assistant', text: '另一项任务的讨论', topicTaskId: other.id, author: { kind: 'employee', id: 'e1', name: '情报开发' }, tasks: [{ id: other.id, title: other.text, status: other.status }] },
+      );
+      const historyRequests = [];
+      let holdHistory, failOlderOnce = false;
+      function pauseHistory(topicId, before = null) {
+        let release;
+        const ready = new Promise(resolve => { release = resolve; });
+        return holdHistory = { topicId, before, ready, release, started: false };
+      }
       let confirmed = false;
       window.confirm = () => confirmed;
       const sessions = [
@@ -48,9 +58,16 @@ test("debug cards stay compact; group topics follow task details with pinned act
       const api = async (path, method = 'GET', body) => {
         if (path === '/debug/sessions') return sessions;
         if (path.includes('/messages?')) {
-          const topicId = new URLSearchParams(path.split('?')[1]).get('topicTaskId');
+          const query = new URLSearchParams(path.split('?')[1]);
+          const topicId = query.get('topicTaskId'), before = query.get('before'), after = query.get('after');
+          historyRequests.push({ topicId, before, after });
           if (topicId === 'gone') throw Object.assign(Error('群任务话题不存在'), { status: 404 });
-          return { group, messages: messages.filter((m) => !topicId || m.topicTaskId === topicId), taskStatus: { [task.id]: task.status } };
+          if (before !== null && failOlderOnce) { failOlderOnce = false; throw Error('测试：暂时无法加载'); }
+          if (holdHistory?.topicId === topicId && holdHistory.before === before && after === null) { holdHistory.started = true; await holdHistory.ready; }
+          const scoped = messages.filter((m) => !topicId || m.topicTaskId === topicId);
+          const eligible = scoped.filter((m) => (before === null || m.seq < Number(before)) && (after === null || m.seq > Number(after)));
+          const page = eligible.slice(-Number(query.get('limit') || Infinity));
+          return { group, messages: page, hasMore: page.length < eligible.length, lastSeq: scoped.at(-1)?.seq ?? 0, taskStatus: { [task.id]: task.status } };
         }
         if (path.endsWith('/messages') && method === 'POST') {
           messagePosts.push(body);
@@ -68,11 +85,52 @@ test("debug cards stay compact; group topics follow task details with pinned act
       const app = createApp({ render: () => state.view === 'debug' ? h(DebugSessions, { api, revision: state.revision }) : h(GroupChat, { api, user: state.user, groupId: 'g1', myEmployees: [], revision: state.revision, selectedTask: state.selectedTask, onTaskChange }) }).use(vaporInteropPlugin);
       try {
         app.mount('#app'); await flush();
-        document.querySelector('.chat-task-link').click(); await flush();
-        const chat = () => document.querySelector('.chat-scroll').textContent;
+        const scroller = () => document.querySelector('.chat-scroll');
+        const chat = () => scroller().textContent;
         const tabs = () => [...document.querySelectorAll('.group-chat-tabs button')];
         const draft = () => document.querySelector('.chat-composer textarea');
+        const firstRow = () => scroller().querySelector('[data-message-seq]');
+        const row = seq => scroller().querySelector('[data-message-seq="' + seq + '"]');
+        const scrollUp = () => { scroller().scrollTop = 0; scroller().dispatchEvent(new Event('scroll')); };
+        const anchor = firstRow(), first = Number(anchor.dataset.messageSeq);
+        check(first === otherSeq - 59 && !row(first - 1), 'main chat opens the latest page only');
+        const page = pauseHistory(null, String(first));
+        scrollUp(); scrollUp(); await flush();
+        const anchorY = anchor.getBoundingClientRect().top;
+        check(page.started && historyRequests.filter(r => r.before === String(first)).length === 1, 'scrolling up loads one older page even while the request is pending');
+        for (let i = 1; i <= 65; i++) messages.push({ seq: otherSeq + i, role: 'user', text: '实时到达 ' + i, author: peer });
+        state.revision++; await flush();
+        page.release(); holdHistory = undefined; await flush();
+        check(Number(firstRow().dataset.messageSeq) === first - 60 && !!row(otherSeq + 1) && !!row(otherSeq + 65), 'older rows and the full live gap both survive');
+        check(Math.abs(anchor.getBoundingClientRect().top - anchorY) <= 2, 'prepending old messages keeps the visible row still');
+        const opening = pauseHistory(task.id);
+        scroller().scrollTop = 120;
+        input(draft(), '暂未发送的主聊天草稿');
+        document.querySelector('.chat-task-link').click(); await flush();
+        check(opening.started && chat().includes('无关的主聊天') && tabs()[1].getAttribute('aria-busy') === 'true', 'a slow first visit keeps the main history on screen');
+        check(document.querySelector('.chat-composer .send').disabled, 'the main draft cannot accidentally send during a cold switch');
+        const mainTop = scroller().scrollTop;
+        opening.release(); holdHistory = undefined; await flush();
         check(tabs()[1].getAttribute('aria-pressed') === 'true' && chat().includes('请核对这条任务') && !chat().includes('无关的主聊天'), 'first task opens its filtered topic');
+        const firstTopic = firstRow().dataset.messageSeq;
+        failOlderOnce = true;
+        scrollUp(); await flush();
+        const retry = document.querySelector('.older-messages button');
+        check(retry?.textContent.includes('加载失败') && firstRow().dataset.messageSeq === firstTopic, 'a failed older-page request keeps the current topic visible');
+        retry.click(); await flush();
+        check(historyRequests.some(r => r.topicId === task.id && r.before === firstTopic) && !!row(2) && !row(1) && !document.querySelector('.older-messages'), 'retry loads the filtered topic page and stops at the beginning');
+        scroller().scrollTop = 160;
+        const topicTop = scroller().scrollTop;
+        check(mainTop > 0 && topicTop > 0, 'both histories can actually scroll');
+        const refreshingMain = pauseHistory(null);
+        tabs()[0].click(); await flush();
+        check(refreshingMain.started && !!row(first - 60) && chat().includes('无关的主聊天') && Math.abs(scroller().scrollTop - mainTop) <= 1, 'the cached main chat keeps its older pages and scroll position before the network replies');
+        const refreshingTopic = pauseHistory(task.id);
+        tabs()[1].click(); state.revision++; await flush();
+        check(refreshingTopic.started && !!row(2) && !chat().includes('无关的主聊天') && Math.abs(scroller().scrollTop - topicTop) <= 1, 'the cached topic keeps its older pages and scroll position during a live refresh');
+        refreshingMain.release(); await flush();
+        check(tabs()[1].getAttribute('aria-pressed') === 'true' && !chat().includes('无关的主聊天'), 'a late main-chat response cannot replace the current topic');
+        refreshingTopic.release(); holdHistory = undefined; await flush();
         check(document.querySelector('.task-detail')?.textContent.includes(task.text), 'a non-owner opens a linked task even when it is absent from the recent board');
         check(document.querySelector('.access-note')?.textContent.includes('可以操作'), 'requester gets controls');
         input(document.querySelector('.task-detail textarea'), '使用开发环境'); await flush();
@@ -98,13 +156,13 @@ test("debug cards stay compact; group topics follow task details with pinned act
         check(!!document.querySelector('.task-detail') && chat().includes('无关的主聊天'), 'the main tab does not close the task');
         input(draft(), '主聊天草稿'); await flush();
         // Clicking a different task overrides the manually selected main tab.
-        document.querySelector('[data-message-seq="3"] .chat-task-link').click(); await flush();
+        row(otherSeq).querySelector('.chat-task-link').click(); await flush();
         check(tabs()[1].getAttribute('aria-pressed') === 'true' && tabs()[1].textContent.includes(other.text), 'clicking another task enters its topic');
         check(chat().includes('另一项任务的讨论') && !chat().includes('请核对这条任务') && !chat().includes('无关的主聊天'), 'only this task appears in the topic');
         check(draft().value === '', 'switching to a task does not copy a main-chat draft');
-        document.querySelector('[data-message-seq="3"] .chat-task-link').click(); await flush();
+        row(otherSeq).querySelector('.chat-task-link').click(); await flush();
         check(tabs()[0].getAttribute('aria-pressed') === 'true' && document.querySelector('.task-detail')?.dataset.taskId === other.id, 'clicking the same task toggles back without exiting its detail');
-        document.querySelector('[data-message-seq="3"] .chat-task-link').click(); await flush();
+        row(otherSeq).querySelector('.chat-task-link').click(); await flush();
         input(draft(), '话题补充'); await flush();
         document.querySelector('.chat-composer .send').click(); await flush();
         check(messagePosts.length === 1 && messagePosts[0].topicTaskId === other.id && chat().includes('话题补充'), 'topic send is tied to the selected task');
@@ -123,7 +181,7 @@ test("debug cards stay compact; group topics follow task details with pinned act
         state.view = 'debug'; await flush();
         state.selectedTask = { employeeId: 'e1', taskId: 'gone' };
         state.view = 'group'; await flush();
-        check(!state.selectedTask && replacedTask && !tabs().length && chat().includes('无关的主聊天'), 'an unavailable deep link falls back to the same group without adding history');
+        check(!state.selectedTask && replacedTask && !tabs().length && !!row(otherSeq + 65), 'an unavailable deep link falls back to the latest main chat without adding history');
         state.view = 'debug'; await flush();
         for (const width of [320, 390, 880, 1280]) {
           document.querySelector('#app').style.width = width + 'px'; await flush();
