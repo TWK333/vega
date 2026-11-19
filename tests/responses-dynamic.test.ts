@@ -8,6 +8,7 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { Context, estimate } from "../server/core/context";
+import { bodyFor } from "../server/core/provider";
 
 const config: any = {
   contextMode: "acp",
@@ -47,6 +48,29 @@ test("retained runtime snapshots and notices enter token accounting exactly once
   const restored = await Context.open(store, session.id);
   assert.equal(restored.dynamicTokens, runtimeTokens);
   assert.equal(await restored.promptTokens(base), raw * 2);
+});
+
+test("Responses replays oversized foreign call IDs with a stable matching ID and preserves native IDs", async (t) => {
+  const { engine } = await fixture(t);
+  const cfg = structuredClone(config);
+  cfg.provider.p.api = "openai-responses";
+  const model = await engine.catalog.resolve(cfg, "p/m");
+  const prefix = "call_" + "a".repeat(946), foreign = prefix + "1", other = prefix + "2", native = "call_" + "b".repeat(59);
+  const pair = (id: string, selection: string): Message[] => [
+    { role: "assistant", model: selection, calls: [{ id, name: "read", arguments: {} }] },
+    { role: "tool", callId: id, text: "receipt" },
+  ];
+  const rows = [...pair(foreign, "p/gemini"), ...pair(other, "p/gemini"), ...pair(native, model.selection)];
+  const original = structuredClone(rows);
+  const { body } = await bodyFor(model, "", rows, []);
+  const ids = body.input.map((part: any) => part.call_id);
+  assert.equal(ids.length, 6);
+  assert(ids.every((id: string) => id.length <= 64));
+  assert.notEqual(ids[0], ids[2], "IDs sharing the same long prefix must not collide");
+  assert.deepEqual(ids, [ids[0], ids[0], ids[2], ids[2], native, native]);
+  const suffix = await bodyFor(model, "", [rows[1]], []);
+  assert.equal(suffix.body.input[0].call_id, ids[0], "a suffix request without the call still uses the same ID");
+  assert.deepEqual(rows, original, "wire normalization must not alter canonical history");
 });
 
 for (const [api, label] of [["openai-responses", "Responses"], ["openai-completions", "Chat Completions"]] as const)

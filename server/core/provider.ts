@@ -83,6 +83,11 @@ const historyHash = (rows: Message[]) =>
   hash(rows.map(({ seq, at, ...row }) => row));
 const callID = (value: string) =>
   value.includes("|") ? "call_" + hash(value).slice(0, 24) : value;
+const responsesCallID = (value: string) => {
+  const id = callID(value);
+  // Foreign providers can embed signatures in IDs; use the same wire ID even when only the result is sent.
+  return id.length <= 64 ? id : "call_" + hash(id).slice(0, 59);
+};
 const imageURL = (image: Obj) => `data:${image.mime};base64,${image.data}`;
 export function outputBudget(
   model: Model,
@@ -332,7 +337,7 @@ export async function bodyFor(
       if (m.role === "tool") {
         items.push({
           type: "function_call_output",
-          call_id: callID(m.callId!),
+          call_id: responsesCallID(m.callId!),
           output: clip(m.text || ""),
         });
         if (model.supportsImages && m.images?.length)
@@ -372,7 +377,7 @@ export async function bodyFor(
       for (const call of m.calls || [])
         items.push({
           type: "function_call",
-          call_id: callID(call.id),
+          call_id: responsesCallID(call.id),
           name: call.name,
           arguments: JSON.stringify(call.arguments),
         });
