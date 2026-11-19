@@ -117,6 +117,29 @@ test("复核补交只发缺项，保留已填依据和交付内容", async () =>
   } finally { employee.close(); await store.close(); }
 });
 
+test("复核补交可按本次缺项序号引用含替换字符的历史步骤", async () => {
+  const { store, employee, id } = await fixture();
+  try {
+    await running(employee, id);
+    const requirement = "公司上报体截断\uFFFD\uFFFD\uFFFD 平台无重复事件";
+    await employee.execute(id, { action: "progress", text: "开始验证", plan: [{ content: requirement, status: "pending" }] });
+    await employee.execute(id, { action: "progress", text: "统一复验完成", plan: [{ content: "验收并保留抓包证据", status: "completed" }] });
+    const item = { changedStep: 1, status: "met", evidence: "已核对两条请求体" };
+    await assert.rejects(employee.execute(id, { ...delivery, outlineReview: [item] }), /changedStep 仅用于补交/);
+    const draft = await employee.execute(id, { ...delivery, text: "复验完成", outlineReview: [
+      { requirement: "验收并保留抓包证据", status: "met", evidence: "抓包回执已保存" },
+    ] });
+    assert.equal(draft.value.code, "outline_review_incomplete");
+    assert.deepEqual(draft.value.changedSteps, [requirement]);
+    const retry = { action: "complete", outlineReviewRetry: draft.value.outlineReviewRetry };
+    await assert.rejects(employee.execute(id, { ...retry, outlineReview: [{ ...item, changedStep: 2 }] }), /有效序号/);
+    await assert.rejects(employee.execute(id, { ...retry, outlineReview: [{ ...item, requirement }] }), /不能和 requirement 同时填写/);
+    const result = await employee.execute(id, { ...retry, outlineReview: [item] });
+    assert.equal(result.stop, true);
+    assert.deepEqual((await employee.state()).tasks[0].outlineReview.at(-1), { requirement, status: item.status, evidence: item.evidence });
+  } finally { employee.close(); await store.close(); }
+});
+
 test("补交草稿随计划变更失效，新草稿保留未满足项并阻止交付", async () => {
   const { store, employee, id } = await fixture();
   try {
@@ -165,6 +188,48 @@ test("未经接受的取消步骤不能交付，拒绝部分交付后恢复原�
     await employee.execute(id, { action: "progress", text: "已完成验证", plan: plan.map((step) => ({ ...step, status: "completed" })) });
     await employee.execute(id, { action: "complete", text: "澄清、开发和测试均已完成。", summary: "已完成。", deliverableRef: [] });
     assert.equal((await employee.state()).tasks[0].completion, "澄清、开发和测试均已完成。");
+  } finally { employee.close(); await store.close(); }
+});
+
+test("同一批未完成要求重排后复用部分交付批准，并保留未验证状态", async () => {
+  const { store, employee, id } = await fixture();
+  try {
+    await running(employee, id);
+    const remaining = plan.slice(1, 3);
+    const review = unmet(...remaining);
+    const met = { requirement: plan[0].content, status: "met", evidence: "已读需求" };
+    await employee.execute(id, { action: "progress", text: "部分结果", plan: [plan[0], ...remaining.map((step) => ({ ...step, status: "cancelled" }))] });
+    const first = await employee.execute(id, { ...delivery, outlineReview: [...review, met] });
+    assert.equal(first.value.status, "approval");
+    employee.busy.delete(id);
+    await employee.control({ action: "approve", id, approved: true });
+    await running(employee, id);
+    const reordered = [met, review[1], review[0]];
+    const result = await employee.execute(id, { ...delivery, outlineReview: reordered });
+    assert.equal(result.value.status, undefined);
+    assert.equal(result.stop, true);
+    const task = await employee.findTask(id);
+    assert.equal(task?.completion, delivery.text);
+    assert.deepEqual(task?.outlineReview, reordered);
+  } finally { employee.close(); await store.close(); }
+});
+
+test("用户补充产生新任务版本，原部分交付批准不能继续沿用", async () => {
+  const { store, employee, id } = await fixture();
+  try {
+    await running(employee, id);
+    const partial = [plan[0], { ...plan[1], status: "cancelled" }];
+    const attempt = { ...delivery, outlineReview: unmet(plan[1]) };
+    await employee.execute(id, { action: "progress", text: "部分结果", plan: partial });
+    assert.equal((await employee.execute(id, attempt)).value.status, "approval");
+    employee.busy.delete(id);
+    await employee.control({ action: "approve", id, approved: true });
+    await employee.control({ action: "resume", id, text: "补充交付要求：在结论中说明影响" });
+    await running(employee, id);
+    assert.match((await employee.execute(id, attempt)).value.supplement, /在结论中说明影响/);
+    await employee.execute(id, { action: "progress", text: "按补充更新交付", plan: partial });
+    assert.equal((await employee.execute(id, attempt)).value.status, "approval");
+    assert(!(await employee.findTask(id))?.completion);
   } finally { employee.close(); await store.close(); }
 });
 

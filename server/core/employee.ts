@@ -146,6 +146,17 @@ const unfinishedSteps = (plan: Obj[] | undefined) => (plan || []).flatMap((step,
 const unfinishedText = (steps: { index: number; content: string }[]) =>
   steps.length ? `未完成步骤：\n${steps.map((step) => `${step.index}. ${step.content}`).join("\n")}\n` : "";
 const partialKey = (t: Task, steps: { index: number; content: string }[]) => JSON.stringify({ revision: t.revision || 0, steps });
+// Keep stored approvals readable; display order and indexes are not part of the approved scope.
+const matchesApprovedPartial = (t: Task, steps: { content: string }[]) => {
+  if (typeof t.approvedPartial !== "string") return false;
+  try {
+    const approved = JSON.parse(t.approvedPartial);
+    const contents = (items: { content: string }[]) => JSON.stringify(items.map((item) => item.content).sort());
+    return approved.revision === (t.revision || 0) && contents(approved.steps) === contents(steps);
+  } catch {
+    return false;
+  }
+};
 const outlineSteps = (t: Task, unfinished = unfinishedSteps(t.plan)) =>
   [...new Set<string>([...(t.outlineReferences || []), ...unfinished.map((step) => step.content.trim())])];
 type OutlineDraft = {
@@ -689,11 +700,12 @@ export class Employee {
     recovery.history.push({ at: now, reason: recovery.reason });
     recovery.history = recovery.history.slice(-5);
     t.result = recovery.reason;
-    if (recovery.attempts > 3 || now - recovery.startedAt > 30 * 60000) {
+    const expired = now - recovery.startedAt > 30 * 60000;
+    if (recovery.attempts > 3 || expired) {
       t.status = "waiting";
       t.nextCheckAt = 0;
       t.settlePreferred = true;
-      t.waiting = "自动恢复已达上限，需要你处理：" + recovery.reason + "\n" + unfinishedText(unfinishedSteps(t.plan)) + SETTLE_CHOICE;
+      t.waiting = `自动恢复已达上限（${expired ? "距首次中断已超过 30 分钟" : "恢复次数用尽"}）：${recovery.reason}\n` + unfinishedText(unfinishedSteps(t.plan)) + SETTLE_CHOICE;
       return;
     }
     t.status = "recovering";
@@ -1113,6 +1125,13 @@ export class Employee {
               } else if (run) {
                 delete run.outlineDraft;
               }
+              const additions: Obj[] = draft ? a.outlineReview.map((item: Obj) => {
+                if (item?.changedStep === undefined) return item;
+                const { changedStep, ...fields } = item;
+                assert(fields.requirement === undefined && Number.isSafeInteger(changedStep) && changedStep >= 1 && changedStep <= draft.missing.length,
+                  "changedStep 须为本次 changedSteps 中从 1 开始的有效序号，不能和 requirement 同时填写。");
+                return { ...fields, requirement: draft.missing[changedStep - 1] };
+              }) : [];
               const evidence = draft?.evidence ?? content;
               const summary = draft ? draft.summary : a.summary;
               const deliverableRef = draft ? draft.deliverableRef : a.deliverableRef;
@@ -1148,15 +1167,15 @@ export class Employee {
               assert(!summaryError && !cited.error, [summaryError, cited.error && "尚未交付：" + cited.error].filter(Boolean).join("\n另外："));
               const unfinished = unfinishedSteps(t.plan);
               const references = outlineSteps(t, unfinished);
-              const review = draft ? [...draft.review, ...a.outlineReview] : a.outlineReview;
+              const review = draft ? [...draft.review, ...additions] : a.outlineReview;
               if (review !== undefined) {
                 assert(Array.isArray(review) && review.length > 0 && review.length <= 100 && review.every((item: Obj) =>
-                  item && typeof item.requirement === "string" && item.requirement.trim() && item.requirement.length <= 500 &&
+                  item && item.changedStep === undefined && typeof item.requirement === "string" && item.requirement.trim() && item.requirement.length <= 500 &&
                   ["met", "not_applicable", "unmet"].includes(item.status) &&
                   typeof item.evidence === "string" && item.evidence.trim() && item.evidence.length <= 2000),
-                "outlineReview 须逐项填写大纲要求、状态和依据（1–100项）");
+                "outlineReview 须逐项填写要求原文、状态和依据（1–100项）；changedStep 仅用于补交。");
                 assert(review.reduce((size: number, item: Obj) => size + item.requirement.length + item.evidence.length, 0) <= 32000, "outlineReview exceeds 32000 characters");
-                if (draft) assert(a.outlineReview.every((item: Obj) => draft.missing.includes(item.requirement.trim())),
+                if (draft) assert(additions.every((item) => draft.missing.includes(item.requirement.trim())),
                   "复核补交仅允许填写上次返回的 changedSteps；如需修改已列项，请完整提交。");
               }
               if ((t.outlineReviewRequired || unfinished.length) && !review) {
@@ -1177,23 +1196,20 @@ export class Employee {
                   ok: false, code: "outline_review_incomplete", changedSteps: unchecked,
                   ...(token ? { outlineReviewRetry: token } : {}),
                   next: token
-                    ? "保留本次摘要、证据和已提交的复核项。下一次 task_complete 只传 outlineReviewRetry 和 changedSteps 中缺项的 outlineReview，逐条按原文填写状态和依据；不要重发整份。"
+                    ? "保留本次摘要、证据和已提交的复核项。下次只传 outlineReviewRetry 和缺项 outlineReview：每项用 changedStep 指向本回执 changedSteps 的序号（从 1 开始），填 status 和 evidence，无需抄 requirement。"
                     : "每条变更/取消的旧步骤须在 outlineReview 的 requirement 原样列出，说明被替代、已完成或不再适用的依据；旧步骤可以改写，不必恢复原计划。",
                 };
               }
               if (run) delete run.outlineDraft;
               const unmet = (review || []).flatMap((item: Obj, index: number) => item.status === "unmet" ? [{ index: index + 1, content: item.requirement }] : []);
-              const partial = partialKey(t, unmet);
-              const acceptedPlan = unfinished.length > 0 && t.approvedPartial === partialKey(t, unfinished) &&
-                JSON.stringify(unfinished.map((step) => step.content).sort()) === JSON.stringify(unmet.map((step: Obj) => step.content).sort());
-              const accepted = t.approvedPartial === partial || acceptedPlan;
+              const accepted = unmet.length > 0 && matchesApprovedPartial(t, unmet);
               if (unmet.length && !unfinished.length && !accepted) {
                 return { ok: false, code: "outline_unmet", unmet, next: "大纲要求尚未完成；先按授权继续、澄清或等待。确需请求部分交付时将对应步骤标为 cancelled。" };
               }
               if (unmet.length && !accepted) {
                 t.status = "approval";
                 t.approval = "任务大纲仍有未完成要求，是否接受现有成果并放弃这些要求？拒绝后继续原任务。\n当前成果：" + (summary?.trim() || clip(evidence, 400)) + "\n" + unfinishedText(unmet);
-                t.partialDelivery = partial;
+                t.partialDelivery = partialKey(t, unmet);
                 delete t.approvedPartial;
                 this.note(s, t, "confirm", "系统", t.approval);
                 stop = true;

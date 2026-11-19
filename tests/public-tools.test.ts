@@ -95,6 +95,7 @@ test("every public tool maps onto the unchanged internal executor arguments", ()
         ["task_complete", { evidence: "ok", deliverableRefs: [] }, { action: "complete", text: "ok", deliverableRef: [] }, task],
     ["task_complete", { evidence: "ok", outlineReview: [{ requirement: "test", status: "met", evidence: "receipt" }] }, { action: "complete", text: "ok", outlineReview: [{ requirement: "test", status: "met", evidence: "receipt" }] }, task],
     ["task_complete", { outlineReviewRetry: "r1", outlineReview: [{ requirement: "later", status: "met", evidence: "receipt" }] }, { action: "complete", outlineReviewRetry: "r1", outlineReview: [{ requirement: "later", status: "met", evidence: "receipt" }] }, task],
+    ["task_complete", { outlineReviewRetry: "r1", outlineReview: [{ changedStep: 1, status: "met", evidence: "receipt" }] }, { action: "complete", outlineReviewRetry: "r1", outlineReview: [{ changedStep: 1, status: "met", evidence: "receipt" }] }, task],
     ["memory_propose", { claim: "c", memoryKind: "convention" }, { action: "memory_propose", claim: "c", memoryKind: "convention" }, chat],
     ["memory_propose", { claim: "c", pinned: true, memoryKind: null }, { action: "memory_propose", claim: "c", pinned: true }, chat],
     ["memory_manage", { request: { command: "feedback", memoryId: "a", signal: "correction", claim: "new" } }, { action: "memory_resolve", resolveAction: "feedback", id: "a", signal: "correction", claim: "new" }, chat],

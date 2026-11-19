@@ -192,11 +192,12 @@ export function employeeTools(ctx: ToolContext): Tool[] {
       out.push(tool("task_complete",
         "交付并结束当前任务：计划须已全部 completed 或 cancelled 且对应最新要求，in_progress 不能自动收尾。计划重写或存在 cancelled 时必须填 outlineReview，逐项对照原始任务、工作原则与用户最新要求，说明实际证据或不适用依据；不要把旧计划的中间步骤当成必须完成的大纲。仍有未满足的用户要求时先按授权继续、澄清或等待；确需部分交付须经交代人明确接受。首次提交 evidence 写实际结果与验证证据；summary 只写结论、重要变化、限制或需用户处理的事项（建议 100–150 字，上限 400）。outline_review_incomplete 回执带 outlineReviewRetry 时只补缺项，不重发原内容。deliverableRefs 可省略（系统选用尚未作为步骤产物交出的最新较长正文），也可填你自己写过的正文回复编号（assistant 消息 seq）。已交出的步骤产物不会自动算作最终正文，也不要重复放进正文；仅当用户明确要求时可显式引用其文本。工具回执里的 textRef 字段值才是正文编号，不要把工具回执自己的序号填进来；填错时按返回的可引用列表立即重试，不要改用 task_progress 重贴正文。可多条按顺序拼接；仅当确实没有单独的最终正文时传 []（本次交付期内已写出未交出的正文却传 [] 会被退回一次，并给出该正文编号）。成功后立即结束本轮。必须单独调用。",
         { evidence: str("完整提交必填：实际结果与验证证据，1–8000 字。补交缺项时省略", { minLength: 1, maxLength: 8000 }),
-          outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、工作原则与用户最新要求，并复核 task_progress 回执的 changedSteps；每条在 requirement 原样列出并解释如何完成、替代或为何不适用。用 outlineReviewRetry 补交时只填该次回执缺少的 changedSteps。", items: obj({
-            requirement: str("用户任务、工作原则中的一项要求或 changedSteps 中的原文", { minLength: 1, maxLength: 500 }),
+          outlineReview: { type: "array", minItems: 1, maxItems: 100, description: "计划重写或有 cancelled 步骤时必填：逐项对照原始任务、工作原则和最新要求，完整提交时填 requirement 原文并复核 task_progress 的 changedSteps。带 outlineReviewRetry 补交时只填该回执缺项，优先用 changedStep 替代 requirement。", items: obj({
+            requirement: str("完整提交必填：一项用户要求、工作原则或 changedSteps 原文；按序号补交时省略", { minLength: 1, maxLength: 500 }),
+            changedStep: int("仅带 outlineReviewRetry 时可用：上次回执 changedSteps 中的序号，从 1 开始；不可同时填 requirement", { minimum: 1, maximum: 100 }),
             status: str("met 已满足 / not_applicable 条件不适用 / unmet 尚未满足", { enum: ["met", "not_applicable", "unmet"] }),
             evidence: str("实际回执、验证证据或不适用/未完成的原因", { minLength: 1, maxLength: 2000 }),
-          }, ["requirement", "status", "evidence"]) },
+          }, ["status", "evidence"]) },
           outlineReviewRetry: str("仅补交缺项时复制最近一次 outline_review_incomplete 的同名字段；只传此字段及缺项 outlineReview，不传 evidence、summary 或 deliverableRefs", { minLength: 1, maxLength: 100 }),
           summary: str("交付摘要，1–400 字，建议 100–150 字以内；先结论，简单任务一两句即可，勿写小标题清单", { minLength: 1, maxLength: 400 }),
           deliverableRefs: { type: "array", maxItems: 20, items: { type: "integer", minimum: 1 }, description: "可选；正文 assistant 消息编号（用回执 textRef 的值）；省略则选用尚未作为步骤产物交出的最新较长正文；仅无单独最终正文时传 []" } }));

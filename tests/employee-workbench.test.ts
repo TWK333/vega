@@ -262,6 +262,11 @@ test("new supplements cannot reset a failing task's durable recovery budget", as
     runtime.run = async () => { throw Error("persistent service failure"); };
     let current = await segment(employee, job);
     const startedAt = current.recovery.startedAt, session = current.workSession;
+    const expired = structuredClone(current);
+    employee.recover(expired, "HTTP response headers timed out after 180s", startedAt + 30 * 60000 + 1);
+    assert.equal(expired.status, "waiting");
+    assert.equal(expired.recovery.attempts, 2);
+    assert.match(expired.waiting, /距首次中断已超过 30 分钟/);
     for (let attempt = 1; attempt <= 3; attempt++) {
       await employee.control({ action: "resume", id: job.id, text: "补充要求 " + attempt });
       const supplemented = employee.task(await employee.state(), job.id);
@@ -272,7 +277,7 @@ test("new supplements cannot reset a failing task's durable recovery budget", as
     assert.equal(current.status, "waiting");
     assert.equal(current.recovery.attempts, 4);
     assert.equal(current.workSession, session);
-    assert.match(current.waiting, /自动恢复已达上限/);
+    assert.match(current.waiting, /自动恢复已达上限（恢复次数用尽）/);
     const reopened = new Employee(store, employee.vault, runtime);
     assert.equal((await reopened.state()).tasks[0].recovery.attempts, 4);
   } finally { employee.close(); await store.close(); }
