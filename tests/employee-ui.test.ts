@@ -16,7 +16,7 @@ function employeeWorkspace(requested = "", list = [{ id: "ea", activeTasks: 0 },
     employeeTaskFilter: ref("active"), employeeTaskFocus: ref(""), dutyOpen: ref(false), memoryID: ref(""), taskText: ref(""), employeeError: ref(""),
     employeeComposers: ref({}), creatingEmployee: ref(false), view: ref("employee"), closeNavigation() {},
     ended: (status: string) => ["done", "failed", "stopped", "cancelled", "sealed"].includes(status), toast: (text: string) => notices.push(text),
-    api: async (path: string) => { calls.push(path); return path === "/employees" ? list : { id: path.split("/").at(-1) }; },
+    api: async (path: string) => { calls.push(path); return path === "/employees" ? list : { id: path.split("?")[0].split("/").at(-1) }; },
   };
   const methods = vm.runInNewContext(between("let employeeLoadVersion =", "function employeeApi(") + between("async function chooseEmployee(", "async function createEmployee(") + between("async function openEmployeeTask(", "async function employeeTabChanged(") + "\n({ loadEmployee, chooseEmployee, openEmployeeTaskOf })", context);
   context.refreshEmployee = methods.loadEmployee;
@@ -28,7 +28,7 @@ test("a requested employee (from the address bar) is loaded directly on refresh"
   await refreshed.loadEmployee();
   assert.equal(refreshed.selectedEmployee.value, "eb");
   assert.equal(refreshed.employee.value.id, "eb");
-  assert.deepEqual(refreshed.calls, ["/employees", "/employees/eb"]);
+  assert.deepEqual(refreshed.calls, ["/employees", "/employees/eb?stepSummaries=1"]);
   const first = employeeWorkspace();
   await first.loadEmployee();
   assert.equal(first.selectedEmployee.value, "ea", "no request: the first visible employee");

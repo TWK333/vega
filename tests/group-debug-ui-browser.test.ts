@@ -24,7 +24,9 @@ test("debug cards stay compact; group topics follow task details with pinned act
       const flush = async () => { for (let i = 0; i < 12; i++) await nextTick(); };
       const input = (el, value) => { el.value = value; el.dispatchEvent(new Event('input', { bubbles: true })); };
       const result = document.querySelector('#result');
-      const state = reactive({ view: 'group', revision: 0, user: { id: 'requester', role: 'operator' } });
+      const state = reactive({ view: 'group', selectedTask: null, revision: 0, user: { id: 'requester', role: 'operator' } });
+      let replacedTask = false;
+      const onTaskChange = (task, replace = false) => { state.selectedTask = task; replacedTask = replace; };
       const task = { id: 't1', text: '核对指标筛选器的中英文提示文案', status: 'waiting', createdAt: Date.now(), waiting: '请补充验收环境', plan: [{ content: '核对提示文案', status: 'pending' }], requester: { kind: 'user', id: 'requester', name: '发起人' } };
       const group = { id: 'g1', name: '情报小分队', bulletin: '', users: [{ id: 'owner', name: '归属人' }, { id: 'requester', name: '发起人' }, { id: 'member', name: '同事' }], employees: [{ id: 'e1', name: '情报开发', mine: false, avatar: 'bot:round:blue' }], running: [] };
       const posts = [], messagePosts = [];
@@ -47,6 +49,7 @@ test("debug cards stay compact; group topics follow task details with pinned act
         if (path === '/debug/sessions') return sessions;
         if (path.includes('/messages?')) {
           const topicId = new URLSearchParams(path.split('?')[1]).get('topicTaskId');
+          if (topicId === 'gone') throw Object.assign(Error('群任务话题不存在'), { status: 404 });
           return { group, messages: messages.filter((m) => !topicId || m.topicTaskId === topicId), taskStatus: { [task.id]: task.status } };
         }
         if (path.endsWith('/messages') && method === 'POST') {
@@ -62,7 +65,7 @@ test("debug cards stay compact; group topics follow task details with pinned act
         }
         throw Error('unexpected API ' + path);
       };
-      const app = createApp({ render: () => state.view === 'debug' ? h(DebugSessions, { api, revision: state.revision }) : h(GroupChat, { api, user: state.user, groupId: 'g1', myEmployees: [], revision: state.revision }) }).use(vaporInteropPlugin);
+      const app = createApp({ render: () => state.view === 'debug' ? h(DebugSessions, { api, revision: state.revision }) : h(GroupChat, { api, user: state.user, groupId: 'g1', myEmployees: [], revision: state.revision, selectedTask: state.selectedTask, onTaskChange }) }).use(vaporInteropPlugin);
       try {
         app.mount('#app'); await flush();
         document.querySelector('.chat-task-link').click(); await flush();
@@ -110,7 +113,17 @@ test("debug cards stay compact; group topics follow task details with pinned act
         document.querySelector('[data-task-id="t-other"]').click(); await flush();
         check(tabs()[1].getAttribute('aria-pressed') === 'true', 'the work list opens a topic too');
         document.querySelector('[aria-label="收起工作面板"]').click(); await flush();
-        check(!tabs().length && !document.querySelector('.group-work') && chat().includes('无关的主聊天'), 'closing the work panel exits the topic');
+        check(!tabs().length && !state.selectedTask && !document.querySelector('.group-work') && chat().includes('无关的主聊天'), 'closing the work panel exits the topic and clears the route selection');
+        state.view = 'debug'; await flush();
+        state.selectedTask = { employeeId: 'e1', taskId: task.id };
+        state.view = 'group'; await flush();
+        check(document.querySelector('.task-detail')?.dataset.taskId === task.id && tabs()[1]?.textContent.includes(task.text) && chat().includes('请核对这条任务') && !chat().includes('无关的主聊天'), 'a fresh group page restores the routed task, title and topic even when it is absent from the work list');
+        tabs()[0].click(); await flush();
+        check(state.selectedTask?.taskId === task.id && document.querySelector('.task-detail'), 'manual chat tab switches leave the routed task open');
+        state.view = 'debug'; await flush();
+        state.selectedTask = { employeeId: 'e1', taskId: 'gone' };
+        state.view = 'group'; await flush();
+        check(!state.selectedTask && replacedTask && !tabs().length && chat().includes('无关的主聊天'), 'an unavailable deep link falls back to the same group without adding history');
         state.view = 'debug'; await flush();
         for (const width of [320, 390, 880, 1280]) {
           document.querySelector('#app').style.width = width + 'px'; await flush();

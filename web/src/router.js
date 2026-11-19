@@ -26,8 +26,10 @@ export function parseRoute(href = "/") {
     if (EMPLOYEE_TABS.includes(sub) && !extra) return { view: "employee", employee: id, tab: sub };
     return { view: "employee", employee: id };
   }
-  // Side panels (work / members) stay in the component; old /groups/:id/work|members links just open the group.
-  if (root === "groups" && id && (!sub || !extra)) return { view: "group", group: id === "new" ? "" : id };
+  if (root === "groups" && id && id !== "new" && sub === "tasks" && extra && rest.length === 1)
+    return { view: "group", group: id, groupTask: { employeeId: extra, taskId: rest[0] } };
+  // Opening the task list or member panel alone doesn't change the URL.
+  if (root === "groups" && id && !extra) return { view: "group", group: id === "new" ? "" : id };
   if (root === "chat" && !sub) return id ? { view: "chat", session: id } : { view: "chat" };
   if (PAGES.includes(root) && !sub) return { view: root, ...(id && pageSub(root, id) ? { sub: id } : {}) };
   return { view: "employee" };
@@ -35,7 +37,7 @@ export function parseRoute(href = "/") {
 
 /** The inverse of parseRoute for the page state App.vue holds. */
 export function formatRoute(route) {
-  const { view, employee, creating, tab, task, session, group, sub } = route;
+  const { view, employee, creating, tab, task, session, group, groupTask, sub } = route;
   if (view === "employee") {
     if (creating) return "/employees/new";
     if (!employee) return "/";
@@ -44,7 +46,11 @@ export function formatRoute(route) {
     if (tab === "tasks" && task) return base + "/tasks/" + encode(task);
     return EMPLOYEE_TABS.includes(tab) ? base + "/" + tab : base;
   }
-  if (view === "group") return group ? "/groups/" + encode(group) : "/groups/new";
+  if (view === "group") {
+    if (!group) return "/groups/new";
+    const base = "/groups/" + encode(group);
+    return groupTask?.employeeId && groupTask.taskId ? base + "/tasks/" + encode(groupTask.employeeId) + "/" + encode(groupTask.taskId) : base;
+  }
   if (view === "chat") return session ? "/chat/" + encode(session) : "/chat";
   if (!PAGES.includes(view)) return "/";
   return "/" + view + (sub && pageSub(view, sub) ? "/" + encode(sub) : "");

@@ -16,12 +16,12 @@ import ComposerQuote from "./ComposerQuote.vue";
 import { markSeen, seenSeq } from "./seen.js";
 import PressMention from "./PressMention.vue";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
-const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
-const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "inspect", "cancel", "read"]);
+const props = defineProps({ api: Function, user: Object, groupId: String, selectedTask: Object, myEmployees: Array, revision: Number });
+const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "inspect", "cancel", "read", "task-change"]);
 // Work panel: side-by-side from 768px (GroupWork stops overlaying); drawers stay closed until opened.
 const roomy = () => typeof matchMedia === "function" && matchMedia("(min-width: 768px)").matches;
 const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null);
-const topic = ref(null), viewMode = ref("main"), olderReferences = ref([]), historyLoading = ref(false), topicUnavailable = ref(false);
+const topic = computed(() => props.selectedTask), topicTitle = ref(""), viewMode = ref("main"), olderReferences = ref([]), historyLoading = ref(false);
 const activeTopic = computed(() => viewMode.value === "topic" ? topic.value : null);
 const taskFocus = computed(() => topic.value ? { member: topic.value.employeeId, task: topic.value.taskId } : null);
 function chooseView(mode) { viewMode.value = mode; }
@@ -81,7 +81,6 @@ async function load(scroll = false) {
     const result = await props.api(`/groups/${id}/messages?${filter}&stepSummaries=1`);
     if (!current()) return;
     messages.value = result.messages;
-    topicUnavailable.value = false;
     taskStatus.value = result.taskStatus || {};
     group.value = result.group;
     edit.value = { name: result.group.name, bulletin: result.group.bulletin };
@@ -92,14 +91,10 @@ async function load(scroll = false) {
     if (stick) { await nextTick(); if (current()) transcript.value?.scrollTo({ top: transcript.value.scrollHeight }); }
   } catch (e) {
     if (!current()) return;
-    if (topicId && [403, 404].includes(e.status)) { topicUnavailable.value = true; messages.value = []; olderReferences.value = []; }
+    if (topicId && [400, 403, 404].includes(e.status)) exitTask(true);
     throw e;
   } finally { if (current()) historyLoading.value = false; }
 }
-watch(() => activeTopic.value?.taskId, () => {
-  messages.value = []; olderReferences.value = []; topicUnavailable.value = false;
-  void run(() => load(true));
-});
 // Open and visible: everything loaded so far is read (one marker per user on the server).
 let readSeq = 0;
 async function markRead() {
@@ -148,7 +143,7 @@ const { uploading, upload, paste } = useAttachmentInput(async (picked) => {
 async function send() {
   const target = composer.value, id = props.groupId, topicTaskId = activeTopic.value?.taskId;
   const original = target.text, text = original.trim(), items = [...target.attachments], quote = target.quote;
-  if ((!text && !items.length) || readonly.value || topicUnavailable.value || sending.value || uploading.value) return;
+  if ((!text && !items.length) || readonly.value || sending.value || uploading.value) return;
   sending.value = true;
   await run(async () => {
     // getRandomValues also works over LAN HTTP, where randomUUID is unavailable.
@@ -192,19 +187,22 @@ async function create() {
     emit("created", created.id);
   });
 }
-function exitTask() {
-  topic.value = null;
-  chooseView("main");
+function exitTask(replace = false) {
+  if (topic.value) emit("task-change", null, replace);
 }
-function selectTopic({ employeeId, taskId, title }) {
-  const same = topic.value?.taskId === taskId && topic.value?.employeeId === employeeId;
-  if (!same) {
-    if (!topicDrafts.has(taskId)) topicDrafts.set(taskId, emptyComposer());
-    topic.value = { employeeId, taskId, title };
+function selectTopic(selection) {
+  const same = topic.value?.taskId === selection.taskId && topic.value?.employeeId === selection.employeeId;
+  if (same) chooseView(activeTopic.value ? "main" : "topic");
+  else emit("task-change", selection);
+}
+function showTask(selection) {
+  topicTitle.value = selection?.title || "";
+  if (selection) {
+    if (!topicDrafts.has(selection.taskId)) topicDrafts.set(selection.taskId, emptyComposer());
+    panel.value = false;
+    work.value = true;
   }
-  chooseView(same && activeTopic.value ? "main" : "topic");
-  panel.value = false;
-  work.value = true;
+  chooseView(selection ? "topic" : "main");
 }
 function openTask(message, taskId) {
   const author = group.value?.employees.find((e) => e.id === message.author?.id);
@@ -220,13 +218,18 @@ async function loadWork() {
   finally { workLoading.value = false; }
 }
 function toggleWork() { work.value = !work.value; if (work.value) panel.value = false; }
+watch(topic, showTask, { immediate: true, flush: "sync" });
+watch(() => activeTopic.value?.taskId, () => {
+  messages.value = []; olderReferences.value = [];
+  void load(true).catch((e) => { error.value = e.message; });
+});
 watch(panel, (open) => { if (open) work.value = false; });
 watch(work, (open) => { if (!open) exitTask(); });
 watch([work, () => props.groupId], () => { if (work.value) void run(loadWork); }, { immediate: true });
 watch(() => props.groupId, () => {
   readSeq = 0; settled = false; group.value = null; messages.value = []; olderReferences.value = []; panel.value = false;
-  work.value = roomy(); workMembers.value = []; exitTask(); topicDrafts.clear();
-  mainComposer.text = ""; mainComposer.attachments = []; mainComposer.quote = undefined; topicUnavailable.value = false;
+  work.value = roomy(); workMembers.value = []; topicDrafts.clear(); showTask(topic.value);
+  mainComposer.text = ""; mainComposer.attachments = []; mainComposer.quote = undefined;
   void run(() => load(true));
 });
 watch(() => props.revision, () => { void run(() => load()); void run(loadWork); });
@@ -262,12 +265,12 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
         <section class="group-chat">
           <nav v-if="topic" class="group-chat-tabs" aria-label="群聊视图">
             <button type="button" :aria-pressed="!activeTopic" @click="chooseView('main')">主聊天</button>
-            <button type="button" class="topic-tab" :aria-pressed="!!activeTopic" :title="topic.title" @click="chooseView('topic')"><span>话题</span><span v-if="topic.title" class="topic-title">{{ topic.title }}</span></button>
+            <button type="button" class="topic-tab" :aria-pressed="!!activeTopic" :title="topicTitle" @click="chooseView('topic')"><span>话题</span><span v-if="topicTitle" class="topic-title">{{ topicTitle }}</span></button>
           </nav>
           <div ref="transcript" class="chat-scroll" aria-live="polite" :aria-busy="historyLoading">
             <div class="chat-column">
               <div v-if="!activeTopic && group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
-              <p v-if="activeTopic && !shown.length" class="group-notice">{{ historyLoading ? '正在加载话题…' : topicUnavailable ? '此任务话题已不可用。' : '还没有关联消息，可以直接在此开始讨论。' }}</p>
+              <p v-if="activeTopic && !shown.length" class="group-notice">{{ historyLoading ? '正在加载话题…' : '还没有关联消息，可以直接在此开始讨论。' }}</p>
               <template v-for="({ message, continued }, index) in shown" :key="message.seq">
                 <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
@@ -283,7 +286,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
             </div>
           </div>
           <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />只读账号只能查看群聊。</p>
-          <form v-else-if="!topicUnavailable" class="chat-composer" @paste="paste" @submit.prevent="send">
+          <form v-else class="chat-composer" @paste="paste" @submit.prevent="send">
             <ComposerQuote v-if="quoted" :quote="quoted" @jump="jumpTo" @remove="quoted = undefined" />
             <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
             <div class="composer-row">
@@ -295,7 +298,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
             <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天' : '回复牛马或 @ 它让它回应 · /new 开启新会话' }} · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
-        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @close="work = false" />
+        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @title="topicTitle = $event" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @close="work = false" />
         <aside v-if="panel && group" class="group-panel" aria-label="群成员与公告">
           <section>
             <h3>群公告</h3>

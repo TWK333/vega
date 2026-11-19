@@ -220,6 +220,7 @@ const employee = ref({
   // 群聊: the viewer's groups (sidebar), the open one ("" with view "group" = the create form) and its live revision.
   groups = ref([]),
   selectedGroup = ref(""),
+  selectedGroupTask = ref(null),
   groupRevision = ref(0),
   employeeEvent = ref(null),
   employeeComposers = ref({}),
@@ -572,14 +573,16 @@ async function bootstrap() {
 async function loadGroups() {
   try { groups.value = await api("/groups"); } catch (e) { if (!e.network) error.value = e.message; }
 }
-function openGroup(id = "") {
+function openGroup(id = "", task = null) {
   selectedGroup.value = id;
+  selectedGroupTask.value = task;
   creatingEmployee.value = false;
   view.value = "group";
   closeNavigation();
 }
 async function groupClosed() {
   selectedGroup.value = "";
+  selectedGroupTask.value = null;
   await loadGroups();
   view.value = "employee";
 }
@@ -677,6 +680,7 @@ function resetLogin() {
   selectedEmployee.value = "";
   groups.value = [];
   selectedGroup.value = "";
+  selectedGroupTask.value = null;
   employeeEvent.value = null;
   employeeComposers.value = {};
   employeeError.value = "";
@@ -943,7 +947,7 @@ function handleEvent(event) {
       await loadGroupsSoon();
       if (view.value !== "group" || event.data?.groupId !== selectedGroup.value) return;
       if (groups.value.some((g) => g.id === selectedGroup.value)) groupRevision.value++;
-      else { toast("你已不在这个群聊中（被移出或群聊已解散）"); selectedGroup.value = ""; view.value = "employee"; }
+      else { toast("你已不在这个群聊中（被移出或群聊已解散）"); selectedGroup.value = ""; selectedGroupTask.value = null; view.value = "employee"; }
     })());
     return;
   }
@@ -1329,7 +1333,7 @@ onBeforeUnmount(() => {
 });
 // 路由: the address bar mirrors the open page and its tab (router.js); refresh, links and back/forward restore it.
 // User navigation pushes; restoring a route and falling back from unknown or forbidden ids replace.
-// Each page remembers its own tab for this visit (settings section, debug session, …); group side panels do not.
+// Each page remembers its own tab for this visit; only a selected task is routed inside a group.
 
 const pageTabs = ref({});
 const pageKey = computed(() => view.value === "group" ? "group:" + selectedGroup.value : view.value);
@@ -1337,7 +1341,7 @@ const pageSub = computed(() => pageTabs.value[pageKey.value] || "");
 function setPageTab(tab) { pageTabs.value = { ...pageTabs.value, [pageKey.value]: tab || "" }; }
 const routePath = computed(() => user.value ? formatRoute({
   view: view.value, employee: selectedEmployee.value, creating: creatingEmployee.value, tab: employeeTab.value, task: employeeTaskFocus.value,
-  session: view.value === "employee" ? employeeSession.value : current.value?.id, group: selectedGroup.value, sub: pageSub.value,
+  session: view.value === "employee" ? employeeSession.value : current.value?.id, group: selectedGroup.value, groupTask: selectedGroupTask.value, sub: pageSub.value,
 }) : "");
 let routeReady = false, routing = 0;
 function syncRoute(replace) {
@@ -1346,6 +1350,10 @@ function syncRoute(replace) {
   if (routeReady && path && path !== window.location.pathname + window.location.search) window.history[replace ? "replaceState" : "pushState"](null, "", path);
 }
 watch(routePath, () => syncRoute(routing > 0));
+function setGroupTask(task, replace = false) {
+  selectedGroupTask.value = task;
+  if (replace) syncRoute(true);
+}
 function closeClientAuthorization() {
   clientAuthorization.value = "";
   window.history.replaceState(null, "", routePath.value || "/");
@@ -1357,7 +1365,7 @@ async function applyRoute(route) {
     if (ADMIN_PAGES.includes(route.view) && !isAdmin.value) route = { view: "employee" };
     // 非管理员只保留个人设置；只读账号不能配置触发器。
     if (route.view === "settings" && ((!isAdmin.value && route.sub && !["vault", "external-mcp", "triggers"].includes(route.sub)) || (route.sub === "triggers" && !canExecute.value))) route = { view: "settings" };
-    if (route.view === "group") openGroup(route.group);
+    if (route.view === "group") openGroup(route.group, route.groupTask);
     else if (route.view === "chat") {
       const session = route.session && sessions.value.find((s) => s.id === route.session);
       if (session) await attempt(() => selectSession(session));
@@ -1501,7 +1509,7 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
           </form>
         </div>
       </template>
-      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :my-employees="myEmployees" :revision="groupRevision" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @inspect="openEmployee($event)" @read="unread.groupRead" />
+      <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :selected-task="selectedGroupTask" :my-employees="myEmployees" :revision="groupRevision" @task-change="setGroupTask" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @inspect="openEmployee($event)" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
       <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" @tab="setPageTab" />
       <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" @open="openEmployee($event)" />

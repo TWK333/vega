@@ -7,7 +7,7 @@ import { taskLabel, taskTone, planProgress, shortTime } from "./task-status";
 // The group's 工作面板: tasks started from this group, by member employee (GET /groups/:id/tasks, already ordered).
 // Task details stay beside the chat; owners can explicitly open their execution workspace.
 const props = defineProps({ members: Array, loading: Boolean, api: Function, groupId: String, focus: Object });
-const emit = defineEmits(["select", "exit", "open", "inspect", "close", "changed"]);
+const emit = defineEmits(["select", "exit", "title", "open", "inspect", "close", "changed"]);
 const selectedKey = computed(() => props.focus || null), selected = ref(null), detailLoading = ref(false), error = ref("");
 const owned = () => props.members?.some((member) => member.mine && member.id === selectedKey.value?.member);
 const requester = (task) => task.requester ? `${task.requester.kind === "employee" ? "牛马" : ""}${task.requester.name}` : "";
@@ -15,19 +15,20 @@ const note = (task) => task.status === "waiting" ? task.waiting : task.status ==
 let version = 0;
 const taskPath = (key) => `/groups/${encodeURIComponent(props.groupId)}/tasks/${encodeURIComponent(key.member)}/${encodeURIComponent(key.task)}`;
 async function loadDetail() {
-  const current = ++version, key = selectedKey.value;
+  const request = ++version, key = selectedKey.value;
+  const current = () => version === request && selectedKey.value === key;
   if (!key) { selected.value = null; detailLoading.value = false; return; }
   detailLoading.value = true; error.value = "";
   try {
     const task = await props.api(taskPath(key));
-    if (current === version) selected.value = task;
+    if (current()) { selected.value = task; emit("title", task.text); }
   } catch (e) {
-    if (current === version) {
+    if (current()) {
       selected.value = null; error.value = e.message;
-      if ([403, 404].includes(e.status)) emit("exit");
+      if ([403, 404].includes(e.status)) emit("exit", true);
     }
   }
-  finally { if (current === version) detailLoading.value = false; }
+  finally { if (current()) detailLoading.value = false; }
 }
 function open(member, task) {
   emit("select", { employeeId: member.id, taskId: task.id, title: task.text });
@@ -42,7 +43,7 @@ async function control(action, text) {
   try {
     const result = await props.api(taskPath(key), "POST", { action: action === "reject" ? "approve" : action, ...(action === "approve" || action === "reject" ? { approved: action === "approve" } : {}), ...(text ? { text } : {}), ...(action === "redispatch" ? { confirmed: true } : {}), ...(action === "seal" ? { manual: true } : {}) });
     if (selectedKey.value === key) {
-      if (action === "remove") emit("exit");
+      if (action === "remove") emit("exit", true);
       else if (action === "redispatch" && result.id) open({ id: key.member }, { id: result.id, text: selected.value?.text });
       else await loadDetail();
     }
