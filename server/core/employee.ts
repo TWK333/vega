@@ -42,6 +42,8 @@ export type Task = Obj & {
   profile: string;
   cwd: string;
   owner: Owner;
+  /** A task whose input explicitly refers to the originating device's files; no automatic cloud handoff. */
+  deviceOnly?: boolean;
   /** Set when the task was started from a group chat (groups.ts): where its notices go and who asked for it. */
   group?: TaskGroup;
   /** Images and files of the messages that started or supplemented the task; each run passes on the new ones. */
@@ -945,7 +947,7 @@ export class Employee {
     caller: string,
     a: Obj,
     owner: Owner = { token: "", name: "" },
-    boundExecution?: { execution: Execution; cwd: string; note?: string },
+    boundExecution?: { execution: Execution; cwd: string; note?: string; deviceOnly?: boolean },
     stepFiles: { name: string; data: Buffer }[] = [],
   ): Promise<{ value: any; stop?: boolean; secret?: string }> {
     const action = a.action;
@@ -1046,6 +1048,7 @@ export class Employee {
                 owner: t?.owner || owner,
                 employeeId: this.employeeId,
                 execution: t ? { ...(t.execution || {} ) } : bound!.execution,
+                deviceOnly: t?.deviceOnly || boundExecution?.deviceOnly,
                 key: a.key || "",
                 origin: t?.id || "",
                 chatSource: t?.chatSource,
@@ -2038,7 +2041,7 @@ export class Employee {
           if (this.busy.has(t.id) || !canStart || (t.backgroundWait && !t.backgroundWait.ready))
             continue;
           // 这台设备还没回连（或已待命）：不派发、不换设备、不改到服务端执行。
-          const waitClient = t.status === "recovering" ? t.recovery?.waitClient : undefined;
+          const waitClient = (t.status === "recovering" ? t.recovery?.waitClient : undefined) || (t.deviceOnly && t.execution?.localAgent ? t.execution.clientId : undefined);
           if (waitClient && this.runtime.client && this.runtime.client(t.execution?.ownerId || s.ownerId, waitClient)?.clientId !== waitClient) continue;
           if ((t.nextCheckAt || 0) > now) {
             next = Math.min(next, t.nextCheckAt);

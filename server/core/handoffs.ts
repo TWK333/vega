@@ -531,7 +531,7 @@ export class TaskHandoffs {
       // 默认接管：客户端退出或改到服务端优先后就在云端继续，不需要先配置开关。
       if (policy.auto === false || policy.enabled === false) continue;
       for (const task of state.tasks) {
-        if (ended(task.status) || task.execution?.localAgent !== true || task.execution?.clientId !== clientId) continue;
+        if (ended(task.status) || task.deviceOnly || task.execution?.localAgent !== true || task.execution?.clientId !== clientId) continue;
         const record = await this.record(task.id);
         if (record?.where === "cloud") continue;
         try {

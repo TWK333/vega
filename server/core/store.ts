@@ -20,6 +20,8 @@ export type Message = {
   actorId?: string;
   clientMessageId?: string;
   clientMessageHash?: string;
+  /** Server-resolved execution device for a private chat, never supplied by user/tool JSON. */
+  chatClientId?: string;
   taskInput?: { answer?: string; handoff?: string; handoffRevision?: number; quoteSeq?: number };
   quote?: ChatQuote;
   tasks?: { id: string; title: string; status: string }[];

@@ -177,6 +177,80 @@ test("employee chat shows every text the employee wrote at once, including text 
   assert.equal(messages[1].thinking, "private reasoning", "the minimal chat projection never removes canonical process history");
 });
 
+test("a private native turn binds new explicit local work to its originating device, never another online client", async () => {
+  const { store, engine, employee, chat } = await fixture();
+  const transport = { send() {}, close() {} };
+  const here = { instance: "1".repeat(32), clientId: "a".repeat(32), cwd: "C:\\fixture-pc", platform: "windows", browser: "cloud" };
+  const other = { ...here, instance: "2".repeat(32), clientId: "b".repeat(32), cwd: "C:\\other-pc" };
+  engine.localAgents.connect("owner", here, transport);
+  engine.localAgents.connect("owner", other, transport);
+  const assign = async (text: string, chatClientId?: string) => {
+    let replies = 0;
+    engine.providers.chat = async () => replies++ === 0
+      ? { role: "assistant", calls: [{ id: "assign-local", ...employeeCall({ action: "add", kind: "todo", text }) }] }
+      : { role: "assistant", text: "fixture reply" };
+    await engine.run(chat.id, { role: "user", text, actorId: "owner", chatClientId });
+  };
+  try {
+    await assign("列出d盘目录", here.clientId);
+    let tasks = (await employee.state()).tasks;
+    assert.equal(tasks.length, 1);
+    assert.equal(tasks[0].execution.clientId, here.clientId);
+    assert.equal(tasks[0].execution.localAgent, true);
+    assert.equal(tasks[0].execution.localBrowser, false, "respect the device's separate browser preference");
+    assert.equal(tasks[0].cwd, here.cwd);
+    assert.equal(tasks[0].deviceOnly, true);
+    assert(!(await store.session(chat.id)).localAgent, "chat itself stays server-side");
+    await assign("查云端日志");
+    tasks = (await employee.state()).tasks;
+    const cloudTask = tasks.find(task => task.text === "查云端日志")!;
+    assert.equal(cloudTask.execution.localAgent, false);
+    let replies = 0;
+    engine.providers.chat = async () => replies++ === 0
+      ? { role: "assistant", calls: [{ id: "resume-on-wrong-device", ...employeeCall({ action: "resume", id: cloudTask.id, text: "检查本机文件" }) }] }
+      : { role: "assistant", text: "fixture reply" };
+    await engine.run(chat.id, { role: "user", text: "继续原任务，检查本机文件", actorId: "owner", chatClientId: here.clientId });
+    assert.match((await store.messages(chat.id)).filter(m => m.role === "tool").at(-1)!.text!, /原任务不在指定客户端/);
+    assert.deepEqual(await employee.findTask(cloudTask.id), cloudTask);
+    engine.localAgents.disconnect("owner", here.instance);
+    await engine.handoffs.clientsGone(here.clientId, "owner");
+    assert.equal((await employee.state()).tasks.find(task => task.deviceOnly)!.execution.clientId, here.clientId);
+    await assign("检查本机文件", here.clientId);
+    assert.equal((await employee.state()).tasks.length, 2, "the other connected device must not receive the local request");
+    assert.match((await store.messages(chat.id)).filter(m => m.role === "tool").at(-1)!.text!, /客户端未连接/);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("web private chat selects a unique compatible online device of the same account", async () => {
+  const { store, engine, chat } = await fixture();
+  const transport = { send() {}, close() {} };
+  const first = { instance: "1".repeat(32), clientId: "a".repeat(32), cwd: "D:\\work", platform: "windows" };
+  const second = { ...first, instance: "2".repeat(32), clientId: "b".repeat(32) };
+  const linux = { instance: "3".repeat(32), clientId: "c".repeat(32), cwd: "/work", platform: "linux" };
+  const outside = { ...first, instance: "4".repeat(32), clientId: "d".repeat(32) };
+  const message = { role: "user", actorId: "owner", text: "列出 D 盘目录" };
+  const placed: (string | undefined)[] = [];
+  engine.launch = async (session, input) => { placed.push(input.chatClientId); await store.append(session, input); };
+  try {
+    engine.localAgents.connect("another-account", outside, transport);
+    engine.localAgents.connect("owner", linux, transport);
+    await assert.rejects(engine.submitChat(chat.id, message), { statusCode: 409, message: /Windows.*不会在云端执行/ });
+    await assert.rejects(engine.submitChat(chat.id, { ...message, actorId: "another-account" }), { statusCode: 403 });
+    engine.localAgents.connect("owner", first, transport);
+    const accepted = { ...message, clientMessageId: "browser-routing-id", clientMessageHash: "browser-routing-hash" };
+    await engine.submitChat(chat.id, accepted);
+    engine.localAgents.suspend("owner", first.instance);
+    await engine.submitChat(chat.id, accepted); // Retry of an accepted ID stays idempotent while offline.
+    await assert.rejects(engine.submitChat(chat.id, message), { statusCode: 409 });
+    engine.localAgents.connect("owner", first, transport);
+    engine.localAgents.connect("owner", second, transport);
+    await assert.rejects(engine.submitChat(chat.id, message), { statusCode: 409, message: /多台/ });
+    await engine.submitChat(chat.id, message, second.clientId);
+    await engine.submitChat(chat.id, { ...message, text: "在服务端列出 D 盘目录" });
+    assert.deepEqual(placed, [first.clientId, second.clientId, undefined]);
+  } finally { await engine.close(); await store.close(); }
+});
+
 test("task delivery quotes its originating chat message, carries a task link and sends a brief summary without losing the full report", async () => {
   const { store, engine, employee, chat } = await fixture();
   const original = "Investigate the endpoint. " + "Keep the scope read-only. ".repeat(20);

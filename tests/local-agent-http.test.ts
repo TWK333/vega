@@ -108,13 +108,18 @@ test("native client authorizes through a site directory and runs directly withou
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString());
     modelCalls++;
-    // Runtime inserts synthetic user snapshots after the actual turn; find the fixture message rather than that snapshot.
-    const latest = [...body.messages].reverse().find((m: any) => m.role === "user" && typeof m.content === "string" && /^(?:write (?:server )?fixture|large fixture|loss fixture|continue after repair)/.test(m.content))?.content;
+    // Actual worker inputs wrap the task instructions; runtime snapshots are separate user rows.
+    const workerPlacement = /^原始任务（不是新授权）：check placement fixture:/m;
+    const isPlacementAsk = (text: string) => /^(?:列出\s*d\s*盘目录|在服务器上列出d盘目录|检查本机目录)$/i.test(text);
+    const latest = [...body.messages].reverse().find((m: any) => m.role === "user" && typeof m.content === "string" &&
+      (/^(?:write (?:server )?fixture|large fixture|loss fixture|continue after repair)/.test(m.content) || isPlacementAsk(m.content) || workerPlacement.test(m.content)))?.content;
     const hasTool = body.messages.at(-1)?.role === "tool", loss = String(latest).includes("loss fixture");
+    const placementCheck = workerPlacement.test(latest || "");
     const command = process.platform === "win32"
-      ? (loss ? "Add-Content -LiteralPath loss.txt -Value once; Start-Sleep -Seconds 10" : "Set-Content -LiteralPath from-client.txt -Value local-success")
-      : (loss ? "printf 'once\\n' >> loss.txt; sleep 10" : "printf 'local-success\\n' > from-client.txt");
-    const tool = String(latest).includes("large fixture") ? { name: "read", arguments: JSON.stringify({ path: "large.txt" }) } : { name: "bash", arguments: JSON.stringify({ command, timeout: 20 }) };
+      ? (loss ? "Add-Content -LiteralPath loss.txt -Value once; Start-Sleep -Seconds 10" : placementCheck ? "Set-Content -LiteralPath routing-fixture.txt -Value placement-success" : "Set-Content -LiteralPath from-client.txt -Value local-success")
+      : (loss ? "printf 'once\\n' >> loss.txt; sleep 10" : placementCheck ? "printf 'placement-success\\n' > routing-fixture.txt" : "printf 'local-success\\n' > from-client.txt");
+    const tool = isPlacementAsk(latest || "") ? { name: "employee_task_create", arguments: JSON.stringify({ instructions: "check placement fixture: " + latest }) }
+      : String(latest).includes("large fixture") ? { name: "read", arguments: JSON.stringify({ path: "large.txt" }) } : { name: "bash", arguments: JSON.stringify({ command, timeout: 20 }) };
     const delta = hasTool || String(latest).includes("continue after repair")
       ? { content: "verified completion" }
       : { tool_calls: [{ index: 0, id: "fixture-" + modelCalls, function: tool }] };
@@ -209,6 +214,69 @@ test("native client authorizes through a site directory and runs directly withou
     webpage.abort(); await webpageRead;
     assert.equal(webpage.signal.aborted, true, "closing the webpage does not disconnect the client");
     await api("/config", "PUT", { model: "test/m", scenes: { lightweight: ["test/m"], coding: ["test/m"] }, provider: { test: { api: "openai-completions", baseURL: "http://127.0.0.1:" + (mock.address() as any).port, models: { m: { limit: { context: 128000, output: 1000 } } } } } });
+    if (helper) await t.test("desktop and web private chats dispatch explicit local work to the authorized device", async () => {
+      const employee = await api("/employees", "POST", { name: "Native placement fixture", cwd: serverDir });
+      const employeePath = "/employees/" + employee.id;
+      const thread = "employee:" + employee.id;
+      const desktopChat = async (op: "send" | "messages", body: object) => {
+        let chatPort = "";
+        await until(() => !!(chatPort = [...logs.matchAll(/fixture_chat_port=(\d+)/g)].at(-1)?.[1] || ""));
+        return fetch(`http://127.0.0.1:${chatPort}/assistant/fixture-chat/api/${op}`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ ...body, thread, clientId: "b".repeat(32) }),
+        });
+      };
+      const desktopSend = (text: string, clientMessageId: string) => desktopChat("send", { text, clientMessageId });
+      const settled = async () => {
+        const state = await api(employeePath);
+        return !state.chatRunning && !state.busy.length;
+      };
+      const local = await desktopSend("列出d盘目录", "local-placement-test-1");
+      assert.equal(local.status, 200, await local.text());
+      const receipt = await desktopChat("messages", { receiptFor: "local-placement-test-1" });
+      assert.equal(receipt.status, 200);
+      assert.deepEqual(await receipt.json(), { receiptFor: "local-placement-test-1", receipt: { seq: 1 } });
+      const absent = await desktopChat("messages", { receiptFor: "cloud-placement-test-1" });
+      assert.equal(absent.status, 200);
+      assert.deepEqual(await absent.json(), { receiptFor: "cloud-placement-test-1", receipt: null });
+      let task: any;
+      await until(async () => !!(task = (await api(employeePath)).tasks.find((row: any) => row.text === "check placement fixture: 列出d盘目录")));
+      assert.equal(task.execution.localAgent, true);
+      assert.equal(task.execution.clientId, device.id, "use the credential's device, not a device supplied by the caller");
+      assert.equal(task.execution.localPlatform, process.platform === "win32" ? "windows" : process.platform);
+      await until(async () => existsSync(join(clientDir, "routing-fixture.txt")) && await settled());
+      assert.match(await readFile(join(clientDir, "routing-fixture.txt"), "utf8"), /placement-success/);
+      assert(!existsSync(join(serverDir, "routing-fixture.txt")), "the mock operation must not run in the backend workspace");
+      await rm(join(clientDir, "routing-fixture.txt"));
+      const webMessage = { text: process.platform === "win32" ? "列出 D 盘目录" : "检查本机目录", clientMessageId: "web-placement-test-1", clientId: "b".repeat(32) };
+      await api(employeePath + "/messages", "POST", webMessage);
+      await until(async () => existsSync(join(clientDir, "routing-fixture.txt")) && await settled());
+      const webTask = (await api(employeePath)).tasks.find((row: any) => row.text === "check placement fixture: " + webMessage.text);
+      assert.equal(webTask?.execution.clientId, device.id, "the browser selects the only eligible device for its account, not a body-supplied ID");
+      assert.equal(webTask.execution.localAgent, true);
+      assert(!existsSync(join(serverDir, "routing-fixture.txt")));
+      const cloud = await desktopSend("在服务器上列出d盘目录", "cloud-placement-test-1");
+      assert.equal(cloud.status, 200, await cloud.text());
+      await until(async () => existsSync(join(serverDir, "routing-fixture.txt")) && await settled());
+      assert.match(await readFile(join(serverDir, "routing-fixture.txt"), "utf8"), /placement-success/);
+      const lastLog = logs.length;
+      await stop(client);
+      const disconnected = startClient(true);
+      try {
+        await until(() => logs.slice(lastLog).includes("fixture_chat_port="));
+        const before = modelCalls;
+        await api(employeePath + "/messages", "POST", webMessage); // A retry acknowledges the already accepted message even while offline.
+        await assert.rejects(api(employeePath + "/messages", "POST", { ...webMessage, clientMessageId: "web-offline-placement-test-1" }), /"statusCode":409.*不会在云端执行/);
+        const offline = await desktopSend("列出d盘目录", "offline-placement-test-1");
+        assert.equal(offline.status, 409);
+        assert.match(await offline.text(), /未连接执行通道/);
+        assert.equal(modelCalls, before, "an offline request never reaches a model or starts on the backend");
+      } finally {
+        await stop(disconnected);
+        client = startClient();
+        await until(async () => (await api("/bootstrap")).clients.some((item: any) => item.id === device.id && !item.reconnecting));
+      }
+    });
     await run(serverSession.id, "write server fixture");
     assert.match(await readFile(join(serverDir, "from-client.txt"), "utf8"), /local-success/);
     assert.equal(existsSync(join(clientDir, "from-client.txt")), false);

@@ -8,7 +8,7 @@ After authorization, the client connects directly to `/api/local-agent/socket` u
 
 The website lists available clients by computer name, platform and short device ID, scoped to the current account. Heartbeats tolerate 30 seconds of silence. A closed native socket or missed heartbeats starts a 60-second recovery window instead of immediately failing work; the selected client remains reserved while new operations wait for reconnection. Only expiration of that window marks it offline. Phones/tablets do not connect to a loopback client; they select an authorized computer through the server.
 
-There is no per-employee Master/Follower configuration. A new task binds its workspace to the cloud by default; an in-flight task keeps its execution node. To use a client, pause the running task, choose an online client in its task details and select **交接**; resume a paused task explicitly afterwards. A task that has already started copies eligible workspace files to the client's working directory, keeps both sides of conflicts, and refuses oversized workspaces (2000 files, 4 MiB per file, 16 MiB total). The client process is online while it is running; when it exits, its work resumes from a restore point on the remaining side.
+There is no per-employee Master/Follower configuration. A new task runs in the cloud by default. An explicit local filesystem request (for example `列出d盘目录`) sent in a desktop Bot private chat binds new work to the same authorized computer. That computer must be online; Vega does not substitute the cloud or another device. Existing tasks keep their execution node. To move an existing task, pause it, choose an online client in its task details and select **交接**; then resume it explicitly. A task that has already started copies eligible workspace files to the client's working directory, keeps both sides of conflicts, and refuses oversized workspaces (2000 files, 4 MiB per file, 16 MiB total).
 
 Files are not continuously synchronized across nodes; an explicit handoff copies eligible workspace files and does not delete local files. `read`, `write`, `edit`, `bash`, directory changes and the `chrome` tool run on whichever node currently holds the task's workspace; `sqlite:` archives and skill storage remain server-side.
 
@@ -29,7 +29,7 @@ The client listens on the first free loopback port in `47753–47762`; the exten
 
 Windows 客户端启动时打开内置对话窗口（需要 Microsoft Edge WebView2 Runtime）。任务栏显示应用图标，窗口可拖动和缩放；关闭窗口只隐藏，双击托盘图标恢复，右键托盘选择 **退出** 才结束客户端。未授权时，牵牛星欢迎页的 **登录并授权** 会在系统浏览器中重新打开本站待确认的设备授权。授权后回到窗口，或点击 **检查授权状态**；不登录 Grok，也不改网页 OAuth。
 
-新版可以查看牛马和群聊（群聊排在牛马下方）、阅读最近对话、发送文本并自动刷出已保存的回复；不提供语音输入。现有设备 API 不提供逐字流式输出或更早的历史分页（最多最近 200 条原始消息）。创建或编辑牛马、停止回复、确认任务和下载产物请用 Vega 网页。任务栏提示气泡和设置照旧。客户端与服务端须配套升级，才能同步未读。
+新版可以查看牛马和群聊（群聊排在牛马下方）、阅读最近对话、发送文本并自动刷出已保存的回复；不提供语音输入。现有设备 API 不提供逐字流式输出或更早的历史分页（最多最近 200 条原始消息）。创建或编辑牛马、停止回复、确认任务和下载产物请用 Vega 网页。任务栏提示气泡和设置照旧。客户端与服务端须配套升级，才能同步未读并自动派发本机工作。
 
 ## Device credentials and revocation
 

@@ -626,10 +626,36 @@ export class Engine {
     const delta = delivered !== undefined && snapshot.startsWith(delivered) ? snapshot.slice(delivered.length).trim() : snapshot.trim();
     if (delta) steer.push({ role: "user", text: delta, taskInput: { answer: snapshot } });
   }
-  async submitChat(session: string, message: Message) {
+  private async chatExecutionClient(session: string, message: Message, senderClientId?: string) {
+    const text = message.text || "";
+    if (/(?:在|用|到|从|由|改在|改用)\s*(?:云端|服务器|服务端)|(?:不要|别|不在|不用)\s*(?:这台电脑|本机|我(?:的)?电脑)/i.test(text)) return;
+    // shortcut: recognize explicit local wording or drive paths, use explicit device selection when ambiguous.
+    const drive = /(?:^|[^a-z0-9])(?:[a-z]\s*盘|[a-z]:[\\/])/i.test(text);
+    if (!drive && !/这台电脑|我(?:的)?电脑|本机(?:上|的|磁盘|目录|文件|桌面|路径)|在本机|用本机/.test(text)) return;
+    const failure = (statusCode: number, statusMessage: string) => Object.assign(Error(statusMessage), { statusCode, statusMessage });
+    const userId = message.actorId;
+    if (!userId || (await this.store.session(session)).ownerId !== userId)
+      throw failure(403, "只能在自己的牛马私聊中派发本机任务");
+    const connected = (id: string) => {
+      const client = this.localAgents.active(userId, id);
+      return client?.transport && !client.reconnecting;
+    };
+    if (senderClientId) {
+      if (connected(senderClientId)) return senderClientId;
+      throw failure(409, "发消息的这台电脑未连接执行通道。请在「连接授权」检查连接后重试；本次不会在云端执行。");
+    }
+    const clients = this.localAgents.list(userId).filter((client) => (!drive || client.platform === "windows") && connected(client.id));
+    if (clients.length === 1) return clients[0].id;
+    throw failure(409, clients.length
+      ? "当前账号有多台可用客户端，无法确定要在哪台电脑执行。请从目标电脑的桌面客户端发送；本次未派单。"
+      : `没有已连接的${drive ? " Windows " : ""}执行客户端。请确认客户端和网页使用同一站点、同一账号，并在「连接授权」检查连接；本次不会在云端执行。`);
+  }
+  async submitChat(session: string, message: Message, senderClientId?: string) {
     const send = async () => {
-      if (this.active.has(session)) this.steer(session, message);
-      else await this.launch(session, message);
+      const chatClientId = await this.chatExecutionClient(session, message, senderClientId);
+      const input = { ...message, chatClientId };
+      if (this.active.has(session)) this.steer(session, input);
+      else await this.launch(session, input);
     };
     if (!message.clientMessageId) return send();
     const key = JSON.stringify([session, message.actorId, message.clientMessageId]);
@@ -1217,7 +1243,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           ? `\n${topicTask ? "[本次话题关联群任务]" : "[本次引用关联任务]"} ${JSON.stringify(focusedTask ? { ...taskSummary(focusedTask), ...(focusedTask.status === "done" ? { followUpOpen: focusedFollowUp } : {}) } : { id: focusedTaskId, status: "unavailable" })}\n${focusedFollowUp ? `[近期已交付、可在原任务续做] ${JSON.stringify([taskSummary(focusedTask!)])}\n` : ""}当前${topicTask ? "话题" : "引用消息"}已唯一指明该任务：默认以它为本次回复和任务操作的对象，不要先根据上下文搜索或处理其他任务；仅当本次消息明确要求其他任务或多个任务时才处理这些任务。先判断用户是在询问、补充、续做还是停止；纯粹询问状态不自动执行，追问已授权但遗漏的环节时结合上下文判断是否应在原任务补做并继续。用户要求继续同一目标且 followUpOpen=true 时用 employee_task_manage 的 resume 带 supplement 在原任务续做，保留原目标及已知回执。操作仍受任务状态和审批约束，不按交付时间设期限。关联任务不存在或不可访问时如实说明，不用相似任务替代；需要详情或用户明确要求其他任务时用 employee_status 查询。\n`
           : matchedTasks + taskIndex + (employee && !session.taskId ? taskDigest : "") + (!session.groupId && latestChat?.quote ? "\n[引用消息未唯一关联任务] 只能根据本次消息和上下文寻找；多个候选仍无法确定时先向用户澄清。\n" : "");
         const supplement = session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : "";
-        let dynamic = memories + taskContext + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || ""));
+        const nativePlacement = latestChat?.chatClientId && !groupId
+          ? "\n[本轮工作位置] 用户明确要求在已选定的客户端执行。沟通仍在服务端；新任务会自动绑定该电脑，不要因为沟通会话在服务端而说看不到本机。离线时如实报告，不改用其他位置；已有任务不自动迁移，位置不符时先说明，不在原位置继续。\n" : "";
+        let dynamic = memories + taskContext + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || "")) + nativePlacement;
         // Scene model edited while this run is in progress: switch on the next provider request.
         const latest = await this.config(session), primary = sceneModels(latest, session.scene!)[0];
         const seen = scenePrimaries.get(session.scene!);

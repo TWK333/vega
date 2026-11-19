@@ -94,14 +94,14 @@ export default defineEventHandler(async (event) => {
     catch (e: any) { throw createError({ statusCode: 409, statusMessage: e.message }); }
   }
   if (path[0] === "local-agent" && path[1] === "chat" && method === "POST") {
-    // 蝴蝶面板（原生客户端）：设备凭据自己验，不用网站 cookie，只碰它自己的牛马/群聊。
+    // 桌面客户端自验设备凭据，不使用网站 cookie 或请求体提供的设备 ID。
     setHeader(event, "Cache-Control", "no-store");
     const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
-    let grant: { userId: string };
+    let grant: { userId: string; clientId: string };
     try { grant = await app().clientSockets.authorize(request); }
     catch { throw createError({ statusCode: 403, statusMessage: "Client credential invalid or revoked" }); }
     const body = await bodyJSON(event, 1 << 20);
-    try { return await clientChat(path[2], body, grant.userId); }
+    try { return await clientChat(path[2], body, grant.userId, grant.clientId); }
     catch (e: any) { throw createError({ statusCode: e.statusCode || 400, statusMessage: String(e.message || e).slice(0, 500) }); }
   }
   if (path[0] === "local-agent" && path[1] === "extension" && method === "POST") {
@@ -765,7 +765,7 @@ export default defineEventHandler(async (event) => {
  * 蝴蝶面板（原生客户端凭据）的聊天接口：thread = "employee:<id>" | "group:<id>"。
  * 只做三件事：列会话、读历史（after/limit）、发一条用户消息。
  */
-async function clientChat(op: string, a: Obj, userId: string) {
+async function clientChat(op: string, a: Obj, userId: string, clientId?: string) {
   const { engine, store } = app(), user = await app().auth.user(userId);
   assert(user, "User not found");
   if (op === "file") {
@@ -863,7 +863,7 @@ async function clientChat(op: string, a: Obj, userId: string) {
       await engine.submitChat(session.id, {
         role: "user", text, actorId: user.id, clientMessageId,
         clientMessageHash: clientMessageId ? createHash("sha256").update(JSON.stringify([text, [], [], null])).digest("hex") : undefined,
-      });
+      }, clientId);
       return { ok: true };
     }
     return { ok: true, ...await engine.groups.send(user, id, { text, clientMessageId }) };
