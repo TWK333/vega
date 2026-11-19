@@ -17,20 +17,14 @@ import { markSeen, seenSeq } from "./seen.js";
 import PressMention from "./PressMention.vue";
 // One group chat (or, without groupId, the form that creates one). Live updates arrive as `revision` bumps.
 const props = defineProps({ api: Function, user: Object, groupId: String, myEmployees: Array, revision: Number });
-const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "cancel", "read"]);
+const emit = defineEmits(["changed", "created", "closed", "open-employee", "open-task", "inspect", "cancel", "read"]);
 // Work panel: side-by-side from 768px (GroupWork stops overlaying); drawers stay closed until opened.
 const roomy = () => typeof matchMedia === "function" && matchMedia("(min-width: 768px)").matches;
 const group = ref(null), messages = ref([]), taskStatus = ref({}), error = ref(""), sending = ref(false), panel = ref(false), work = ref(roomy()), workMembers = ref([]), workLoading = ref(false), transcript = ref(null), input = ref(null), fileInput = ref(null);
-const taskFocus = ref(null), topic = ref(null), viewMode = ref("topic"), olderReferences = ref([]), historyLoading = ref(false), topicUnavailable = ref(false);
+const topic = ref(null), viewMode = ref("main"), olderReferences = ref([]), historyLoading = ref(false), topicUnavailable = ref(false);
 const activeTopic = computed(() => viewMode.value === "topic" ? topic.value : null);
-const preferenceKey = () => `vega:group-chat-view:${props.user?.id}`;
-watch(() => props.user?.id, () => {
-  try { viewMode.value = localStorage.getItem(preferenceKey()) === "main" ? "main" : "topic"; } catch { viewMode.value = "topic"; }
-}, { immediate: true });
-function chooseView(mode) {
-  viewMode.value = mode;
-  try { localStorage.setItem(preferenceKey(), mode); } catch {}
-}
+const taskFocus = computed(() => topic.value ? { member: topic.value.employeeId, task: topic.value.taskId } : null);
+function chooseView(mode) { viewMode.value = mode; }
 const emptyComposer = () => reactive({ text: "", attachments: [], quote: undefined });
 const mainComposer = emptyComposer(), topicDrafts = new Map();
 const composer = computed(() => activeTopic.value ? topicDrafts.get(activeTopic.value.taskId) : mainComposer);
@@ -198,10 +192,17 @@ async function create() {
     emit("created", created.id);
   });
 }
+function exitTask() {
+  topic.value = null;
+  chooseView("main");
+}
 function selectTopic({ employeeId, taskId, title }) {
-  if (!topicDrafts.has(taskId)) topicDrafts.set(taskId, emptyComposer());
-  topic.value = { employeeId, taskId, title };
-  taskFocus.value = { member: employeeId, task: taskId };
+  const same = topic.value?.taskId === taskId && topic.value?.employeeId === employeeId;
+  if (!same) {
+    if (!topicDrafts.has(taskId)) topicDrafts.set(taskId, emptyComposer());
+    topic.value = { employeeId, taskId, title };
+  }
+  chooseView(same && activeTopic.value ? "main" : "topic");
   panel.value = false;
   work.value = true;
 }
@@ -220,10 +221,11 @@ async function loadWork() {
 }
 function toggleWork() { work.value = !work.value; if (work.value) panel.value = false; }
 watch(panel, (open) => { if (open) work.value = false; });
+watch(work, (open) => { if (!open) exitTask(); });
 watch([work, () => props.groupId], () => { if (work.value) void run(loadWork); }, { immediate: true });
 watch(() => props.groupId, () => {
   readSeq = 0; settled = false; group.value = null; messages.value = []; olderReferences.value = []; panel.value = false;
-  work.value = roomy(); workMembers.value = []; taskFocus.value = null; topic.value = null; topicDrafts.clear();
+  work.value = roomy(); workMembers.value = []; exitTask(); topicDrafts.clear();
   mainComposer.text = ""; mainComposer.attachments = []; mainComposer.quote = undefined; topicUnavailable.value = false;
   void run(() => load(true));
 });
@@ -293,7 +295,7 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
             <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天' : '回复牛马或 @ 它让它回应 · /new 开启新会话' }} · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
-        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @open="emit('open-task', $event)" @changed="run(loadWork)" @close="work = false" />
+        <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @close="work = false" />
         <aside v-if="panel && group" class="group-panel" aria-label="群成员与公告">
           <section>
             <h3>群公告</h3>

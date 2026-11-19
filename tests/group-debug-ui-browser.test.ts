@@ -8,7 +8,7 @@ import { createServer } from "vite";
 import vue from "@vitejs/plugin-vue";
 
 const run = promisify(execFile);
-test("debug cards stay compact; group task links keep task details and a remembered topic tab in the group", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 90000 }, async () => {
+test("debug cards stay compact; group topics follow task details with pinned actions", { skip: process.env.VEGA_TEST_CHROME !== "1", timeout: 90000 }, async () => {
   const root = process.cwd(), temp = join(root, ".tmp");
   await mkdir(temp, { recursive: true });
   const dir = await mkdtemp(join(temp, "group-debug-ui-"));
@@ -78,28 +78,39 @@ test("debug cards stay compact; group task links keep task details and a remembe
         state.user.id = 'member'; state.revision++; await flush();
         check(document.querySelector('.task-detail') && document.querySelector('.access-note').textContent.includes('只读'), 'other group members still read task details');
         check(!document.querySelector('.task-detail textarea') && !document.querySelector('.task-detail .detail-foot button'), 'other members do not get task controls');
-        state.user.id = 'requester'; task.status = 'done'; task.result = '文案已核对'; state.revision++; await flush();
+        state.user.id = 'requester'; task.status = 'done'; task.result = ('文案已核对，记录细节。\\n\\n').repeat(110); state.revision++; await flush();
+        const detailScroll = document.querySelector('.group-work .panel-scroll.detail'), actions = detailScroll.querySelector('.detail-foot');
+        check(detailScroll.scrollHeight > detailScroll.clientHeight + 200, 'long task detail actually scrolls');
+        if (innerWidth >= 1000) check(document.querySelector('.group-work').clientWidth >= 495, 'desktop task panel uses the wider detail width');
+        for (const offset of [0, 180, detailScroll.scrollHeight]) {
+          detailScroll.scrollTop = offset;
+          const body = detailScroll.getBoundingClientRect(), bar = actions.getBoundingClientRect();
+          check(bar.top >= body.top && Math.abs(bar.bottom - body.bottom) <= 2, 'actions remain at the bottom while scrolling: ' + JSON.stringify({ offset, bar: bar.bottom, body: body.bottom }));
+        }
         let redispatch = [...document.querySelectorAll('.task-detail button')].find(el => el.textContent.includes('重新派发'));
         redispatch.click(); await flush(); check(posts.length === 1, 'cancelled confirmation does not submit');
         confirmed = true; redispatch.click(); await flush();
         check(posts.length === 2 && posts[1].action === 'redispatch' && posts[1].confirmed === true, 'redispatch needs explicit confirmation');
         tabs()[0].click(); await flush();
+        check(!!document.querySelector('.task-detail') && chat().includes('无关的主聊天'), 'the main tab does not close the task');
         input(draft(), '主聊天草稿'); await flush();
-        document.querySelector('[aria-label="返回任务列表"]').click(); await flush();
-        document.querySelector('[data-task-id="t-other"]').click(); await flush();
-        check(tabs()[0].getAttribute('aria-pressed') === 'true' && tabs()[1].textContent.includes(other.text) && chat().includes('无关的主聊天'), 'manual main selection survives a task switch');
-        tabs()[1].click(); await flush();
+        // Clicking a different task overrides the manually selected main tab.
+        document.querySelector('[data-message-seq="3"] .chat-task-link').click(); await flush();
+        check(tabs()[1].getAttribute('aria-pressed') === 'true' && tabs()[1].textContent.includes(other.text), 'clicking another task enters its topic');
         check(chat().includes('另一项任务的讨论') && !chat().includes('请核对这条任务') && !chat().includes('无关的主聊天'), 'only this task appears in the topic');
         check(draft().value === '', 'switching to a task does not copy a main-chat draft');
+        document.querySelector('[data-message-seq="3"] .chat-task-link').click(); await flush();
+        check(tabs()[0].getAttribute('aria-pressed') === 'true' && document.querySelector('.task-detail')?.dataset.taskId === other.id, 'clicking the same task toggles back without exiting its detail');
+        document.querySelector('[data-message-seq="3"] .chat-task-link').click(); await flush();
         input(draft(), '话题补充'); await flush();
         document.querySelector('.chat-composer .send').click(); await flush();
         check(messagePosts.length === 1 && messagePosts[0].topicTaskId === other.id && chat().includes('话题补充'), 'topic send is tied to the selected task');
-        tabs()[0].click(); await flush();
-        check(draft().value === '主聊天草稿' && chat().includes('话题补充'), 'main draft is kept and topic sends also appear in main');
-        state.view = 'debug'; await flush();
-        state.view = 'group'; await flush();
-        document.querySelector('.chat-task-link').click(); await flush();
-        check(tabs()[0].getAttribute('aria-pressed') === 'true' && chat().includes('无关的主聊天'), 'main preference survives leaving and re-entering the group');
+        document.querySelector('[aria-label="返回任务列表"]').click(); await flush();
+        check(!tabs().length && draft().value === '主聊天草稿' && chat().includes('话题补充'), 'exiting the task returns to the main chat and preserves its draft');
+        document.querySelector('[data-task-id="t-other"]').click(); await flush();
+        check(tabs()[1].getAttribute('aria-pressed') === 'true', 'the work list opens a topic too');
+        document.querySelector('[aria-label="收起工作面板"]').click(); await flush();
+        check(!tabs().length && !document.querySelector('.group-work') && chat().includes('无关的主聊天'), 'closing the work panel exits the topic');
         state.view = 'debug'; await flush();
         for (const width of [320, 390, 880, 1280]) {
           document.querySelector('#app').style.width = width + 'px'; await flush();

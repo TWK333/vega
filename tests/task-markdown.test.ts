@@ -34,7 +34,7 @@ test("task Markdown and archived images render inside desktop and narrow detail 
   const html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
     <div id="app"></div><div id="group-app"></div><div id="chat-app"></div><div id="legacy-app"></div><pre id="result"></pre>
     <script type="module">
-      import { createVaporApp, nextTick, reactive } from 'vue';
+      import { createApp, createVaporApp, h, nextTick, reactive, vaporInteropPlugin } from 'vue';
       import TaskDetail from '/src/TaskDetail.vue';
       import GroupWork from '/src/GroupWork.vue';
       import ChatMessage from '/src/ChatMessage.vue';
@@ -42,7 +42,8 @@ test("task Markdown and archived images render inside desktop and narrow detail 
       const task = reactive(${JSON.stringify(task)}), host = document.querySelector('#app');
       createVaporApp(TaskDetail, { task, act: async () => true }).mount(host);
       try {
-        document.querySelectorAll('details').forEach(element => element.open = true);
+        document.querySelectorAll('details').forEach(element => { element.open = true; element.dispatchEvent(new Event('toggle')); });
+        await nextTick();
         const images = [...host.querySelectorAll('img')];
         await Promise.all(images.map(image => { image.loading = 'eager'; return image.decode(); }));
         const result = {
@@ -66,25 +67,36 @@ test("task Markdown and archived images render inside desktop and narrow detail 
           }).map(element => element.className || element.tagName) });
         }
         const groupTask = { id: 'group-task', text: '设计用例', status: 'running', createdAt: Date.now() };
-        const groupProps = reactive({ members: [{ id: 'other', name: '同事', mine: false, tasks: [groupTask] }], loading: false });
+        const groupProps = reactive({ members: [{ id: 'other', name: '同事', mine: false, tasks: [groupTask] }], loading: false, focus: null });
         const groupHost = document.querySelector('#group-app');
-        createVaporApp(GroupWork, groupProps).mount(groupHost);
+        const api = async () => ({ ...groupProps.members[0].tasks[0], canControl: false });
+        const onSelect = ({ employeeId, taskId }) => { groupProps.focus = { member: employeeId, task: taskId }; };
+        createApp({ render: () => h(GroupWork, { ...groupProps, groupId: 'test-group', api, onSelect }) }).use(vaporInteropPlugin).mount(groupHost);
         groupHost.querySelector('.task-row').click();
-        await nextTick();
-        groupProps.members.splice(0, 1, { id: 'other', name: '同事', mine: false, tasks: [{ ...groupTask, stepOutputs: [{ step: 1, label: '设计用例', text: '**新增步骤产物**' }] }] });
-        await nextTick();
+        await nextTick(); await nextTick();
+        groupProps.members = [{ id: 'other', name: '同事', mine: false, tasks: [{ ...groupTask, stepOutputs: [{ step: 1, label: '设计用例', text: '**新增步骤产物**' }] }] }];
+        await nextTick(); await nextTick();
+        const unfoldOutput = async (root) => {
+          const details = root.querySelector('.step-output-content');
+          details.open = true;
+          details.dispatchEvent(new Event('toggle'));
+          await nextTick();
+        };
+        await unfoldOutput(groupHost);
         result.liveGroupOutput = groupHost.querySelector('.step-output .markdown strong')?.textContent === '新增步骤产物';
         result.groupDebug = { detail: !!groupHost.querySelector('.task-detail'), output: groupHost.querySelector('.step-output')?.textContent || '', html: groupHost.innerHTML.slice(0, 1200) };
         const chatHost = document.querySelector('#chat-app');
         const output = { step: 1, label: '独立方案', text: '**独立产物内容**', files: [{ name: 'app.zip', size: 3, mime: 'application/octet-stream', blobId: 'blob-' + '2'.repeat(32) }] };
         createVaporApp(ChatMessage, { message: { role: 'assistant', text: '继续处理', stepOutput: output }, name: '牛马' }).mount(chatHost);
         await nextTick();
+        await unfoldOutput(chatHost);
         const bubble = chatHost.querySelector('.chat-bubble');
         result.separateOutput = bubble?.textContent.includes('继续处理') && !bubble.textContent.includes('独立产物内容') && !!chatHost.querySelector('.step-output .markdown strong');
         result.fileLink = chatHost.querySelector('.step-output .file-card')?.getAttribute('href')?.includes(output.files[0].blobId);
         const legacyHost = document.querySelector('#legacy-app');
         createVaporApp(ChatMessage, { message: { role: 'assistant', stepOutput: true, text: '**步骤产物（任务未完成）**\\n\\n旧方案\\n\\n旧的完整内容' }, name: '牛马' }).mount(legacyHost);
         await nextTick();
+        await unfoldOutput(legacyHost);
         result.legacyOutput = !legacyHost.querySelector('.chat-bubble')?.textContent.includes('旧的完整内容') && legacyHost.querySelector('.step-output')?.textContent.includes('旧的完整内容');
         let exported;
         URL.createObjectURL = (blob) => { exported = blob; return 'blob:fixture'; };

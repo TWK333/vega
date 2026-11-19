@@ -317,18 +317,56 @@ export class Groups {
   }
   private async topicRows(group: Group, { employeeId, task }: { employeeId: string; task: Task }) {
     const related = new Set(task.group?.sourceSeqs || []);
-    const source = task.chatSource;
-    if (source?.session && group.memberSessions[employeeId] === source.session) {
+    const memberSession = group.memberSessions[employeeId], source = task.chatSource;
+    if (source?.session && memberSession === source.session) {
       const origin = (await this.store.message(source.session, source.seq))?.group;
       if (origin?.groupId === group.id) related.add(origin.seq);
     }
     const { rows } = await this.store.sharedMessages(group.session);
-    // An unambiguous task match on an answered main-chat turn also links its source question.
-    for (const m of rows) if (m.topicTaskId === task.id && m.replyToSeq) related.add(m.replyToSeq);
+    const bySeq = new Map(rows.map((m) => [m.seq, m]));
+    const beforeCreation = (m: Readonly<Message> | undefined) => m?.at !== undefined && m.at <= task.createdAt;
+    const belongs = (m: Readonly<Message>) => m.topicTaskId === task.id || m.tasks?.some((card) => card.id === task.id);
+    const otherTopic = (m: Readonly<Message>) => !belongs(m) && (m.topicTaskId || m.tasks?.length);
+
+    // Legacy chatSource can point at a supplement. Recover the creation turn from this member's group receipts.
+    if (memberSession && ![...related].some((seq) => beforeCreation(bySeq.get(seq)))) {
+      let request: Message["group"];
+      const { rows: turns } = await this.store.sharedMessages(memberSession);
+      for (const m of turns) {
+        if (m.role === "user") request = m.group;
+        if (request?.groupId !== group.id || m.role !== "tool" || m.name !== "employee_task_create" || m.error) continue;
+        try {
+          const result = JSON.parse(m.text || "null");
+          if (result?.id && (result.id === task.id || result.id === task.origin) && result.exists !== true && beforeCreation(bySeq.get(request.seq))) {
+            related.add(request.seq);
+            break;
+          }
+        } catch { /* Not a structured creation receipt. */ }
+      }
+    }
+    // A reset can delete the member receipts; use a unique verbatim request copied into the task, never a similar message.
+    const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+    const instructions = normalize(task.text), requester = task.group?.requester;
+    if (requester && instructions) {
+      const exact = rows.filter((m) => {
+        if (!m.seq || !beforeCreation(m) || m.notice || otherTopic(m) || m.author?.id !== requester.id || m.author?.kind !== requester.kind) return false;
+        const text = normalize(m.displayText || m.text || "").replace(/^@\S+\s+/, "");
+        return !!text && (instructions === text || (text.length >= 20 && instructions.includes(text)));
+      });
+      if (exact.length === 1) related.add(exact[0].seq!);
+    }
+    // Explicitly linked messages can name the kickoff or its clarification, even if the earlier row has no task card.
+    for (const m of rows) if (m.seq && belongs(m)) related.add(m.seq);
+    for (const seq of related) {
+      const message = bySeq.get(seq);
+      for (const ref of [message?.replyToSeq, message?.quote?.seq]) {
+        const earlier = ref && ref < seq ? bySeq.get(ref) : undefined;
+        if (earlier && !earlier.notice && !otherTopic(earlier)) related.add(ref!);
+      }
+    }
     return rows.filter((m) => {
       if (!m.seq || m.notice) return false;
-      const direct = related.has(m.seq) || m.topicTaskId === task.id || m.tasks?.some((card) => card.id === task.id);
-      if (!direct && (m.topicTaskId || !((m.quote && related.has(m.quote.seq)) || (m.replyToSeq && related.has(m.replyToSeq))))) return false;
+      if (!related.has(m.seq) && (otherTopic(m) || !((m.quote && related.has(m.quote.seq)) || (m.replyToSeq && related.has(m.replyToSeq))))) return false;
       related.add(m.seq);
       return true;
     });

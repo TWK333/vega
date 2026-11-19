@@ -174,7 +174,8 @@ test("task topics collect linked group messages and address replies to the right
     const group = (await engine.groups.get(room.id))!;
     const title = "核对第三批灰度";
     const seen = script(engine, { [a]: [{ text: "", calls: [{ id: "create", name: "employee_task_create", arguments: { instructions: title } }] }, "我来核对灰度。", "主聊天的状态回复。", "我按第三批核对。"] });
-    const source = await engine.groups.send(u2, group.id, { text: `@小A ${title}` });
+    const brief = await store.append(group.session, { role: "user", text: "本轮只核对灰度，不发布。", author: { kind: "user", id: u2.id, name: "bob" } });
+    const source = await engine.groups.send(u2, group.id, { text: `@小A ${title}`, quote: await store.quote(group.session, brief.seq!) });
     const waitFor = (text: string) => until(async () => (await groupMessages(engine, group.id)).some((m) => m.text === text));
     await waitFor("我来核对灰度。");
     await settle(engine);
@@ -190,7 +191,7 @@ test("task topics collect linked group messages and address replies to the right
     const followup = await engine.groups.send(u2, group.id, { text: "再补一项，请一并核对。", quote, topicTaskId: task.id });
     await waitFor("我按第三批核对。");
     const scoped = await engine.groups.topicMessages((await engine.groups.get(group.id))!, task.id);
-    assert.deepEqual(scoped.map((m) => m.text), [`@小A ${title}`, "我来核对灰度。", `@小A ${task.id} 现在进度怎样？`, "主聊天的状态回复。", progressText, "再补一项，请一并核对。", "我按第三批核对。"]);
+    assert.deepEqual(scoped.map((m) => m.text), [brief.text, `@小A ${title}`, "我来核对灰度。", `@小A ${task.id} 现在进度怎样？`, "主聊天的状态回复。", progressText, "再补一项，请一并核对。", "我按第三批核对。"]);
     assert.equal(scoped.at(-2)?.quote?.seq, source.seq);
     assert.equal(scoped.at(-1)?.replyToSeq, followup.seq);
     assert((await groupMessages(engine, group.id)).some((m) => m.seq === followup.seq), "topic and main chat share the same transcript");
@@ -206,6 +207,45 @@ test("task topics collect linked group messages and address replies to the right
     const other = await engine.groups.create(u1, { name: "其他群", employees: [a] });
     await assert.rejects(engine.groups.topicMessages((await engine.groups.get(other.id))!, task.id), { statusCode: 404 });
     await assert.rejects(engine.groups.send(u1, other.id, { text: "错误的话题", topicTaskId: task.id }), { statusCode: 404 });
+  } finally { await close(); }
+});
+
+test("topic restores an older kickoff after the chat source moves; reset only allows a unique verbatim recovery", async () => {
+  const { store, engine, make, close } = await fixture();
+  try {
+    const a = await make("小A", u1.id);
+    const room = await engine.groups.create(u1, { name: "旧话题", users: [u2.id], employees: [a] });
+    const group = (await engine.groups.get(room.id))!, title = "统一指标口径";
+    const original = "请检查看板里的全部指标，修复两种语言提示口径不一致的问题。";
+    script(engine, { [a]: [{ calls: [{ id: "create", name: "employee_task_create", arguments: { instructions: title } }] }, "我来检查。"] });
+    const first = await engine.groups.send(u2, group.id, { text: `@小A ${original}` });
+    await until(async () => (await groupMessages(engine, group.id)).some((m) => m.text === "我来检查。"));
+    await settle(engine);
+    const employee = await engine.employee.for(a), task = (await employee.state()).tasks.find((t) => t.text === title)!;
+    const current = (await engine.groups.get(group.id))!, member = current.memberSessions[a];
+    const requester = task.group!.requester;
+    const unrelated = await store.append(group.session, { role: "user", text: "检查另一个看板的提示文案", author: requester });
+    const later = await store.append(group.session, { role: "user", text: "补充：沿用现有分支", author: requester });
+    const latest = await store.append(member, { role: "user", text: later.text, group: { groupId: group.id, name: group.name, from: requester, seq: later.seq!, byOwner: false } });
+    await employee.update((state) => {
+      const record = employee.task(state, task.id);
+      record.group!.sourceSeqs = [later.seq!];
+      record.chatSource = { session: member, seq: latest.seq! };
+    });
+    const seqs = async () => (await engine.groups.topicMessages((await engine.groups.get(group.id))!, task.id)).map((m) => m.seq);
+    let linked = await seqs();
+    assert.equal(linked[0], first.seq, "the actual creation receipt restores the kickoff before the later supplement");
+    assert(!linked.includes(unrelated.seq));
+    await engine.groups.send(u1, group.id, { text: "/new" });
+    assert.equal(await store.hasSession(member), false);
+    assert(!(await seqs()).includes(first.seq), "do not guess when the original and receipts are lost");
+    const outsider = await store.append(group.session, { role: "user", text: original, at: task.createdAt - 1, author: { kind: "user", id: u1.id, name: "alice" } });
+    await employee.update((state) => { employee.task(state, task.id).text = `目标：${title}\n用户原话：「${original}」`; });
+    linked = await seqs();
+    assert.equal(linked[0], first.seq, "legacy tasks with a copied original request can still be recovered after /new");
+    assert(!linked.includes(outsider.seq), "only the original requester's text qualifies");
+    await store.append(group.session, { role: "user", text: original, at: task.createdAt - 1, author: requester });
+    assert(!(await seqs()).includes(first.seq), "identical repeated messages do not identify a unique kickoff");
   } finally { await close(); }
 });
 
@@ -424,7 +464,7 @@ test("工作面板 UI: opening a task keeps the main chat beside its topic and t
   assert.match(panel, /v-if="owned\(\)"[^>]+emit\('open'/, "only owners can explicitly leave the group for the task workspace");
   assert.match(panel, /watch\(\(\) => props\.members/, "open detail reloads with live task updates");
   assert.match(panel, /<TaskDetail[^>]*:readonly="!selected\.canControl"/);
-  assert.match(chat, /taskFocus\.value = \{ member: employeeId, task: taskId \}/);
+  assert.match(chat, /:focus="taskFocus" @select="selectTopic" @exit="exitTask"/);
   assert.doesNotMatch(chat, /只有它的主人能查看详情/);
   assert.match(panel, /props\.api\(taskPath\(key\), "POST"/);
   assert.match(panel, /action === "redispatch" && !confirm/);
