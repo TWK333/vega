@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
-import { employeeChatMessages, continuesPrevious } from "../web/src/conversation.js";
+import { employeeChatMessages, continuesPrevious, chatCardVisibility } from "../web/src/conversation.js";
 import { attachmentPayload, isImage, useAttachmentInput } from "../web/src/attachments.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
@@ -16,7 +16,7 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   const context: any = {
     console, ref, computed, watch, crypto, nextTick, history, messages, running, hasMore, disposed: false, turn: 0, error: ref(""), transcript: ref(null), busy: ref(false), uploading: ref(false), artifactSession: ref(""),
     props: { employeeId: "fixture", api, composer: reactive({ text: "", attachments: [], quote: undefined }) },
-    employeeChatMessages, continuesPrevious, attachmentPayload, isImage, seenSeq: () => 0, markSeen: () => {},
+    employeeChatMessages, continuesPrevious, chatCardVisibility, attachmentPayload, isImage, seenSeq: () => 0, markSeen: () => {},
   };
   const methods = vm.runInNewContext([
     "let turn = 0;",
@@ -30,6 +30,32 @@ function mount(api: any = async () => ({ messages: [], running: false }), crypto
   ].join("\n"), context);
   return { ...context, ...methods, dispose: () => { context.disposed = true; } };
 }
+
+test("连续讨论只隐藏较早的相同任务和产物入口，不改原消息", () => {
+  const task = { id: "t1", status: "running" }, other = { id: "t2", status: "running" };
+  const first = { role: "assistant", text: "开始核对", tasks: [task, other], stepOutput: { step: 5, label: "构建核对" } };
+  const extra = { ...first, tasks: [task], stepOutput: { step: 5, label: "另一项核对" } };
+  const note = { role: "assistant", text: "继续核对", topicTaskId: task.id };
+  const last = { ...first, text: "核对完成", tasks: [task] };
+  const rows = [first, extra, note], status = { t1: "running", t2: "running" };
+  assert.equal(chatCardVisibility(rows, status)[0].hideStepOutput, false, "尚无相同入口时不能隐藏");
+  const all = [...rows, last], original = structuredClone(all), cards = chatCardVisibility(all, status);
+  assert.deepEqual([...cards[0].hiddenTaskIds], [task.id]);
+  assert.equal(cards[0].hideStepOutput, true);
+  assert.equal(cards[1].hideStepOutput, false, "同序号不同标题的产物仍显示");
+  assert.equal(cards[3], undefined, "保留实际携带入口的最后一条消息");
+  assert.deepEqual(all, original, "原消息仍可用于引用和历史产物");
+});
+
+test("卡片去重不跨用户、作者或任务边界，也不隐藏已删除任务的独立档案", () => {
+  const t1 = { id: "t1", status: "running" }, t2 = { id: "t2", status: "running" };
+  const first = { role: "assistant", author: { kind: "employee", id: "a" }, tasks: [t1], stepOutput: { step: 1, label: "报告" } };
+  const last = { ...first, text: "最新报告" }, status = { t1: "running", t2: "running" };
+  for (const boundary of [{ ...first, author: { kind: "employee", id: "b" } }, { ...first, role: "user" }, { ...first, notice: true }, { ...first, tasks: [t2] }])
+    assert.equal(chatCardVisibility([first, boundary, last], status)[0], undefined);
+  assert.equal(chatCardVisibility([first, last], { t1: "deleted" })[0].hideStepOutput, false);
+  assert.equal(chatCardVisibility([first, { ...last, stepOutput: { step: 2, label: "报告" } }], status)[0].hideStepOutput, false);
+});
 
 test("pasting an image feeds the attachment picker, but text paste keeps its native behavior", async () => {
   const image = new File(["pixels"], "screenshot.png", { type: "image/png" });

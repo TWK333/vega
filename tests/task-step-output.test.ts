@@ -56,10 +56,17 @@ test("步骤产物可在任务运行中完整交给用户，之后继续任务�
       assert.match(receipt?.text || "", /stepOutput/);
       announce();
       await gate;
+      return reply("task_progress", { message: "再次提交同一份用例", stepOutput: { step: 1 } }, scenarios);
+    }
+    if (phase === 4) {
+      const receipts = messages.filter((message) => message.role === "tool" && message.name === "task_progress");
+      const first = JSON.parse(receipts.at(-2)!.text!).stepOutput;
+      const repeated = JSON.parse(receipts.at(-1)!.text!).stepOutput;
+      assert.deepEqual(repeated, { step: 1, ref: first.ref, duplicate: true }, "新消息序号也应沿用原产物回执");
       return reply("task_progress", { message: "执行完成", plan: [plan[0], { ...plan[1], status: "completed" }], stepOutput: { step: 2, text: "# 执行记录\n\n验证已完成。" } });
     }
-    assert.equal(phase, 4);
-    return reply("task_complete", { evidence: "已执行并核对测试结果。", summary: "测试完成。", deliverableRefs: [] });
+    assert.equal(phase, 5);
+    return reply("task_complete", { evidence: "已执行并核对测试结果。", summary: "测试完成。" });
   };
   try {
     const created = await employee.execute("", { action: "add", kind: "todo", text: "设计用例、执行测试并交付结果" });
@@ -119,6 +126,10 @@ test("步骤产物引用原任务正文，拒绝无效引用，重复引用不�
     const tooLong = await store.append(session.id, { role: "assistant", model: "fixture/model", text: "长".repeat(64001) });
     await assert.rejects(submit({ step: 1, ref: tooLong.seq }), /最多 64000/);
     assert.equal((await employee.state()).tasks[0].stepOutputs.length, 1);
+    const revision = await store.append(session.id, { role: "assistant", model: "fixture/model", text: "新增一项设计用例" });
+    const distinct = await submit({ step: 1, ref: revision.seq }, { plan });
+    assert.equal(distinct.value.stepOutput.duplicate, false, "相同步骤和标题的不同正文不应合并");
+    assert.equal((await employee.state()).tasks[0].stepOutputs.length, 2);
   } finally { await engine.close(); await store.close(); }
 });
 

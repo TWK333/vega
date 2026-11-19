@@ -13,7 +13,7 @@ import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
 import { quoteOf } from "../../shared/chat-quote";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, loadStepOutput: Function, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean, selfTint: Object });
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, hiddenTaskIds: Set, hideStepOutput: Boolean, loadStepOutput: Function, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean, selfTint: Object });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
 // In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
 const pressable = computed(() => props.mentionAuthor && sender.value.kind === "employee");
@@ -39,6 +39,7 @@ const sender = computed(() => props.message.author ? { kind: props.message.autho
 // My own bubbles take the color of the 牛马 I am talking to (the chat view passes it); the 牛马's replies stay neutral.
 const tint = computed(() => (mine.value && !props.message.error ? props.selfTint : undefined));
 const statusOf = (task) => props.taskStatus?.[task.id] ?? (props.tasks ? "deleted" : task.status);
+const attachedTasks = computed(() => (props.message.tasks || []).filter((task) => !props.hiddenTaskIds?.has(task.id)));
 const stepTask = computed(() => typeof props.message.stepOutput === "object" && !props.message.stepOutput?.legacy ? props.message.tasks?.[0] : undefined);
 const canOpenStep = computed(() => !!stepTask.value && statusOf(stepTask.value) !== "deleted");
 async function openStep() {
@@ -97,20 +98,20 @@ async function runExport(format) {
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
         <FileCard v-for="(file, index) in message.files || []" :key="'f' + index" :file="file" />
       </div>
-      <button v-if="stepOutput && (canOpenStep || (stepOutput.omitted && !loadedStep))" type="button" class="chat-step-output" :aria-label="'查看步骤产物：' + (stepOutput.label || '任务详情')" :disabled="!canOpenStep && (!loadStepOutput || stepLoading)" @click="openStep">
+      <button v-if="!hideStepOutput && stepOutput && (canOpenStep || (stepOutput.omitted && !loadedStep))" type="button" class="chat-step-output" :aria-label="'查看步骤产物：' + (stepOutput.label || '任务详情')" :disabled="!canOpenStep && (!loadStepOutput || stepLoading)" @click="openStep">
         <span class="chat-step-head"><Icon name="file" :size="16" />步骤产物<template v-if="stepOutput.step"> · 第 {{ stepOutput.step }} 步</template></span>
         <strong>{{ stepOutput.label }}</strong>
         <span class="chat-step-link">{{ canOpenStep ? '在任务详情中查看' : stepLoading ? '正在读取…' : '查看历史产物' }}<Icon name="right" :size="14" /></span>
       </button>
-      <StepOutput v-else-if="stepOutput" :output="stepOutput" :archive-base="archiveBase" :initially-open="!!loadedStep" />
-      <p v-if="stepError" class="chat-step-error" role="alert">{{ stepError }}</p>
+      <StepOutput v-else-if="!hideStepOutput && stepOutput" :output="stepOutput" :archive-base="archiveBase" :initially-open="!!loadedStep" />
+      <p v-if="!hideStepOutput && stepError" class="chat-step-error" role="alert">{{ stepError }}</p>
       <div v-if="message.sendStatus" class="chat-send-status" role="status">
         <span v-if="message.sendStatus === 'sending'"><span class="spinner" aria-hidden="true"></span>发送中…</span>
         <button v-else-if="message.sendStatus === 'failed'" type="button" :disabled="!quotable" :title="message.sendError" aria-label="重发这条消息" @click="emit('retry', message)">发送未确认 · 点击重发</button>
         <span v-else>已送达</span>
       </div>
-      <div v-if="message.tasks?.length" class="chat-tasks">
-        <button v-for="task in message.tasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
+      <div v-if="attachedTasks.length" class="chat-tasks">
+        <button v-for="task in attachedTasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
           <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span><Icon v-if="statusOf(task) !== 'deleted'" name="right" :size="14" />
         </button>
       </div>

@@ -8,7 +8,7 @@ import GroupAvatar from "./GroupAvatar.vue";
 import MentionTextarea from "./MentionTextarea.vue";
 import Icon from "./Icon.vue";
 import GroupWork from "./GroupWork.vue";
-import { continuesPrevious } from "./conversation";
+import { continuesPrevious, chatCardVisibility } from "./conversation";
 import { loadStepOutput, mergeMessages } from "./chat-history.js";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
@@ -40,7 +40,8 @@ const avatars = computed(() => new Map([...(group.value?.users || []), ...(group
 const shown = computed(() => {
   const rows = mergeMessages(olderReferences.value, messages.value).filter((m) => m.notice || m.text?.trim() || m.tasks?.length || m.images?.length || m.files?.length)
     .map((m) => m.author ? { ...m, author: { ...m.author, avatar: avatars.value.get(m.author.id) || "" } } : m);
-  return rows.map((message, index) => ({ message, continued: rows[index - 1]?.seq === message.seq - 1 && continuesPrevious(rows[index - 1], message) }));
+  const cards = chatCardVisibility(rows, taskStatus.value);
+  return rows.map((message, index) => ({ message, continued: rows[index - 1]?.seq === message.seq - 1 && continuesPrevious(rows[index - 1], message), cards: cards[index] }));
 });
 // 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
 const newFrom = seenSeq(props.user?.id, props.groupId);
@@ -271,10 +272,10 @@ onMounted(() => { if (props.groupId) void run(() => load(true)); else void loadD
             <div class="chat-column">
               <div v-if="!activeTopic && group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
               <p v-if="activeTopic && !shown.length" class="group-notice">{{ historyLoading ? '正在加载话题…' : '还没有关联消息，可以直接在此开始讨论。' }}</p>
-              <template v-for="({ message, continued }, index) in shown" :key="message.seq">
+              <template v-for="({ message, continued, cards }, index) in shown" :key="message.seq">
                 <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
+                <ChatMessage v-else :message="message" :continued="continued" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
                 <span class="chat-avatar" aria-hidden="true"><PressMention :name="e.name" :disabled="readonly" @press="mentionMember"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></PressMention></span>

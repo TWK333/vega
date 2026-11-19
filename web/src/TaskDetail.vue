@@ -33,6 +33,26 @@ async function settleMemories() {
 const ended = computed(() => isEnded(props.task.status));
 const resumable = computed(() => ["failed", "stopped", "cancelled"].includes(props.task.status));
 const progress = computed(() => planProgress(props.task.plan));
+const mergedStepOutputs = computed(() => {
+  const groups = new Map();
+  for (const output of props.task.stepOutputs || []) {
+    const key = JSON.stringify([props.task.id, output.step, output.label]);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(output);
+  }
+  return [...groups].map(([key, parts]) => {
+    if (parts.length === 1) return { key, output: parts[0] };
+    const text = [...new Set(parts.map((part) => part.text).filter((text) => text?.trim()))].join("\n\n---\n\n");
+    const seen = new Set();
+    const files = parts.flatMap((part) => part.files || []).filter((file) => {
+      if (!file.blobId) return true;
+      if (seen.has(file.blobId)) return false;
+      seen.add(file.blobId);
+      return true;
+    });
+    return { key, output: { ...parts[0], text, files } };
+  });
+});
 const stepIcon = { completed: "check", in_progress: "play", blocked: "alert" };
 const exportMarkdown = computed(() => String(props.task.result || props.task.completion || props.task.summary || "").trim());
 const archiveBase = computed(() => filesArchiveBase(props.employeeId, props.task?.id));
@@ -104,9 +124,9 @@ async function run(action) {
       </ol>
     </section>
 
-    <section v-if="task.stepOutputs?.length" class="detail-section">
+    <section v-if="mergedStepOutputs.length" class="detail-section step-outputs">
       <h3>步骤产物</h3>
-      <StepOutput v-for="(output, index) in task.stepOutputs" :key="index" :output="output" :archive-base="archiveBase" />
+      <StepOutput v-for="{ key, output } in mergedStepOutputs" :key="key" :output="output" :archive-base="archiveBase" />
     </section>
 
     <section v-if="task.result" class="detail-section">

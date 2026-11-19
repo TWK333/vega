@@ -200,8 +200,9 @@ const latestBody = (candidates: Message[], minChars = 80) =>
  *  repeating [] after that refusal (confirmEmpty = the same seq) is a deliberate no-body delivery. */
 export const resolveDeliverable = (messages: readonly Message[], ref: unknown, opts: { since?: number; confirmEmpty?: number; excludeAuto?: number[]; stepOutputs?: { ref: number; text?: string }[] } = {}): { declared: boolean; refs: number[]; texts: string[]; error?: string; later: Message[]; remapped?: string[]; auto?: boolean; upgraded?: boolean; emptyGuard?: number } => {
   const { candidates, list } = candidateList(messages, opts.since);
-  // Published step outputs stay explicitly citable, but do not become an implicit final body.
-  const finalCandidates = candidates.filter((message) => !opts.excludeAuto?.includes(message.seq!));
+  // An already published step output is not a final body, even if the model writes it again under a new seq.
+  const publishedTexts = new Set((opts.stepOutputs || []).map((output) => output.text?.trim()).filter(Boolean));
+  const finalCandidates = candidates.filter((message) => !opts.excludeAuto?.includes(message.seq!) && !publishedTexts.has(message.text!.trim()));
   const retry = `请用合法正文编号立即再调 task_complete（例如 deliverableRefs:[${candidates.at(-1)?.seq ?? "…"}]）；不要改用 task_progress 重贴同一交付。本任务可引用：${list}`;
   // Omitted refs: auto-pick the latest substantial body, or [] when there is none (pure evidence delivery).
   if (ref === undefined || ref === null || ref === "") {
@@ -1354,21 +1355,20 @@ export class Employee {
                   if (output.ref) assert(authored(body), "步骤产物需要本任务会话中模型写出的非空正文；请引用正文的 textRef");
                   else {
                     assert(source?.calls?.some((call) => call.name === "task_progress" && call.arguments?.stepOutput?.step === output.step), "未指定 ref 时，步骤产物必须与本次 task_progress 在同一条回复");
-                    if (output.text === undefined && !stepFiles.length) {
-                      body = source;
-                      assert(authored(body), "步骤产物需要非空文本或文件");
-                    }
+                    if (output.text === undefined && !stepFiles.length && authored(source)) body = source;
                   }
                   const text = output.text ?? body?.text ?? "";
                   assert([...text].length <= 64000, "步骤产物正文最多 64000 字，请分开提交");
-                  assert(text.trim() || stepFiles.length, "步骤产物需要非空文本或文件");
+                  assert(text.trim() || stepFiles.length, "步骤产物需要非空文本或文件：只更新进度请省略 stepOutput；要交产物请填写 text、paths 或正文 ref。");
                   const ref = output.ref ? body!.seq! : source!.seq!;
+                  const label = t.plan[output.step - 1].content;
                   const fingerprint = createHash("sha256").update(JSON.stringify([text, ...stepFiles.map((file) => [file.name, createHash("sha256").update(file.data).digest("hex")])])).digest("hex");
                   const outputs: Obj[] = t.stepOutputs ||= [];
-                  const duplicate = outputs.some((item) => item.session === session && item.ref === ref && item.step === output.step && (item.fingerprint === fingerprint || (!item.fingerprint && !stepFiles.length && item.text === text)));
+                  const duplicate = outputs.find((item) => item.session === session && item.step === output.step && item.label === label &&
+                    (item.fingerprint === fingerprint || (!item.fingerprint && !stepFiles.length && !item.files?.length && item.text === text)));
                   if (!duplicate) {
                     assert(outputs.length < 50, "一个任务最多保存 50 条步骤产物");
-                    const label = t.plan[output.step - 1].content, files: FileRef[] = [];
+                    const files: FileRef[] = [];
                     for (const file of stepFiles) {
                       const blobId = await this.store.blob("application/octet-stream", file.data);
                       await this.store.grantBlob(blobId, session);
@@ -1383,7 +1383,8 @@ export class Employee {
                       await this.toChat(s.chatSession, t.group, { role: "assistant", text: content, quote, progress: true, stepOutput: artifact, tasks: [{ id: t.id, title: t.text.slice(0, 80), status: t.status }] }, false);
                     }
                   }
-                  return { ok: true, stepOutput: { step: output.step, ref, duplicate }, ...reviewHint, next: "Step output saved; continue the remaining work, then complete the task separately." };
+                  return { ok: true, stepOutput: { step: output.step, ref: duplicate?.ref ?? ref, duplicate: !!duplicate }, ...reviewHint,
+                    next: duplicate ? "相同产物已交付，本次未重复发送；继续剩余步骤，最终单独调用 task_complete。" : "Step output saved; continue the remaining work, then complete the task separately." };
                 }
                 if (a.tellUser !== true) return { ok: true, toldUser: false, ...reviewHint, next: "Continue the current step" };
                 // Key milestones only; progress is saved either way. Ordinary progress has no task card;

@@ -43,7 +43,7 @@ import ChatMessage from "@chat";
 import StepOutput from "@step";
 import EmployeeChat from "@employee";
 import GroupChat from "@group";
-const clicked = ref([]), requests = ref([]);
+const clicked = ref([]), requests = ref([]), selectedTask = ref(null);
 const output = { step: 1, label: "设计结果", text: "ONLY_IN_ARTIFACT " + "报告正文 ".repeat(200) };
 const message = (id) => ({ role: "assistant", text: "已生成", stepOutput: output, tasks: [{ id, title: "工作", status: "running" }] });
 const legacy = { role: "assistant", text: "**步骤产物（任务未完成）**\\n\\n旧报告\\n\\nONLY_IN_ARTIFACT 旧正文", stepOutput: true, tasks: [{ id: "old", title: "旧任务" }] };
@@ -51,17 +51,18 @@ const groupMessage = { ...message('group-task'), seq: 1, author: { kind: 'employ
 const groupDeleted = { ...message('removed'), seq: 2, author: groupMessage.author };
 const groupLegacy = { ...legacy, seq: 3, author: groupMessage.author };
 const compact = (row) => ({ ...row, stepOutput: { step: row.stepOutput.step, label: row.stepOutput.label, omitted: true } });
+const repeated = (row, start) => [start, start + 1].map((seq) => compact({ ...row, seq, text: '核对进度 ' + seq }));
 const compactLegacy = { ...groupLegacy, text: '步骤产物已保存。', stepOutput: { step: 0, label: '旧报告', omitted: true, legacy: true } };
 const task = { id: 'group-task', text: '工作', status: 'running', createdAt: Date.now(), stepOutputs: [output], canControl: false };
 const group = { name: '测试群', users: [{ id: 'viewer', name: '成员' }], employees: [{ id: 'worker', name: '牛马', mine: false }], running: [] };
 async function api(path) {
   requests.value.push(path);
   if (path.startsWith('/employees/worker/chat')) {
-    const messages = path.includes('before=3') ? [{ ...message('removed'), seq: 2 }] : [compact({ ...message('private'), seq: 1 }), compact({ ...message('removed'), seq: 2 })];
+    const messages = path.includes('before=3') ? [{ ...message('removed'), seq: 2 }] : [compact({ ...message('private'), seq: 1 }), compact({ ...message('removed'), seq: 2 }), ...repeated(message('private'), 3)];
     return { session: { id: 'chat' }, messages, hasMore: false };
   }
   if (path.startsWith('/groups/fixture/messages')) {
-    const messages = path.includes('before=3') ? [groupDeleted] : path.includes('before=4') ? [groupLegacy] : [compact(groupMessage), compact(groupDeleted), compactLegacy];
+    const messages = path.includes('before=3') ? [groupDeleted] : path.includes('before=4') ? [groupLegacy] : path.includes('topicTaskId=') ? [compact(groupMessage)] : [compact(groupMessage), compact(groupDeleted), compactLegacy, ...repeated(groupMessage, 4)];
     return { group, messages, taskStatus: { 'group-task': 'running', removed: 'deleted', old: 'deleted' } };
   }
   if (path === '/groups/fixture/tasks/worker/group-task') return task;
@@ -76,7 +77,7 @@ async function api(path) {
   <div id="legacy"><ChatMessage :message="legacy" /></div>
   <div id="detail"><StepOutput :output="output" /></div>
   <div id="employee"><EmployeeChat :api="api" user-id="viewer" employee-id="worker" name="牛马" :composer="{ text: '', attachments: [] }" :tasks="[{ id: 'private', status: 'running' }]" @task="clicked.push('employee:' + $event)" /></div>
-  <div id="groupnav"><GroupChat :api="api" :user="{ id: 'viewer', role: 'operator' }" group-id="fixture" :my-employees="[]" /></div>
+  <div id="groupnav"><GroupChat :api="api" :user="{ id: 'viewer', role: 'operator' }" group-id="fixture" :my-employees="[]" :selected-task="selectedTask" @task-change="selectedTask = $event" /></div>
   <span id="clicked">{{ clicked.join('|') }}</span><span id="requests">{{ requests.join('|') }}</span>
 </template>`);
     await writeFile(join(dir, "fixture.js"), `import { createVaporApp, nextTick } from "vue";
@@ -98,7 +99,12 @@ createVaporApp(Fixture).mount("#app");
 await nextTick();
 const q = (selector) => document.querySelector(selector);
 for (let i = 0; i < 80 && !(q('#employee .chat-step-output') && q('#groupnav .chat-step-output')); i++) await new Promise(resolve => setTimeout(resolve, 50));
+const row = (view, seq) => q('#' + view + ' [data-message-seq="' + seq + '"]');
+const keepsLatestCards = (view, seq) => row(view, seq)?.querySelector('.chat-bubble')?.textContent.includes('核对进度') &&
+  !row(view, seq).querySelector('.chat-step-output,.chat-task-link') &&
+  !!row(view, seq + 1)?.querySelector('.chat-step-output') && !!row(view, seq + 1)?.querySelector('.chat-task-link');
 const before = {
+  privateRepeats: keepsLatestCards('employee', 3), groupRepeats: keepsLatestCards('groupnav', 4),
   privateLink: !!q("#private .chat-step-output"), groupLink: !!q("#group .chat-step-output"),
   privateBody: q("#private").textContent.includes(marker), groupBody: q("#group").textContent.includes(marker),
   privatePreview: !!q("#private .step-output-content"), privateExport: !!q("#private .step-output-export"),
@@ -112,14 +118,19 @@ const before = {
   groupLegacyBody: !!q('#groupnav [data-message-seq="3"]')?.textContent.includes(marker)
 };
 q("#private .chat-step-output")?.click(); q("#group .chat-step-output")?.click();
-q("#employee .chat-step-output")?.click(); q("#groupnav .chat-step-output")?.click();
-q('#employee [data-message-seq="2"] .chat-step-output')?.click();
-q('#groupnav [data-message-seq="2"] .chat-step-output')?.click();
-q('#groupnav [data-message-seq="3"] .chat-step-output')?.click();
-for (let i = 0; i < 80 && !(q('#groupnav .task-detail') && q('#employee [data-message-seq="2"] .step-output-content[open]') && q('#groupnav [data-message-seq="3"] .step-output-content[open]')); i++) await new Promise(resolve => setTimeout(resolve, 50));
+row('employee', 4)?.querySelector('.chat-step-output')?.click(); row('groupnav', 5)?.querySelector('.chat-step-output')?.click();
+await nextTick();
+for (let i = 0; i < 80 && !q('#groupnav .task-detail'); i++) await new Promise(resolve => setTimeout(resolve, 50));
 const groupTask = q('#groupnav .task-detail')?.dataset.taskId || '';
 const groupBodyBefore = !!q('#groupnav .task-detail')?.textContent.includes(marker);
 q("#deleted summary")?.click(); q("#legacy summary")?.click(); q("#detail summary")?.click(); q("#groupnav .task-detail summary")?.click();
+await nextTick();
+q('#groupnav .group-chat-tabs button')?.click();
+await nextTick();
+q('#employee [data-message-seq="2"] .chat-step-output')?.click();
+q('#groupnav [data-message-seq="2"] .chat-step-output')?.click();
+q('#groupnav [data-message-seq="3"] .chat-step-output')?.click();
+for (let i = 0; i < 80 && !(q('#employee [data-message-seq="2"] .step-output-content[open]') && q('#groupnav [data-message-seq="3"] .step-output-content[open]')); i++) await new Promise(resolve => setTimeout(resolve, 50));
 await new Promise(resolve => setTimeout(resolve, 50)); await nextTick();
 q("#detail .step-output-export button")?.click(); await nextTick();
 document.querySelector("#result").textContent = JSON.stringify({ ...before, clicked: q("#clicked").textContent,
@@ -138,7 +149,9 @@ await fetch('/__done');`);
     const { stdout, stderr } = await execFile(binary, ["--headless=new", "--no-first-run", "--no-default-browser-check", "--no-sandbox", "--disable-gpu", "--user-data-dir=" + profile, "--dump-dom", `http://127.0.0.1:${address.port}/`], { encoding: "utf8", timeout: 30000, maxBuffer: 8 << 20, windowsHide: true });
     const body = stdout.match(/<pre id="result">([\s\S]*?)<\/pre>/)?.[1];
     assert(body && body !== "pending", `fixture did not finish: ${stdout}\n${stderr}`);
-    const result = JSON.parse(body);
+    const { privateRepeats, groupRepeats, ...result } = JSON.parse(body);
+    assert.equal(privateRepeats, true, result.error || "private chat keeps only the latest repeated cards");
+    assert.equal(groupRepeats, true, result.error || "group chat keeps only the latest repeated cards");
     assert.deepEqual(result, {
       privateLink: true, groupLink: true, privateBody: false, groupBody: false,
       privatePreview: false, privateExport: false, deletedFallback: true, legacyFallback: true,

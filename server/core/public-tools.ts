@@ -168,11 +168,11 @@ export function employeeTools(ctx: ToolContext): Tool[] {
         }, ["content", "status"]) },
         tellUser: { type: "boolean", description: "true 时把 message 发到沟通会话（纯文字、不挂任务卡）。写成跟人同步进度的自然短句，例如「百度搜「你好」的结果页出来了」，不要「已派单/阶段完成」这类公文腔，也不要流水账或每步工具结果。task_ask_user / task_request_approval 与最终交付另走通知并挂任务卡。每个任务最多 12 次，超出不发送（toldUser=false，进度仍保存）。省略为 false；同时给 stepOutput 时只发送产物，不重复发送进度。" },
         stepOutput: obj({
-          step: int("完整计划中的步骤序号，从 1 开始", { minimum: 1, maximum: 50 }),
+          step: int("当前完整计划中的步骤序号，从 1 开始，不是数组下标或消息编号", { minimum: 1, maximum: 50 }),
           text: str("可选：产物的完整 Markdown 内容，不写进对话正文", { minLength: 1, maxLength: 64000 }),
           ref: int("可选：已写出的产物正文消息编号，或包含 textRef 的工具回执编号；与 text 二选一", { minimum: 1 }),
           paths: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区内的产物文件路径", { minLength: 1, maxLength: 4096 }), description: "可选：本步骤生成的文件，系统读取并保存快照供用户下载；只接受当前执行端工作区内的普通文件，单个不超过 25MiB、合计不超过 64MiB。不要包含凭据。" },
-        }, ["step"], "步骤的独立产物：文本填 text，构建/导出文件填 paths，也可同时填写；已有正文可用 ref 引用。系统单独展示并允许导出，不放进对话正文；每任务最多 50 条。草稿、未执行或未验证项须如实说明。") },
+        }, ["step"], "只有要交独立步骤产物才填写；仅更新进度或已有最终报告时省略。文本填 text，文件填 paths，已有正文用 ref；相同产物不重复发送。系统单独展示并允许导出，每任务最多 50 条。草稿、未执行或未验证项须如实说明。") },
       ["message"]));
     out.push(tool("task_reschedule",
       "把当前任务整体改到以后再继续（例如用户要求晚点或明天再处理、要等的时间点还没到）：runAt 或 delayMinutes 二选一。任务转为延后并立即结束本轮，到时在原会话续做。只改本任务自己；在等已提交的外部作业结果、需要记下恢复点时用 task_wait。用户说清的时刻或周期由系统记在同一条任务上。",

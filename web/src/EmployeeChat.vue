@@ -5,7 +5,7 @@ import EmployeeAvatar from "./EmployeeAvatar.vue";
 import Icon from "./Icon.vue";
 import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
 import ComposerQuote from "./ComposerQuote.vue";
-import { employeeChatMessages, continuesPrevious } from "./conversation";
+import { employeeChatMessages, continuesPrevious, chatCardVisibility } from "./conversation";
 import { createChatHistory, loadStepOutput } from "./chat-history.js";
 import { createChatCache } from "./chat-cache.js";
 import { markSeen, seenSeq } from "./seen.js";
@@ -33,13 +33,15 @@ watch([messages, running], ([rows, active]) => {
   });
 });
 const visible = computed(() => employeeChatMessages(messages.value));
+const taskStatus = computed(() => Object.fromEntries((props.tasks || []).map((task) => [task.id, task.status])));
 const displayed = computed(() => {
   const rows = [...visible.value];
   for (const message of outbox.value) {
     const next = rows.findIndex((row) => !row.sendStatus && row.seq > message.afterSeq);
     rows.splice(next < 0 ? rows.length : next, 0, message);
   }
-  return rows.map((message, index) => ({ message, continued: continuesPrevious(rows[index - 1], message) }));
+  const cards = chatCardVisibility(rows, taskStatus.value);
+  return rows.map((message, index) => ({ message, continued: continuesPrevious(rows[index - 1], message), cards: cards[index] }));
 });
 // 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
 const newFrom = seenSeq(props.userId, props.employeeId);
@@ -56,7 +58,6 @@ const history = createChatHistory({ api: (path, ...args) => props.api(path + "&s
 
 // Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
 // avatar's last glance and eases into it (in memory only; nothing is persisted).
-const taskStatus = computed(() => Object.fromEntries((props.tasks || []).map((task) => [task.id, task.status])));
 async function onRemember(message) {
   if (!props.remember || !message?.text) return;
   const claim = String(message.displayText || message.text).replace(/\s+/g, " ").trim();
@@ -254,10 +255,10 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
             <button type="button" @click="draft = '目前有哪些任务需要我处理？'; input?.focus()"><Icon name="tasks" :size="15" />看看工作进度</button>
           </div>
         </div>
-        <template v-for="({ message, continued }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
+        <template v-for="({ message, continued, cards }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
         <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
-        <ChatMessage v-else :message="message" :continued="continued" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :load-step-output="(seq, message) => loadStepOutput(api, `/employees/${employeeId}/chat`, seq, artifactSession, message)" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <ChatMessage v-else :message="message" :continued="continued" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :load-step-output="(seq, message) => loadStepOutput(api, `/employees/${employeeId}/chat`, seq, artifactSession, message)" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         </template>
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>

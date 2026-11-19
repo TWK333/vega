@@ -35,6 +35,35 @@ export function continuesPrevious(previous, message) {
   return !!previous && previous.role !== "user" && message.role !== "user" && !standalone(previous) && !standalone(message) && previous.author?.id === message.author?.id;
 }
 
+export function chatCardVisibility(messages, taskStatus) {
+  const visibility = new Array(messages.length), later = new Map();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i], next = messages[i + 1];
+    if (message.role !== "assistant" || message.notice) { later.clear(); continue; }
+    if (message.author?.id !== next?.author?.id || message.author?.kind !== next?.author?.kind) later.clear();
+    const tasks = message.tasks || [], related = new Set(tasks.map((task) => task.id));
+    related.add(message.topicTaskId);
+    for (const id of later.keys()) if (!related.has(id)) later.delete(id);
+
+    const hiddenTaskIds = new Set();
+    for (const { id } of tasks) {
+      if (!id) continue;
+      if (later.has(id)) hiddenTaskIds.add(id);
+      else later.set(id, new Set());
+    }
+    const taskId = tasks[0]?.id, status = taskStatus?.[taskId], output = message.stepOutput, steps = later.get(taskId);
+    let hideStepOutput = false;
+    // Historical cards can be the only way to open the original artifact after a task is deleted.
+    if (steps && status && status !== "deleted" && !output?.legacy && output?.step > 0 && output.label) {
+      const key = JSON.stringify([output.step, output.label]);
+      hideStepOutput = steps.has(key);
+      steps.add(key);
+    }
+    if (hiddenTaskIds.size || hideStepOutput) visibility[i] = { hiddenTaskIds, hideStepOutput };
+  }
+  return visibility;
+}
+
 /** Match Nova: adjacent thoughts/tools form one process segment; text breaks it. */
 export function timelineOf(messages) {
   const groups = [];
