@@ -60,34 +60,22 @@ func butterflyPanelTarget(dir, url string) {
 	_ = os.WriteFile(filepath.Join(dir, "panel-target.txt"), []byte(url), 0o600)
 }
 
-// assistantURL 蝴蝶面板打开的地址：本地内置的助理界面（不用登录网站，也不加载站点前端）。
-func (a *Agent) assistantURL() string {
+// Settings and tray controls use the same local renderer entry point.
+func (a *Agent) assistantRendererURL() string {
 	if assistantGrokAssets == nil {
 		return a.assistantBase()
-	}
-	if _, _, paired := a.assistantCredential(); !paired {
-		return ""
 	}
 	return a.assistantBase() + assistantGrokPath
 }
 
-// threadURL 面板里直达某条会话：界面自己记得上次看的那条，这里仍然回到面板。
-func (a *Agent) threadURL(session string) string {
-	return a.assistantBase()
+func (a *Agent) assistantURL() string {
+	if _, _, paired := a.assistantCredential(); !paired && assistantGrokAssets != nil {
+		return ""
+	}
+	return a.assistantRendererURL()
 }
 
-// butterflyOpenThread 双击直达某条会话；没拿到 agent 时退回普通打开。
-func butterflyOpenThread(thread string) {
-	if runningAgent != nil && thread != "" {
-		url := runningAgent.threadURL(thread)
-		butterflyPanelTarget(runningAgent.dataDir, url)
-		if !butterflyPanelOpen(url) {
-			openBrowser(url)
-		}
-		return
-	}
-	butterflyOpen()
-}
+func butterflyOpenThread(string) { butterflyOpen() }
 
 // butterflyNotify 更新提示并显示气泡；同一条内容不反复弹。
 func butterflyNotify(kind, text string) {
@@ -141,7 +129,7 @@ func butterflyDisabled() bool {
 	return butterflyState.disabled
 }
 
-// butterflySetEnabled 打开/关掉蝴蝶：关掉时收起当前气泡和任务栏蝴蝶，并忽略后续提示。
+// butterflySetEnabled controls desktop notices, not the standard app taskbar icon.
 func butterflySetEnabled(on bool) {
 	butterflyState.Lock()
 	butterflyState.disabled = !on
@@ -151,10 +139,8 @@ func butterflySetEnabled(on bool) {
 	if quiet {
 		return
 	}
-	if on {
-		butterflyChipStart()
-		return
+	if !on {
+		butterflyClear()
+		butterflyChipHide()
 	}
-	butterflyClear()
-	butterflyChipHide()
 }

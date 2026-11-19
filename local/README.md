@@ -25,11 +25,11 @@ An operation never silently falls back to the other mode or to the server: if th
 
 The client listens on the first free loopback port in `47753–47762`; the extension pairs through `/pair`, authenticates `/poll` and `/reply` with that process's token, and executes CDP through `chrome.debugger`. Chrome does not need a `9222` remote-debugging listener. Multiple Chrome/Edge profiles can stay connected, with per-client queues, Chrome preferred for new turns, 20-second polls and the same 3-second ordinary / 10-second CDP deadlines as Nova. An acquired turn remains pinned to its browser and never silently switches profiles. Employee main tasks must use `employee.relay(scene=computer)` to reach the browser tool; a missing `chrome` tool or a failed `9222` probe is not evidence of extension failure. If the extension cannot proceed or a native dialog requires input, the assistant must stop and ask you to handle it, never fall back to desktop automation. Computer scenes retain `bash` for ordinary file, build, test and diagnostic commands. Command execution on both the server and native client rejects recognized native mouse/keyboard/focus APIs, UI automation tools, alternative browser drivers and encoded PowerShell commands before dispatch or process creation. This is a conservative literal-command guard, **not an OS sandbox**: it can also reject diagnostic text containing these names (use `read` instead), and cannot inspect arbitrary saved scripts or executables. Rebuild/restart the native client and upgrade the server for both checks to take effect.
 
-## 蝴蝶窗口 (Windows)
+## 牵牛星桌面窗口（Windows）
 
-在 Windows 上，点击任务栏蝴蝶或托盘 **蝴蝶助理** 打开内置的 Grok 风格窗口（需要 Microsoft Edge WebView2 Runtime）。它使用现有 Vega 站点的设备授权，不登录 Grok，也不改网页的 OAuth 登录。未授权时先在托盘 **设置** 启动并完成本站授权。窗口记住大小和位置。
+Windows 客户端启动时打开内置对话窗口（需要 Microsoft Edge WebView2 Runtime）。任务栏显示应用图标，窗口可拖动和缩放；关闭窗口只隐藏，双击托盘图标恢复，右键托盘选择 **退出** 才结束客户端。未授权时，牵牛星欢迎页的 **登录并授权** 会在系统浏览器中重新打开本站待确认的设备授权。授权后回到窗口，或点击 **检查授权状态**；不登录 Grok，也不改网页 OAuth。
 
-新版可以选择已有牛马、查看最近对话、发送文本并自动刷出已保存的回复。现有设备 API 不提供逐字流式输出或更早的历史分页（最多最近 200 条原始消息），创建、编辑牛马和停止回复请用 Vega 网页。托盘 **经典面板** 继续提供群聊、任务确认和产物下载；缺少 WebView2 时也可在系统浏览器打开经典面板。任务栏提示气泡和设置照旧。
+新版可以查看牛马和群聊（群聊排在牛马下方）、阅读最近对话、发送文本并自动刷出已保存的回复；不提供语音输入。现有设备 API 不提供逐字流式输出或更早的历史分页（最多最近 200 条原始消息）。创建或编辑牛马、停止回复、确认任务和下载产物请用 Vega 网页。任务栏提示气泡和设置照旧。客户端与服务端须配套升级，才能同步未读。
 
 ## Device credentials and revocation
 

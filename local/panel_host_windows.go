@@ -2,20 +2,14 @@
 
 package main
 
-// 面板自己的 WebView2 宿主：窗口由我们建，一创建就在屏幕外、无标题栏、尺寸到位，再把
-// go-webview2 的 edge.Chromium 嵌进去。
-// 不用库自带的建窗：它是先把窗口摆到屏幕正中（或 CW_USEDEFAULT）显示，再阻塞式初始化
-// WebView2——那一下就是“启动时有个小窗口一闪而过”。自己建窗还顺带躲开 StartupInfo 的
-// SW_HIDE 把首次 ShowWindow 吞掉、合成器建在隐藏窗口上永不上屏那个坑。
+// 面板自己的 Win32 窗口保留系统任务栏和缩放；对话页的标题栏由 WebView2 绘制。
 
 import (
 	"fmt"
-	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"github.com/jchv/go-webview2/pkg/edge"
@@ -23,18 +17,18 @@ import (
 )
 
 const (
-	butterflyPanelClass = "VegaButterflyPanel"
-	// 预热时把窗口停在工作区外：它一直是“可见”的，WebView2 合成器才不会停摆。
-	panelParkX = -20000
-	panelParkY = -20000
-
-	panelShowMsg = 0x8000 + 1 // WM_APP+1：客户端点了蝴蝶，挪到任务栏上方并拿到前台
-	panelParkMsg = 0x8000 + 2 // WM_APP+2：收回屏幕外
+	butterflyPanelClass = "VegaDesktopWindow"
+	panelShowMsg        = 0x8000 + 1 // WM_APP + 1
+	panelShutdownMsg    = 0x8000 + 2 // WM_APP + 2
+	panelResizeMargin   = 6
+	panelWSCaption      = 0x00C00000 // WS_CAPTION
 )
 
 var (
+	procPanelLoadIcon       = panelUser32.NewProc("LoadIconW")
 	procPanelZoomed         = panelUser32.NewProc("IsZoomed")
 	procPanelIconic         = panelUser32.NewProc("IsIconic")
+	procPanelVisible        = panelUser32.NewProc("IsWindowVisible")
 	procPanelWindowMonitor  = panelUser32.NewProc("MonitorFromWindow")
 	procPanelReleaseCapture = panelUser32.NewProc("ReleaseCapture")
 	procPanelDwmAttribute   = windows.NewLazySystemDLL("dwmapi.dll").NewProc("DwmSetWindowAttribute")
@@ -44,12 +38,29 @@ func panelUsesGrok(url string) bool {
 	return strings.HasPrefix(url, "http://"+localAddress+"/assistant/") && strings.HasSuffix(url, "/"+assistantGrokPath)
 }
 
+func panelFrameStyle(style uintptr, url string) uintptr {
+	// NCCALCSIZE reserves the resize edges, but Windows can still draw a WS_CAPTION on top.
+	if panelUsesGrok(url) {
+		return style &^ panelWSCaption
+	}
+	return style | panelWSCaption
+}
+
 // panelWindowMessage only accepts commands for this window, never arbitrary native calls.
 func panelWindowMessage(text string) {
+	hwnd := panelHostWindow()
+	// The settings page's own back link can navigate without a tray message.
+	if text == "vega-window:chat-ready" {
+		if token, ok := strings.CutPrefix(panelCurrentURL, "http://"+localAddress+"/config/"); ok {
+			token, _, _ = strings.Cut(token, "?")
+			panelCurrentURL = "http://" + localAddress + "/assistant/" + token + "/" + assistantGrokPath
+			butterflyPanelChrome(hwnd)
+		}
+		return
+	}
 	if !panelUsesGrok(panelCurrentURL) {
 		return
 	}
-	hwnd := panelHostWindow()
 	switch text {
 	case "vega-window:minimize":
 		_, _, _ = procPanelShow.Call(uintptr(hwnd), 6) // SW_MINIMIZE
@@ -64,10 +75,6 @@ func panelWindowMessage(text string) {
 	case "vega-window:drag":
 		_, _, _ = procPanelReleaseCapture.Call()
 		_, _, _ = procPanelPost.Call(uintptr(hwnd), 0x0112, 0xF012, 0) // WM_SYSCOMMAND, SC_MOVE | HTCAPTION
-	case "vega-window:resize-left", "vega-window:resize-right", "vega-window:resize-top", "vega-window:resize-topleft", "vega-window:resize-topright", "vega-window:resize-bottom", "vega-window:resize-bottomleft", "vega-window:resize-bottomright":
-		edge := map[string]uintptr{"left": 1, "right": 2, "top": 3, "topleft": 4, "topright": 5, "bottom": 6, "bottomleft": 7, "bottomright": 8}[strings.TrimPrefix(text, "vega-window:resize-")]
-		_, _, _ = procPanelReleaseCapture.Call()
-		_, _, _ = procPanelPost.Call(uintptr(hwnd), 0x0112, 0xF000|edge, 0) // WM_SYSCOMMAND, SC_SIZE | WMSZ_*
 	case "vega-window:theme-dark", "vega-window:theme-light":
 		dark := int32(0)
 		color := edge.COREWEBVIEW2_COLOR{A: 255, R: 255, G: 255, B: 255}
@@ -88,8 +95,7 @@ var panelHost struct {
 	sync.Mutex
 	hwnd    windows.Handle
 	browser *edge.Chromium
-	pending bool   // 预热还没好就被点了：等 WebView2 就绪再摆出来
-	want    string // 预热还没好时要翻到的页面
+	pending bool // A tray request arrived while WebView2 was starting.
 }
 
 // panelCurrentURL WebView2 当前加载的页面（翻页前比对，避免每次点开都重载）。
@@ -112,45 +118,125 @@ func panelHostBrowser() *edge.Chromium {
 	return panelHost.browser
 }
 
-// panelHostWndProc 面板窗口的消息：尺寸变了把 WebView2 的 bounds 同步过去，
-// 显示/收起由客户端的信号触发，关窗走正常的销毁流程。
-// lparam 按结构体指针接（和键盘钩子一样）：我们处理的几条消息里它要么是 MINMAXINFO，要么不用，
-// 不用时只原样转给 DefWindowProc，不当作整数解引用。
-func panelHostWndProc(hwnd windows.Handle, message uint32, wparam uintptr, lparam *panelMinMaxInfo) uintptr {
+func panelDPI(hwnd windows.Handle) uint32 {
+	if dpi, _, _ := procPanelDpi.Call(uintptr(hwnd)); dpi != 0 {
+		return uint32(dpi)
+	}
+	return butterflyDPI()
+}
+
+func panelResizeHit(rect appuseWinRect, x, y, margin int32) uintptr {
+	left, right := x < rect.Left+margin, x >= rect.Right-margin
+	switch {
+	case y < rect.Top+margin:
+		if left {
+			return 13
+		} // HTTOPLEFT
+		if right {
+			return 14
+		} // HTTOPRIGHT
+		return 12 // HTTOP
+	case y >= rect.Bottom-margin:
+		if left {
+			return 16
+		} // HTBOTTOMLEFT
+		if right {
+			return 17
+		} // HTBOTTOMRIGHT
+		return 15 // HTBOTTOM
+	case left:
+		return 10 // HTLEFT
+	case right:
+		return 11 // HTRIGHT
+	default:
+		return 1 // HTCLIENT
+	}
+}
+
+// Keep WebView2's last usable bounds while the native window is minimized or hidden.
+func panelSyncWebView(hwnd windows.Handle, browser *edge.Chromium, minimized bool) error {
+	shown, _, _ := procPanelVisible.Call(uintptr(hwnd))
+	iconic, _, _ := procPanelIconic.Call(uintptr(hwnd))
+	var rect appuseWinRect
+	ok, _, _ := procChipClientRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rect)))
+	visible := !minimized && iconic == 0 && shown != 0 && ok != 0 && rect.Right > rect.Left && rect.Bottom > rect.Top
+	var err error
+	if visible {
+		browser.Resize()
+		_ = browser.NotifyParentWindowPositionChanged()
+		err = browser.Show()
+	} else {
+		err = browser.Hide()
+	}
+	if panelUsesGrok(panelCurrentURL) {
+		zoomed, _, _ := procPanelZoomed.Call(uintptr(hwnd))
+		dpi := panelDPI(hwnd)
+		browser.Eval(fmt.Sprintf("window.vegaPanelDpiScale=%g;window.dispatchEvent(new CustomEvent('vega-window-state',{detail:{isMaximized:%t,visible:%t}}))", float64(dpi)/96, zoomed != 0, visible))
+	}
+	return err
+}
+
+func panelHostWndProc(hwnd windows.Handle, message uint32, wparam, lparam uintptr) uintptr {
 	switch message {
-	case 0x0083: // WM_NCCALCSIZE：新版自己画标题栏，经典面板和设置仍走系统。
-		if panelUsesGrok(panelCurrentURL) {
+	case 0x0083: // WM_NCCALCSIZE
+		if panelUsesGrok(panelCurrentURL) && lparam != 0 {
+			if zoomed, _, _ := procPanelZoomed.Call(uintptr(hwnd)); zoomed == 0 {
+				// Leave actual non-client edges outside WebView2's child, as in a native resizable frame.
+				rect := *(**appuseWinRect)(unsafe.Pointer(&lparam)) // both forms start with a RECT
+				margin := butterflyScale(panelResizeMargin, panelDPI(hwnd))
+				rect.Left, rect.Top, rect.Right, rect.Bottom = rect.Left+margin, rect.Top+margin, rect.Right-margin, rect.Bottom-margin
+			}
 			return 0
 		}
-	case 0x0005: // WM_SIZE
-		if browser := panelHostBrowser(); browser != nil {
-			browser.Resize()
-			dpi, _, _ := procPanelDpi.Call(uintptr(hwnd))
-			if dpi < 96 {
-				dpi = 96
+	case 0x0084: // WM_NCHITTEST
+		if panelUsesGrok(panelCurrentURL) {
+			var rect appuseWinRect
+			zoomed, _, _ := procPanelZoomed.Call(uintptr(hwnd))
+			if ok, _, _ := procPanelRect.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&rect))); ok != 0 && zoomed == 0 {
+				x, y := int32(int16(lparam)), int32(int16(lparam>>16))
+				return panelResizeHit(rect, x, y, butterflyScale(panelResizeMargin, panelDPI(hwnd)))
 			}
-			browser.Eval(fmt.Sprintf("window.vegaPanelDpiScale=%g;window.dispatchEvent(new CustomEvent('vega-window-state',{detail:{isMaximized:%t}}))", float64(dpi)/96, wparam == 2))
+			return 1 // HTCLIENT
+		}
+	case 0x0003: // WM_MOVE
+		if browser := panelHostBrowser(); browser != nil {
+			_ = browser.NotifyParentWindowPositionChanged()
+		}
+	case 0x02E0: // WM_DPICHANGED
+		if lparam != 0 {
+			r := *(**appuseWinRect)(unsafe.Pointer(&lparam))
+			_, _, _ = procPanelPlace.Call(uintptr(hwnd), 0, uintptr(r.Left), uintptr(r.Top), uintptr(r.Right-r.Left), uintptr(r.Bottom-r.Top), 0x0004|0x0010)
+		}
+		return 0
+	case 0x0005: // WM_SIZE (including restore from the taskbar)
+		if browser := panelHostBrowser(); browser != nil {
+			_ = panelSyncWebView(hwnd, browser, wparam == 1) // SIZE_MINIMIZED
 		}
 		return 0
 	case 0x0014: // WM_ERASEBKGND：别用系统背景刷，省得闪白
 		return 1
 	case 0x0232: // WM_EXITSIZEMOVE：用户拖完/缩放完，把大小位置记下来
-		savePanelGeometry(butterflyPanelDataDir(), hwnd)
+		if zoomed, _, _ := procPanelZoomed.Call(uintptr(hwnd)); zoomed == 0 {
+			savePanelGeometry(butterflyPanelDataDir(), hwnd)
+		}
 		return 0
-	case 0x0024: // WM_GETMINMAXINFO：别把窗口缩成一条线（尺寸按 DPI 缩放）
-		if lparam != nil {
-			dpi := butterflyDPI()
-			lparam.MinTrackSize = appuseWinPoint{X: butterflyScale(butterflyPanelMinWidth, dpi), Y: butterflyScale(butterflyPanelMinHeight, dpi)}
+	case 0x0024: // WM_GETMINMAXINFO
+		if lparam != 0 {
+			info := *(**panelMinMaxInfo)(unsafe.Pointer(&lparam))
+			dpi := panelDPI(hwnd)
+			info.MinTrackSize = appuseWinPoint{X: butterflyScale(butterflyPanelMinWidth, dpi), Y: butterflyScale(butterflyPanelMinHeight, dpi)}
 			monitor, _, _ := procPanelWindowMonitor.Call(uintptr(hwnd), 2)
-			info := struct {
+			area := struct {
 				Size          uint32
 				Monitor, Work appuseWinRect
 				Flags         uint32
 			}{}
-			info.Size = uint32(unsafe.Sizeof(info))
-			if ok, _, _ := procPanelInfo.Call(monitor, uintptr(unsafe.Pointer(&info))); ok != 0 {
-				lparam.MaxPosition = appuseWinPoint{X: info.Work.Left - info.Monitor.Left, Y: info.Work.Top - info.Monitor.Top}
-				lparam.MaxSize = appuseWinPoint{X: info.Work.Right - info.Work.Left, Y: info.Work.Bottom - info.Work.Top}
+			area.Size = uint32(unsafe.Sizeof(area))
+			if panelUsesGrok(panelCurrentURL) {
+				if ok, _, _ := procPanelInfo.Call(monitor, uintptr(unsafe.Pointer(&area))); ok != 0 {
+					info.MaxPosition = appuseWinPoint{X: area.Work.Left - area.Monitor.Left, Y: area.Work.Top - area.Monitor.Top}
+					info.MaxSize = appuseWinPoint{X: area.Work.Right - area.Work.Left, Y: area.Work.Bottom - area.Work.Top}
+				}
 			}
 		}
 		return 0
@@ -163,32 +249,50 @@ func panelHostWndProc(hwnd windows.Handle, message uint32, wparam uintptr, lpara
 			return 0
 		}
 		panelNavigate(hwnd)
+		command := uintptr(5) // SW_SHOW (keep current geometry and maximized state)
 		if minimized, _, _ := procPanelIconic.Call(uintptr(hwnd)); minimized != 0 {
-			_, _, _ = procPanelShow.Call(uintptr(hwnd), 9) // SW_RESTORE
+			command = 9 // SW_RESTORE
 		}
-		_ = browser.NotifyParentWindowPositionChanged()
-		butterflyPanelPlace(hwnd)
+		_, _, _ = procPanelShow.Call(uintptr(hwnd), command)
+		_ = panelSyncWebView(hwnd, browser, false)
+		panelClaimForeground(hwnd)
 		return 0
-	case panelParkMsg:
-		panelPark(hwnd)
-		panelShowState.Lock()
-		panelShowState.at = time.Time{}
-		panelShowState.Unlock()
+	case 0x0010: // WM_CLOSE: keep the client and its chat alive in the tray.
+		_, _, _ = procPanelShow.Call(uintptr(hwnd), 0) // SW_HIDE
+		if browser := panelHostBrowser(); browser != nil {
+			_ = panelSyncWebView(hwnd, browser, false)
+		}
 		return 0
-	case 0x0010: // WM_CLOSE
+	case panelShutdownMsg:
 		_, _, _ = procChipDestroy.Call(uintptr(hwnd))
 		return 0
 	case 0x0002: // WM_DESTROY
 		_, _, _ = procPanelQuit.Call(0)
 		return 0
 	}
-	result, _, _ := procChipDefProc.Call(uintptr(hwnd), uintptr(message), wparam, uintptr(unsafe.Pointer(lparam)))
+	result, _, _ := procChipDefProc.Call(uintptr(hwnd), uintptr(message), wparam, lparam)
 	return result
 }
 
-// panelPark 把窗口收回屏幕外（不激活、不改尺寸），页面和 WebView2 都留着——下次点开是热的。
-func panelPark(hwnd windows.Handle) {
-	_, _, _ = procPanelPlace.Call(uintptr(hwnd), 0, ^uintptr(-panelParkX-1), ^uintptr(-panelParkY-1), 0, 0, 0x0010|0x0004|0x0001|0x0200) // NOACTIVATE|NOZORDER|NOSIZE|NOOWNERZORDER
+func panelCreateWindow(class chipWindowClass, x, y, width, height int32) (uintptr, error) {
+	const (
+		wsOverlapped = 0x00CF0000 // WS_OVERLAPPEDWINDOW
+		wsClip       = 0x02000000 // WS_CLIPCHILDREN
+		exApp        = 0x00040000 // WS_EX_APPWINDOW, a normal taskbar button
+	)
+	hwnd, _, last := procChipCreate.Call(
+		exApp,
+		uintptr(unsafe.Pointer(class.ClassName)),
+		uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelTitle))),
+		wsOverlapped|wsClip,
+		uintptr(uint32(x)), uintptr(uint32(y)),
+		uintptr(width), uintptr(height),
+		0, 0, uintptr(class.Instance), 0)
+	if hwnd != 0 {
+		// CreateWindowEx adds WS_CAPTION to an overlapped window; remove it for chat before showing it.
+		butterflyPanelChrome(windows.Handle(hwnd))
+	}
+	return hwnd, last
 }
 
 // panelHostStart 建窗 + 嵌 WebView2 + 载入页面，然后进入消息循环（阻塞到窗口销毁）。
@@ -196,34 +300,25 @@ func panelHostStart(url string) bool {
 	runtime.LockOSThread()
 	instance, _, _ := procButterflyModule.Call(0)
 	procedure := syscall.NewCallback(panelHostWndProc)
+	icon, _, _ := procPanelLoadIcon.Call(instance, 101) // vega-local.rc
+	if icon == 0 {
+		icon, _, _ = procPanelLoadIcon.Call(0, 32512) // IDI_APPLICATION
+	}
 	class := chipWindowClass{
 		Procedure: procedure,
 		Instance:  windows.Handle(instance),
 		ClassName: butterflyUTF16(butterflyPanelClass),
+		Icon:      windows.Handle(icon),
+		IconSmall: windows.Handle(icon),
 	}
 	class.Size = uint32(unsafe.Sizeof(class))
 	if atom, _, last := procChipRegister.Call(uintptr(unsafe.Pointer(&class))); atom == 0 {
 		panelLog("注册面板窗口类失败：%v", last)
 		return false
 	}
-	dpi := butterflyDPI()
-	width := butterflyScale(butterflyPanelWidth, dpi)
-	height := butterflyScale(butterflyPanelHeight, dpi)
-	parkX, parkY := int32(panelParkX), int32(panelParkY)
-	const (
-		wsOverlapped = 0x00CF0000 // WS_OVERLAPPEDWINDOW
-		wsClip       = 0x02000000 // WS_CLIPCHILDREN
-		wsVisible    = 0x10000000
-		exTool       = 0x00000080
-	)
-	hwnd, _, last := procChipCreate.Call(
-		exTool, // 不进任务栏：入口是任务栏蝴蝶和托盘
-		uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelClass))),
-		uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelTitle))),
-		wsOverlapped|wsClip|wsVisible,
-		uintptr(parkX)&0xFFFFFFFF, uintptr(parkY)&0xFFFFFFFF,
-		uintptr(width), uintptr(height),
-		0, 0, uintptr(instance), 0)
+	x, y, width, height := panelInitialFrame()
+	panelCurrentURL = url
+	hwnd, last := panelCreateWindow(class, x, y, width, height)
 	if hwnd == 0 {
 		panelLog("建面板窗口失败：%v", last)
 		return false
@@ -231,13 +326,8 @@ func panelHostStart(url string) bool {
 	panelHost.Lock()
 	panelHost.hwnd = windows.Handle(hwnd)
 	panelHost.Unlock()
-	panelCurrentURL = url
-	// 只有新版前端使用内容内标题栏。
-	butterflyPanelChrome(windows.Handle(hwnd))
-
-	// 停在工作区外的窗口会被系统判成“被遮挡”，WebView2 会停画；关掉这类节流。
-	_ = os.Setenv("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-		"--disable-features=CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows --disable-renderer-backgrounding")
+	_, _, _ = procPanelShow.Call(hwnd, 5) // SW_SHOW: the parent must be visible before WebView2 embeds
+	dpi := panelDPI(windows.Handle(hwnd))
 	chromium := edge.NewChromium()
 	chromium.DataPath = butterflyPanelDataDir() + `\webview`
 	chromium.MessageCallback = panelWindowMessage
@@ -256,22 +346,20 @@ func panelHostStart(url string) bool {
 		}
 	}
 	chromium.Init(fmt.Sprintf("window.vegaPanelDpiScale=%g", float64(dpi)/96))
-	chromium.Resize()
-	if err := chromium.Show(); err != nil {
+	if err := panelSyncWebView(windows.Handle(hwnd), chromium, false); err != nil {
 		panelLog("显示 WebView2 失败：%v", err)
 		_, _, _ = procChipDestroy.Call(hwnd)
 		return false
 	}
 	chromium.Navigate(url)
-	panelLog("面板预热完成")
 	panelHost.Lock()
 	pending := panelHost.pending
 	panelHost.pending = false
 	panelHost.Unlock()
 	if pending {
 		panelNavigate(windows.Handle(hwnd))
-		butterflyPanelPlace(windows.Handle(hwnd))
 	}
+	panelClaimForeground(windows.Handle(hwnd))
 	var message chipMsg
 	for {
 		result, _, _ := procChipGetMsg.Call(uintptr(unsafe.Pointer(&message)), 0, 0, 0)

@@ -26,8 +26,42 @@
   };
   let windowState = { isFullscreen: false, isMaximized: false };
 
+  // Grok wraps an explicit resend in a new nonce; it is still the same Vega message.
+  const messageId = (nonce) => {
+    if (typeof nonce !== "string") return;
+    if (/^[\w-]{16,80}$/.test(nonce)) return nonce;
+    const retry = /^sand-resend-v1:(\d{2}):([\w-]{16,80}):[\w-]{16,80}$/.exec(nonce);
+    if (retry && Number(retry[1]) === retry[2].length) return retry[2];
+  };
   let currentSelectedAgentId = null;
-
+  const retiredJournalPrefix = "vega:previous-send-journal:";
+  const journalKey = /^sand_client_p_sand\.client\.slice\.account\.[^.]+\.send-journal$/;
+  const records = (key) => {
+    try {
+      const rows = JSON.parse(localStorage.getItem(key))?.value?.records;
+      return Array.isArray(rows) ? rows : [];
+    } catch { return []; }
+  };
+  let recoveredSends = [], recoveredPanel;
+  // A reopened renderer must not turn old, possibly delivered sends back into chat bubbles.
+  // Keep their text outside the transcript; the server history is never edited.
+  for (const key of Object.keys(localStorage).filter((key) => journalKey.test(key))) {
+    const previous = records(retiredJournalPrefix + key), pending = records(key);
+    if (!pending.length) continue;
+    const merged = new Map([...previous, ...pending].filter((row) => row?.nonce).map((row) => [messageId(row.nonce) || row.nonce, row]));
+    try {
+      localStorage.setItem(retiredJournalPrefix + key, JSON.stringify({ value: { records: [...merged.values()] } }));
+      localStorage.removeItem(key);
+    } catch { /* If backup failed, keep the original journal. */ }
+  }
+  function updateRecoveredSends() {
+    if (!recoveredPanel) return;
+    const rows = recoveredSends.filter((row) => row.input?.agentId === currentSelectedAgentId && typeof row.input.prompt === "string");
+    recoveredPanel.hidden = !rows.length;
+    if (!rows.length) recoveredPanel.open = false;
+    recoveredPanel.firstElementChild.textContent = `待核对的旧发送（${rows.length}）`;
+    recoveredPanel.lastElementChild.textContent = rows.map((row) => row.input.prompt).join("\n\n——\n\n");
+  }
   // 1. 本地存储代理 (模拟 Electron 主进程的 ClientPersistence)
   const persistenceKey = (k) => `sand_client_p_${k}`;
 
@@ -82,13 +116,13 @@
         method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal,
       });
     } catch (error) {
-      if (endpoint === "send") throw new Error("连接中断，消息是否发送成功未知；请先查看对话，不要重复发送");
+      if (endpoint === "send") throw Object.assign(new Error("连接中断，消息是否发送成功未知；请先查看对话，不要重复发送"), { deliveryUnknown: true });
       throw error;
     }
     const result = await response.json().catch(() => null);
     if (endpoint === "send" && (response.status >= 500 || (response.ok && result?.ok !== true)))
-      throw new Error("消息是否发送成功未知；请先查看对话，不要重复发送");
-    if (!response.ok || !result) throw new Error(result?.error || result?.statusMessage || `Vega 请求失败 (${response.status})`);
+      throw Object.assign(new Error("消息是否发送成功未知；请先查看对话，不要重复发送"), { deliveryUnknown: true });
+    if (!response.ok || !result) throw new Error(result?.statusMessage || result?.error || `Vega 请求失败 (${response.status})`);
     return result;
   }
   function unavailable(method) {
@@ -103,90 +137,237 @@
     avatarColor: nativeColors[employee.avatar?.split(":")[2]] || "blue",
     harness: "temporal", origin: "user", viewerIsOwner: employee.mine !== false,
     createdAt: employee.lastAt || 0, updatedAt: employee.lastAt || 0, lastActivityAt: employee.lastAt || 0,
+    lastViewedAt: employee.lastViewedAt ?? (employee.unread ? 0 : employee.lastAt || 0),
     lastMessagePreview: employee.lastText || "", lastEntry: employee.lastText ? { kind: "text", text: employee.lastText } : null,
     lastMessageId: employee.lastMessageId || null,
     hasUnread: !!employee.unread, isUnread: !!employee.unread, unreadCount: employee.unread || 0,
     isGroup: false, memberIds: [], isRunning: !!employee.running, isRunningTurn: !!employee.running,
     isComposingMessage: !!employee.running, attentionCount: employee.attention || 0, threadId: employee.thread,
   });
-  const entryRows = (messages) => messages.filter((message) =>
+  const textOnlyAccess = { state: "granted", speechUiHidden: true };
+  let groupIds;
+  const rosterRows = ({ employees = [], groups = [] }) => {
+    groupIds = groups.map((group) => group.thread);
+    return [
+      ...employees.map(agentRow),
+      ...groups.map((group) => ({
+        ...agentRow({ ...group, id: group.thread, avatar: "bot:hexagon:teal" }),
+        isGroup: true, title: "群聊",
+      })),
+    ];
+  };
+  const sidebarSections = () => groupIds.length ? [
+    { id: "__agents__", name: "Bot", agentIds: [] },
+    { id: "vega-groups", name: "群聊", agentIds: groupIds },
+  ] : [];
+  const botPins = (ids) => ids.filter((id) => !id.startsWith("group:"));
+  const entryId = (seq) => `entry-${seq}`;
+  let account;
+  const identity = () => account ??= api("metadata").then((user) => {
+    const slot = encodeURIComponent(user.id).replaceAll(".", "%2E");
+    recoveredSends = records(retiredJournalPrefix + persistenceKey(`sand.client.slice.account.${slot}.send-journal`));
+    updateRecoveredSends();
+    return user;
+  }).catch((error) => { account = undefined; throw error; });
+
+  // The imported renderer must never boot into its own sign-in screen.
+  document.addEventListener("DOMContentLoaded", () => {
+    const welcome = document.getElementById("vega-welcome");
+    if (!welcome) return;
+    const actions = document.getElementById("vega-welcome-actions");
+    const status = document.getElementById("vega-welcome-status");
+    const authorize = document.getElementById("vega-authorize");
+    welcome.dataset.theme = desktop.boot.theme.resolved;
+    let checking = false;
+    async function check() {
+      if (checking) return;
+      checking = true;
+      try {
+        const user = await identity();
+        if (!user?.id) { account = undefined; throw new Error("缺少本站账号"); }
+      } catch {
+        status.textContent = "请用本站账号登录，并在浏览器中确认这台电脑的设备授权。";
+        actions.hidden = false;
+        checking = false;
+        return;
+      }
+      window.removeEventListener("focus", check);
+      actions.hidden = true;
+      status.textContent = "正在打开对话…";
+      try {
+        await import(document.getElementById("root").dataset.vegaEntry);
+        welcome.remove();
+      } catch {
+        status.textContent = "无法打开对话界面，请退出牵牛星后重新启动。";
+      }
+    }
+    authorize.addEventListener("click", async () => {
+      authorize.disabled = true;
+      try {
+        await api("authorize");
+        status.textContent = "请在系统浏览器完成授权，再回到牵牛星。";
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        authorize.disabled = false;
+      }
+    });
+    document.getElementById("vega-recheck").addEventListener("click", check);
+    window.addEventListener("focus", check);
+    void check();
+  }, { once: true });
+
+  const entryRows = (messages, groupViewer) => messages.filter((message) =>
     Number.isSafeInteger(message.seq) && ["user", "assistant"].includes(message.role) &&
     (!message.runtime || message.runtime === "steer" && !!message.clientMessageId) &&
     (message.displayText ?? message.text)?.trim()
-  ).map((message) => ({
-    id: `entry-${message.seq}`, seq: message.seq, timestampMs: message.at || 0,
-    ...(message.role === "assistant"
-      ? { kind: "send-message", message: { type: "text", content: message.displayText ?? message.text }, streaming: false }
-      : { kind: "message", role: "user", content: message.displayText ?? message.text, isStreaming: false }),
-    tasks: message.tasks || [], ...(message.clientMessageId ? { clientNonce: message.clientMessageId } : {}),
-  }));
+  ).map((message) => {
+    const mine = groupViewer === undefined ? message.role === "user" :
+      message.author?.kind === "user" && message.author.id === groupViewer;
+    const label = groupViewer !== undefined && !mine ? (message.author?.name || (message.notice ? "系统" : "群成员")) : "";
+    const text = message.displayText ?? message.text;
+    const content = label ? `${label}：\n${text}` : text;
+    return {
+      id: entryId(message.seq), seq: message.seq, timestampMs: message.at || 0,
+      ...(mine
+        ? { kind: "message", role: "user", content, isStreaming: false }
+        : { kind: "send-message", message: { type: "text", content }, streaming: false }),
+      tasks: message.tasks || [], ...(mine && message.clientMessageId ? { clientNonce: message.clientMessageId } : {}),
+    };
+  });
   const threadOf = (id) => {
-    if (typeof id !== "string" || !id) throw new Error("请选择 Vega Bot");
-    return `employee:${id}`;
+    if (typeof id !== "string" || !id) throw new Error("请选择对话");
+    return id.startsWith("group:") ? id : `employee:${id}`;
   };
   // shortcut: master exposes the last 200 messages and an append cursor, not older-page or token-stream APIs.
   const historyLimit = 200;
   const recent = (thread, signal) => api("messages", { thread, limit: historyLimit }, signal);
   const sends = new Map();
-  let pollController, pollTimer, rosterTimer;
+  function noteConfirmed(thread, entries) {
+    if (!recoveredSends.length) return;
+    const ids = new Set(entries.map((entry) => entry.clientNonce).filter(Boolean));
+    const remaining = recoveredSends.filter((row) => !(row.input?.agentId && threadOf(row.input.agentId) === thread && ids.has(messageId(row.nonce))));
+    if (remaining.length !== recoveredSends.length) {
+      recoveredSends = remaining;
+      updateRecoveredSends();
+    }
+  }
+  function dedupeEntries(entries) {
+    const seen = new Set();
+    return entries.filter(({ id, clientNonce }) => {
+      const key = clientNonce ? `own:${clientNonce}` : id;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+  const findReceipt = async (thread, nonce) => {
+    const data = await api("messages", { thread, receiptFor: nonce, limit: historyLimit });
+    if (data.receiptFor === nonce) return data.receipt?.seq;
+    // Older backends ignore receiptFor. Only an exact own-message ID in history is proof.
+    const { id } = await identity();
+    return data.messages?.find((row) => row.role === "user" && row.actorId === id && row.clientMessageId === nonce)?.seq;
+  };
+  let pollController, pollTimer, resumePoll, rosterTimer, rosterRequest = 0;
+  let hostVisible = true;
+  const visible = () => hostVisible && !document.hidden;
+  let wasVisible = visible();
+  const foreground = () => visible() && document.hasFocus?.() === true;
   let transcriptEpoch = 0, transcriptSequence = 1;
   const transcriptStamp = (id) => ({ replicaKey: `transcript:${id}`, epoch: `vega-${transcriptEpoch}`, sequence: transcriptSequence });
   async function refreshRoster(signal) {
-    const agents = (await api("threads", {}, signal)).employees.map(agentRow);
-    if (signal?.aborted) return;
+    const request = ++rosterRequest;
+    const data = await api("threads", {}, signal);
+    if (!visible() || signal?.aborted || request !== rosterRequest) return;
+    const agents = rosterRows(data);
     postEvent("agents", { agents, activeAgentId: currentSelectedAgentId });
     postEvent("server-roster-changed", { kind: "resync" });
   }
+  const refreshVisibleRoster = () => {
+    if (rosterTimer !== undefined && visible()) void refreshRoster().catch((error) => console.error("[Vega] 会话列表刷新失败", error));
+  };
+  function visibilityChanged() {
+    const shown = visible();
+    if (shown !== wasVisible) {
+      wasVisible = shown;
+      emit("window-visibility", { visible: shown });
+    }
+    if (!shown) {
+      clearTimeout(pollTimer);
+      return;
+    }
+    refreshVisibleRoster();
+    resumePoll?.();
+  }
   function stopFollowing() {
     pollController?.abort();
-    pollController = undefined;
+    pollController = resumePoll = undefined;
     currentSelectedAgentId = null;
+    updateRecoveredSends();
     clearTimeout(pollTimer);
-    clearInterval(rosterTimer);
   }
   function follow(id) {
     if (id === currentSelectedAgentId && pollController) return;
     stopFollowing();
     if (!id) return;
     currentSelectedAgentId = id;
+    updateRecoveredSends();
     transcriptEpoch++;
     transcriptSequence = 1;
     const thread = threadOf(id);
     const { signal } = pollController = new AbortController();
-    let entries = [], lastSeq, running;
+    let entries = [], lastSeq, running, inFlight = false;
+    const schedule = (delay) => {
+      if (!visible() || inFlight || signal.aborted) return;
+      clearTimeout(pollTimer);
+      pollTimer = setTimeout(poll, delay);
+    };
     const poll = async () => {
+      if (!visible() || signal.aborted) return;
+      inFlight = true;
       try {
-        if (document.hidden) return;
         let page = lastSeq === undefined ? await recent(thread, signal) : await api("messages", { thread, after: lastSeq }, signal);
+        if (!visible() || signal.aborted) return;
         const reset = lastSeq !== undefined && page.lastSeq < lastSeq;
         if (reset) page = await recent(thread, signal);
-        if (signal.aborted) return;
+        if (!visible() || signal.aborted) return;
         if (lastSeq === undefined || reset || page.messages.length) {
-          entries = [...(reset ? [] : entries), ...entryRows(page.messages)].slice(-historyLimit);
-          lastSeq = page.lastSeq ?? page.messages.at(-1)?.seq ?? 0;
+          const viewer = thread.startsWith("group:") ? (await identity()).id : undefined;
+          if (!visible() || signal.aborted) return;
+          const received = entryRows(page.messages, viewer);
+          noteConfirmed(thread, received);
+          entries = dedupeEntries([...(reset ? [] : entries), ...received]).slice(-historyLimit);
+          // Advance only through rows returned by this response, not a concurrently queried MAX(seq).
+          lastSeq = page.messages.at(-1)?.seq ?? 0;
           transcriptSequence++;
           postEvent("transcript", { type: "snapshot", activeAgentId: id, ordered: transcriptStamp(id),
             coverage: { kind: "transcript-live-range", fromSequence: reset ? 1 : transcriptSequence, throughSequence: transcriptSequence }, entries });
-          if (document.hasFocus?.()) await api("read", { thread }, signal);
         }
-        if (running !== page.running && !signal.aborted) {
+        const needsRead = Number.isSafeInteger(page.readSeq) && lastSeq > page.readSeq && foreground();
+        if (needsRead) await api("read", { thread, through: lastSeq }, signal);
+        if ((needsRead || running !== page.running) && !signal.aborted) {
           await refreshRoster(signal);
           running = page.running;
         }
       } catch (error) {
         if (!signal.aborted) console.error("[Vega] 对话刷新失败（未重发消息）", error);
       } finally {
-        if (!signal.aborted) pollTimer = setTimeout(poll, 1500);
+        inFlight = false;
+        schedule(1500);
       }
     };
-    pollTimer = setTimeout(poll, 1500);
-    rosterTimer = setInterval(() => {
-      if (!document.hidden) void refreshRoster(signal).catch((error) => {
-        if (!signal.aborted) console.error("[Vega] 会话列表刷新失败", error);
-      });
-    }, 15000);
+    resumePoll = () => schedule(0);
+    schedule(1500);
   }
-  window.addEventListener?.("pagehide", stopFollowing);
+  function stopBackground() {
+    stopFollowing();
+    clearInterval(rosterTimer);
+    rosterTimer = undefined;
+    rosterRequest++;
+  }
+  window.addEventListener?.("focus", visibilityChanged);
+  document.addEventListener("visibilitychange", visibilityChanged);
+  window.addEventListener?.("pagehide", stopBackground);
 
   // Keep protocol adaptation here; release bundles and styles remain unchanged.
   async function dispatchCoordinatorRequest(method, args = {}) {
@@ -196,10 +377,11 @@
     if (method === "isEgressTunnelAvailable") return false;
     if (method === "getHostStatus") return { hostVersion: null, latestHostVersion: null, hostUpdateAvailable: false, isBusy: false, capabilities: [] };
     if (["restoreTemporalAgentRouting", "clearLocalToolPermissions"].includes(method)) return;
-    if (method === "noteTranscriptOpened") return api("read", { thread: threadOf(args.id) });
+    // Only the foreground polling path marks the exact received history as read.
+    if (method === "noteTranscriptOpened") return;
     if (method === "resolveAgentCreation") return { kind: "temporal", scope: "vega" };
     if (method === "noteMountedAgent") { follow(args.id); return; }
-    if (method === "countAgents") return (await api("threads")).employees.length;
+    if (method === "countAgents") return rosterRows(await api("threads")).length;
     if (["getMainAgent", "ensureDefaultMainAgent"].includes(method)) {
       const agents = (await api("threads")).employees;
       const stored = localStorage.getItem("vega-main-agent");
@@ -213,18 +395,22 @@
       postEvent("server-roster-changed", { kind: "settings", fields: ["mainAgent"], explicit: true });
       return { agentId: id };
     }
-    if (method === "getServerAgentRoster" || method === "listTeamAgents") return { agents: (await api("threads")).employees.map(agentRow) };
+    if (method === "getServerAgentRoster" || method === "listTeamAgents") {
+      rosterTimer ??= setInterval(refreshVisibleRoster, 5000);
+      return { agents: rosterRows(await api("threads")) };
+    }
     if (method === "openAgentTail" || method === "getAgentTranscriptTail") {
       if (args.sessionId || args.taskId) throw unavailable("分支或任务线程历史");
       const id = args.id || args.agentId;
       if (method === "openAgentTail") follow(id);
       const thread = threadOf(id), ordered = id === currentSelectedAgentId ? transcriptStamp(id) : null;
       const page = await recent(thread);
-      const available = entryRows(page.messages).filter((entry) => args.beforeSeq == null || entry.seq < args.beforeSeq);
+      const viewer = thread.startsWith("group:") ? (await identity()).id : undefined;
+      const received = dedupeEntries(entryRows(page.messages, viewer));
+      noteConfirmed(thread, received);
+      const available = received.filter((entry) => args.beforeSeq == null || entry.seq < args.beforeSeq);
       const limit = Math.max(1, Math.min(historyLimit, Number(args.limit) || 100));
       const entries = available.slice(-limit);
-      if (method === "openAgentTail" && id === currentSelectedAgentId && ordered?.epoch === transcriptStamp(id).epoch)
-        await api("read", { thread });
       return { entries, nextBeforeSeq: available.length > limit ? entries[0].seq : null, ...(ordered ? { ordered } : {}) };
     }
     if (method === "sendPrompt") {
@@ -232,24 +418,47 @@
         throw unavailable("带附件、分支或任务线程的发送");
       const thread = threadOf(args.agentId), text = String(args.prompt || args.text || "").trim();
       if (!text) throw new Error("请输入消息");
-      const nonce = args.clientNonce;
-      if (nonce && sends.has(nonce)) {
-        const previous = sends.get(nonce);
-        if (previous.thread !== thread || previous.text !== text) throw new Error("消息编号已使用");
+      const nonce = messageId(args.clientNonce);
+      if (!nonce) throw new Error("消息编号无效，请重新打开对话");
+      const key = JSON.stringify([thread, nonce]);
+      if (sends.has(key)) {
+        const previous = sends.get(key);
+        if (previous.text !== text) throw new Error("消息编号已使用");
         return previous.result;
       }
-      const result = api("send", { thread, text }).then(() => ({ accepted: true }));
-      if (nonce) {
-        if (sends.size >= 32) sends.delete(sends.keys().next().value);
-        sends.set(nonce, { thread, text, result });
-      }
+      const result = (async () => {
+        if (nonce !== args.clientNonce) {
+          const seq = await findReceipt(thread, nonce).catch(() => undefined);
+          if (seq) return { accepted: true };
+          throw new Error("无法确认原消息是否送达，请核对聊天记录；未再次发送");
+        }
+        try { await api("send", { thread, text, clientMessageId: nonce }); }
+        catch (error) {
+          // A dropped HTTP reply is not a failed send if this exact message was already stored.
+          if (!error.deliveryUnknown || !await findReceipt(thread, nonce).catch(() => undefined)) throw error;
+        }
+        return { accepted: true };
+      })();
+      if (sends.size >= 32) sends.delete(sends.keys().next().value);
+      sends.set(key, { text, result });
       return result;
     }
-    if (method === "promptAcceptanceStatus") return { outcome: "unknown-durability" };
+    if (method === "promptAcceptanceStatus") {
+      const nonce = messageId(args.clientNonce);
+      if (!args.agentId || !nonce) return { outcome: "unknown-durability" };
+      const seq = await findReceipt(threadOf(args.agentId), nonce);
+      return seq ? { outcome: "found", record: { status: "accepted", echoEntryId: entryId(seq) } } : { outcome: "unknown-durability" };
+    }
     if (method === "createAgent" || method === "updateAgent") throw unavailable("Bot 创建和编辑，请到 Vega 网页操作");
     if (method === "setAgentUnread") {
       if (args.isUnread) throw unavailable("标为未读");
-      return api("read", { thread: threadOf(args.id) });
+      const thread = threadOf(args.id);
+      if (foreground()) {
+        const { messages } = await recent(thread);
+        if (foreground() && messages.length) await api("read", { thread, through: messages.at(-1).seq });
+        refreshVisibleRoster();
+      }
+      return;
     }
     if (method === "interruptAgentRun") throw unavailable("停止当前回复，请到 Vega 网页操作");
     if (method === "seedConversationName") return { outcome: "unchanged" };
@@ -278,6 +487,7 @@
           sand_chat_prose_15px: true,
           grok_bot_page_stage_chat: true,
           grok_bot_all_bots_color_theming: true,
+          grok_bot_group_chats: true,
           grok_bot_full_view_stage: false,
           grok_bot_stage_inset_modal: false,
           grok_bot_files_stage: true,
@@ -293,7 +503,6 @@
       isDev: false,
       isWaylandClient: false,
       usesProductionBackend: false,
-      devVoiceHarness: "package",
     },
     local: {
       getZoomFactor: zoomFactor,
@@ -376,35 +585,39 @@
             if (prop === "getEgressTunnelStatus") return "inactive";
             if (prop === "getEgressTunnelEnabled" || prop === "getEgressTunnelForcedByAdmin" || prop === "getWebauthnProxyEnabled") return false;
             if (prop === "getWindowState") return windowState;
-            if (prop === "isWindowShown") return true;
+            if (prop === "isWindowShown") return visible();
             if (prop === "getCursorAuthStatus") {
-              const user = await api("metadata");
+              const user = await identity();
               return { kind: "logged-in", authId: user.id, displayName: user.name, profileReady: true };
             }
             if (prop === "getCursorLoginFlight") return { kind: "idle" };
             if (prop === "getOnboardingSeen") return true;
-            if (prop === "getSandAccess" || prop === "getSandAccessFresh") return { state: "granted" };
+            if (prop === "getSandAccess" || prop === "getSandAccessFresh") return textOnlyAccess;
             if (prop === "getGrokBotTermsRecord") return { seenAtMs: 0 };
             if (prop === "getCursorSelectedTeam") return { selectedTeamId: null, fallback: null };
-            if (prop === "getHostSidebarSections") return [];
+            if (prop === "getHostSidebarSections") {
+              if (!groupIds) rosterRows(await api("threads"));
+              return sidebarSections();
+            }
             if (prop === "listSecrets") return { keys: [] };
             if (prop === "getBoxHostPhase") return "settled";
             if (prop === "getLocalPitmanState") return { isRecorderReady: false, session: null };
             if (prop === "getCursorTrainingSetting") return "disallowed";
             if (prop === "getGrokBotUserProfile") {
-              const user = await api("metadata");
+              const user = await identity();
               return { id: user.id, username: user.name, name: user.name, avatarUrl: null };
             }
             if (prop === "updateGrokBotAgent") throw unavailable("Bot 编辑，请到 Vega 网页操作");
             if (prop === "getHostPinnedAgents" || prop === "getServerPinnedAgents") {
               const stored = localStorage.getItem("vega-pinned-agents");
-              if (stored !== null) return JSON.parse(stored);
+              if (stored !== null) return botPins(JSON.parse(stored));
               const roster = await dispatchCoordinatorRequest("getServerAgentRoster", {});
-              return roster.agents.length ? [roster.agents[0].id] : [];
+              const firstBot = roster.agents.find((row) => !row.isGroup);
+              return firstBot ? [firstBot.id] : [];
             }
             if (prop === "setHostPinnedAgents") {
               if (!Array.isArray(args?.pinnedAgentIds) || args.pinnedAgentIds.some((id) => typeof id !== "string" || !id.trim() || id.length > 64)) throw new Error("Invalid pinned agents");
-              const ids = [...new Set(args.pinnedAgentIds)];
+              const ids = [...new Set(botPins(args.pinnedAgentIds))];
               localStorage.setItem("vega-pinned-agents", JSON.stringify(ids));
               return ids;
             }
@@ -449,7 +662,7 @@
       }, 0);
       return {
         request: () => {},
-        release: stopFollowing,
+        release: stopBackground,
       };
     },
   };
@@ -479,10 +692,35 @@
       button.setAttribute("aria-label", detail.isMaximized ? "还原窗口" : "最大化");
       button.dataset.maximized = String(detail.isMaximized);
     }
+    if (typeof detail.visible === "boolean" && hostVisible !== detail.visible) {
+      hostVisible = detail.visible;
+      visibilityChanged();
+    }
   });
+
+  document.addEventListener("DOMContentLoaded", () => {
+    const style = document.createElement("style");
+    // Grok does not expose a reaction switch. These are the localized values of its reaction label (9OEgyT).
+    const labels = "Add reaction|Adicionar reação|Aggiungi reazione|Agregar reacción|Ajouter une réaction|Dodaj odziv|Dodaj reakcję|Legg til reaksjon|Lisää reaktio|Lägg till reaktion|Ongeza itikio|Přidat reakci|Reactie toevoegen|Reakció hozzáadása|Reaktion hinzufügen|Tambahkan reaksi|Tepki ekle|Thêm phản ứng|Tilføj reaktion|Voeg reaksie by|Ƙara martani|Προσθήκη αντίδρασης|Добавить реакцию|Додати реакцію|הוספת תגובה|إضافة تفاعل|ردعمل شامل کریں|प्रतिक्रिया जोड़ें|प्रतिक्रिया जोडा|রিঅ্যাকশন যোগ করুন|எதிர்வினையைச் சேர்|రియాక్షన్‌ను జోడించండి|เพิ่มรีแอคชัน|リアクションを追加|新增表情回應|添加回应|반응 추가";
+    const reactions = labels.split("|").map(label => `[aria-label=${JSON.stringify(label)}]`).join(",");
+    // Keep the server-derived sidebar badge and read boundary, not Grok's separate scroll-count pill.
+    style.textContent = `button.sand-message-hover-actions__button:is(${reactions}), .sand-new-messages-pill { display:none !important }
+      #vega-recovered-sends { position:fixed; right:16px; bottom:68px; z-index:100; max-width:min(340px,80vw); padding:4px 10px; border:1px solid var(--sand-border-secondary, #8886); border-radius:8px; background:var(--sand-bg-chrome, Canvas); color:var(--sand-fg-primary, CanvasText); font:12px system-ui; }
+      #vega-recovered-sends summary { cursor:pointer; }
+      #vega-recovered-sends pre { max-height:24vh; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font:inherit; }`;
+    document.head.append(style);
+    recoveredPanel = document.createElement("details");
+    recoveredPanel.id = "vega-recovered-sends";
+    const hint = document.createElement("p");
+    hint.textContent = "这些是本机上次留下的文字，不能确认是否送达。请先核对聊天记录，不会自动重发。";
+    recoveredPanel.append(document.createElement("summary"), hint, document.createElement("pre"));
+    document.body.append(recoveredPanel);
+    updateRecoveredSends();
+  }, { once: true });
 
   // WebView2 has no Electron titlebar overlay or draggable-region handling.
   if (window.chrome?.webview) {
+    nativeWindow("chat-ready");
     nativeWindow(`theme-${desktop.boot.theme.resolved}`);
     document.addEventListener("DOMContentLoaded", () => {
       const style = document.createElement("style");
@@ -521,23 +759,13 @@
     }, { once: true });
     document.addEventListener("mousedown", (event) => {
       if (event.button !== 0) return;
-      if (!windowState.isMaximized) {
-        const edge = 6 / zoomFactor();
-        const horizontal = event.clientX < edge ? "left" : event.clientX >= window.innerWidth - edge ? "right" : "";
-        const vertical = event.clientY < edge ? "top" : event.clientY >= window.innerHeight - edge ? "bottom" : "";
-        if (vertical || horizontal) {
-          event.preventDefault();
-          nativeWindow(`resize-${vertical}${horizontal}`);
-          return;
-        }
-      }
       if (event.target.closest("button,input,textarea,select,a,[contenteditable=true]")) return;
       for (let element = event.target; element; element = element.parentElement) {
         const css = getComputedStyle(element);
         const appRegion = css.getPropertyValue("app-region") || css.getPropertyValue("-webkit-app-region");
         // WebView2 reports "none" for Electron drag regions, so resolve the original classes too.
         const region = ["drag", "no-drag"].includes(appRegion) ? appRegion :
-          element.matches(".sand-avu8j0,.sand-1wfn6di,.ui-avu8j0") ? "drag" :
+          element.matches("#vega-welcome-drag,.sand-avu8j0,.sand-1wfn6di,.ui-avu8j0") ? "drag" :
             element.matches(".sand-lvsv26,.sand-482pwi,.ui-lvsv26") ? "no-drag" :
               element.matches(".sand-1a4o4su,.sand-17v0fby") ? css.getPropertyValue("--sand-app-region").trim() : "";
         if (!region) continue;

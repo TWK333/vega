@@ -131,7 +131,10 @@ export class Groups {
   }
   async list(viewer: Viewer) {
     const mine = (await this.all()).filter((g) => g.users.includes(viewer.id));
-    return (await Promise.all(mine.map(async (g) => ({ ...await this.view(g, viewer), unread: await this.store.unread(viewer.id, g.session) })))).sort((a, b) => b.lastAt - a.lastAt);
+    return (await Promise.all(mine.map(async (g) => {
+      const view = await this.view(g, viewer), unread = await this.store.unread(viewer.id, g.session);
+      return { ...view, unread, lastViewedAt: await this.store.lastViewedAt(viewer.id, g.session, view.lastAt, unread) };
+    }))).sort((a, b) => b.lastAt - a.lastAt);
   }
   /** Users who can be invited: every enabled account. */
   async directory() {
@@ -381,10 +384,6 @@ export class Groups {
     const text = typeof a.text === "string" ? a.text : "";
     assert((text.trim() || a.images?.length || a.files?.length) && text.length <= 20000, "消息需要 1–20000 字，或至少一个附件");
     const clientMessageId = typeof a.clientMessageId === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(a.clientMessageId) ? a.clientMessageId : undefined;
-    if (clientMessageId) {
-      const previous = await this.store.clientMessage(group.session, viewer.id, clientMessageId);
-      if (previous) return { seq: previous.seq, duplicate: true };
-    }
     const topic = a.topicTaskId === undefined ? undefined : await this.topicTask(group, a.topicTaskId);
     check(a.topicTaskId === undefined || topic, 404, "群任务话题不存在");
     const name = (await this.userRows([viewer.id])).get(viewer.id)?.name || "用户";
@@ -392,13 +391,25 @@ export class Groups {
     const command = newCommand(text);
     check(!topic || !command, 400, "请在主聊天使用 /new");
     if (command) {
+      const previous = clientMessageId ? await this.store.clientMessage(group.session, viewer.id, clientMessageId) : undefined;
+      if (previous) return { seq: previous.seq, duplicate: true };
       const alone = !command.rest && !a.images?.length && !a.files?.length;
       const divider = await this.newSessions(group, alone ? { actorId: viewer.id, clientMessageId } : {});
       if (alone) return { seq: divider.seq };
     }
-    const saved = await this.append(group, { role: "user", text: command ? command.rest : text, images: a.images?.length ? a.images : undefined, files: a.files?.length ? a.files : undefined, quote: a.quote, topicTaskId: topic?.task.id, actorId: viewer.id, clientMessageId, author: { kind: "user", id: viewer.id, name }, hop: 0 });
-    this.store.afterCommit(() => void this.dispatch(group.id, saved).catch((error) => this.report(group.id, error)));
-    return { seq: saved.seq };
+    const canDeduplicate = clientMessageId && !command;
+    const save = async () => {
+      if (canDeduplicate) {
+        // Membership and duplicate lookup must both hold at the point of append.
+        await this.mine(viewer, groupId);
+        const previous = await this.store.clientMessage(group.session, viewer.id, clientMessageId);
+        if (previous) return { seq: previous.seq, duplicate: true };
+      }
+      const saved = await this.append(group, { role: "user", text: command ? command.rest : text, images: a.images?.length ? a.images : undefined, files: a.files?.length ? a.files : undefined, quote: a.quote, topicTaskId: topic?.task.id, actorId: viewer.id, clientMessageId, author: { kind: "user", id: viewer.id, name }, hop: 0 });
+      this.store.afterCommit(() => void this.dispatch(group.id, saved).catch((error) => this.report(group.id, error)));
+      return { seq: saved.seq };
+    };
+    return canDeduplicate ? this.store.transaction(save) : save();
   }
   /** /new: a divider; members' and the 旁白's sessions here are deleted (recreated on next use) and see only what follows. */
   private async newSessions(group: Group, mark: Partial<Message>) {

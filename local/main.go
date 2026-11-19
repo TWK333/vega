@@ -40,6 +40,7 @@ type Agent struct {
 	editing         bool
 	context         context.Context
 	lastSite        string
+	deviceAuthURL   string // Pending authorization in the system browser; never sent to the renderer.
 	runtime         *RuntimeView
 	lastExtension   string
 }
@@ -108,7 +109,7 @@ func main() {
 				url = os.Args[2]
 			}
 			if !butterflyPanelRun(url) {
-				fmt.Fprintln(os.Stderr, "vega-local: WebView2 不可用，无法打开蝴蝶面板")
+				fmt.Fprintln(os.Stderr, "vega-local: WebView2 不可用，无法打开牵牛星窗口")
 			}
 			return
 		}
@@ -157,32 +158,21 @@ func main() {
 	// 默认用客户端自己的无头 Chrome；设置里选「我自己的 Chrome」就不拉起。
 	a.applyBrowserMode()
 	go headlessReclaim(ctx)
-	showPanel := func(url, fallback string) {
+	showPanel := func(url string) {
 		butterflyPanelTarget(a.dataDir, url)
 		if !butterflyPanelOpen(url) {
-			openBrowser(fallback)
+			openBrowser(url)
 		}
 	}
 	configure := func() {
-		url := "http://" + localAddress + "/config/" + a.configToken
-		showPanel(url, url)
+		showPanel("http://" + localAddress + "/config/" + a.configToken)
 	}
-	classic := func() {
-		url := a.assistantBase()
-		showPanel(url, url)
-	}
-	// 已授权才预热对话，避免把首次启动时的无授权页面留在 WebView2。
-	go func() {
-		time.Sleep(2 * time.Second)
-		butterflyPanelWarm(a.assistantURL())
-	}()
 	butterflySetOpen(func() {
-		url := a.assistantURL()
-		if url == "" {
+		if url := a.assistantURL(); url != "" {
+			showPanel(url)
+		} else {
 			configure()
-			return
 		}
-		showPanel(url, a.assistantBase())
 	})
 	fmt.Fprintln(os.Stderr, "vega-local: connection settings at http://"+localAddress+"/config/"+a.configToken)
 	a.clientLog("本地端口 %s 已启用（浏览器需在同一台电脑打开站点）", localAddress)
@@ -202,7 +192,7 @@ func main() {
 		os.Exit(0)
 	}
 	go a.autoUpdate(ctx, quit)
-	systrayRun(configure, classic, quit)
+	systrayRun(configure, quit)
 }
 
 type job struct {

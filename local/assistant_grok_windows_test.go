@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func TestAssistantGrokAndClassicMounts(t *testing.T) {
+func TestAssistantGrokReplacesClassicMount(t *testing.T) {
 	a := &Agent{configToken: "fixture"}
 	mux := http.NewServeMux()
 	a.assistantMount(mux)
@@ -17,7 +17,6 @@ func TestAssistantGrokAndClassicMounts(t *testing.T) {
 		{grok, "text/html", "grok_bridge.js"},
 		{grok + "grok_bridge.js", "javascript", "coordinatorPort"},
 		{grok + "assets/index-DcdocK0f.js", "javascript", ""},
-		{base, "text/html", "marked.js"},
 	} {
 		w := httptest.NewRecorder()
 		mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, test.path, nil))
@@ -27,6 +26,16 @@ func TestAssistantGrokAndClassicMounts(t *testing.T) {
 		if test.path == grok && (!strings.Contains(w.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") || w.Header().Get("Referrer-Policy") != "no-referrer") {
 			t.Fatal("renderer must not leak its loopback path or allow external frames")
 		}
+	}
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, base, nil))
+	if w.Code != http.StatusFound || w.Header().Get("Location") != grok {
+		t.Fatal("the old URL must resolve to the new renderer")
+	}
+	w = httptest.NewRecorder()
+	mux.ServeHTTP(w, httptest.NewRequest(http.MethodGet, base+"marked.js", nil))
+	if w.Code != http.StatusNotFound {
+		t.Fatal("Windows must not serve the classic renderer")
 	}
 	for _, test := range []struct {
 		path, origin string

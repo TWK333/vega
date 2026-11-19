@@ -289,7 +289,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
 #tab-site:checked~.panels #panel-site,#tab-client:checked~.panels #panel-client,#tab-access:checked~.panels #panel-access,#tab-computer:checked~.panels #panel-computer,#tab-relay:checked~.panels #panel-relay{display:block}
 </style>
 <main>
-  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p>{{if .AssistantURL}}<p><a href="{{.AssistantURL}}">← 回到蝴蝶对话</a></p>{{end}}</div></div>
+  <div class="hero"><div class="badge" aria-hidden="true"></div><div><h1>牵牛星 · 本机连接</h1><p>本客户端来自 <code>{{.Pin}}</code>，只能连接该站点；该站点登录的账号可在本机读写文件、执行命令。</p>{{if .AssistantURL}}<p><a href="{{.AssistantURL}}">← 回到牵牛星对话</a></p>{{end}}</div></div>
 
   {{if .Approved}}<div class="flash ok" role="status"><strong>站点权限已保存。</strong>请回到 Vega 查看登录验证与后端连接结果；允许站点不代表后端已经连通。HTTP 站点也可连接，但凭据和命令会明文传输。</div>{{end}}
   {{if .Revoked}}<div class="flash warn" role="status">站点授权已撤销，需要重新连接时请重新启动客户端并在站点授权。</div>{{end}}
@@ -368,9 +368,9 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <section class="card">
     <h2>蝴蝶提示</h2>
     <form method="post">
-      <label class="switch"><input type="checkbox" name="butterflyOn" value="1"{{if .Butterfly}} checked{{end}}>显示任务栏蝴蝶与提示气泡</label>
-      <small>默认关闭：任务栏不显示蝴蝶，也不弹「正在操作这台电脑」「需要你核对」的气泡；打开后立即生效。托盘菜单「蝴蝶助理」始终可以手动打开面板。</small>
-      <div class="row"><button name="saveButterfly" value="1">保存蝴蝶设置</button></div>
+      <label class="switch"><input type="checkbox" name="butterflyOn" value="1"{{if .Butterfly}} checked{{end}}>显示客户端操作提示</label>
+      <small>默认关闭。打开后显示操作提示和确认卡；对话窗口和任务栏应用图标不受此开关影响。</small>
+      <div class="row"><button name="saveButterfly" value="1">保存提示设置</button></div>
     </form>
   </section>
 
@@ -570,8 +570,8 @@ func (a *Agent) configure(w http.ResponseWriter, r *http.Request) {
 	extension := a.lastExtension
 	butterfly := a.config.Butterfly
 	headlessBrowserMode := a.config.BrowserMode != "real"
-	assistantURL := a.assistantBase()
 	a.mu.Unlock()
+	assistantURL := a.assistantURL()
 	headlessNotice := ""
 	if h := headlessBrowser.Load(); h != nil {
 		headlessNotice = h.currentNotice()

@@ -124,6 +124,14 @@ func (a *Agent) requestDeviceAuthorization(ctx context.Context, open func(string
 		return ServerCredential{}, "", fmt.Errorf("站点返回了无效的授权请求")
 	}
 	address := a.pinnedOrigin + "/?client_authorization=" + url.QueryEscape(request.RequestID)
+	a.mu.Lock()
+	a.deviceAuthURL = address
+	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		a.deviceAuthURL = ""
+		a.mu.Unlock()
+	}()
 	a.noteSite(a.pinnedOrigin, "请核对设备尾号 "+clientID[len(clientID)-6:]+"，并在站点确认设备授权："+address)
 	fmt.Fprintln(os.Stderr, "vega-local: 请在浏览器打开 "+address)
 	open(address)

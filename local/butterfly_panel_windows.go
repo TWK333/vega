@@ -2,10 +2,7 @@
 
 package main
 
-// 蝴蝶面板：点任务栏蝴蝶后出现的对话窗，里面是本地内置的助理界面（数据走本站点的客户端通道）。
-// 对话窗保留原生缩放能力，由新版前端提供标题栏和窗口按钮，不置顶、不自动收起。
-// 进程在客户端启动时就拉起来预热：窗口建在屏幕外、页面先加载好，点开只是把它挪出来（没有白框闪现）。
-// 单独开进程：WebView2 是第三方 COM 组件，初始化失败也只关掉这一个小窗，不带走托盘和正在跑的任务。
+// Windows 对话窗启动在独立进程，WebView2 初始化失败不会带走托盘和正在跑的任务。
 
 import (
 	"encoding/json"
@@ -25,7 +22,7 @@ import (
 )
 
 const (
-	butterflyPanelTitle = "Vega 蝴蝶助理"
+	butterflyPanelTitle = "牵牛星"
 	// 现在是普通窗口，不是气泡：默认给够面积放得下对话和设置，用户拖过就按上次的大小打开。
 	butterflyPanelWidth        = 1080
 	butterflyPanelHeight       = 780
@@ -60,55 +57,32 @@ var (
 	procPanelRect       = panelUser32.NewProc("GetWindowRect")
 )
 
-// 同一个面板只允许拉起一个：双击蝴蝶会连着触发两次，而 WebView2 起来之前还找不到窗口。
+// A single owned child serves both the main window and its connection settings.
 var butterflyPanelSpawn struct {
 	sync.Mutex
-	opened bool
+	process *os.Process
+	done    chan struct{}
+	closing bool
 }
 
-// 面板此刻是否摆在屏幕上（只用于日志/调试；窗口不再失焦自动收起）。
-var panelShowState struct {
-	sync.Mutex
-	at time.Time
-}
-
-// butterflyPanelWarm 客户端启动就把面板进程拉起来（窗口停在屏幕外，页面先加载好）。
-func butterflyPanelWarm(url string) {
-	if url == "" {
-		return
-	}
-	butterflyPanelSpawn.Lock()
-	defer butterflyPanelSpawn.Unlock()
-	if panelWindow() != 0 || butterflyPanelSpawn.opened {
-		return
-	}
-	butterflyPanelLaunch(url)
-}
-
-// butterflyPanelOpen 打开面板；已经开着就唤到前面。返回 false 时调用方退回系统浏览器。
+// butterflyPanelOpen launches the app or restores its existing window.
 func butterflyPanelOpen(url string) bool {
 	if url == "" {
 		return false
 	}
 	butterflyPanelSpawn.Lock()
 	defer butterflyPanelSpawn.Unlock()
+	if butterflyPanelSpawn.closing {
+		return true
+	}
 	if hwnd := panelWindow(); hwnd != 0 {
 		_, _, _ = procPanelPost.Call(hwnd, panelShowMsg, 0, 0)
 		return true
 	}
-	if !butterflyPanelSpawn.opened && !butterflyPanelLaunch(url) {
-		return false
+	if butterflyPanelSpawn.process == nil {
+		return butterflyPanelLaunch(url)
 	}
-	// 第一次点击可能正好撞上预热；等窗口可用再让它出现。
-	go func() {
-		for i := 0; i < 240; i++ {
-			if hwnd := panelWindow(); hwnd != 0 {
-				_, _, _ = procPanelPost.Call(hwnd, panelShowMsg, 0, 0)
-				return
-			}
-			time.Sleep(25 * time.Millisecond)
-		}
-	}()
+	// During WebView2 startup the requested URL is already in panel-target.txt.
 	return true
 }
 
@@ -129,33 +103,47 @@ func butterflyPanelLaunch(url string) bool {
 	if err := command.Start(); err != nil {
 		return false
 	}
-	butterflyPanelSpawn.opened = true
+	done := make(chan struct{})
+	butterflyPanelSpawn.process, butterflyPanelSpawn.done = command.Process, done
 	go func() {
 		_ = command.Wait()
 		butterflyPanelSpawn.Lock()
-		butterflyPanelSpawn.opened = false
+		butterflyPanelSpawn.process, butterflyPanelSpawn.done = nil, nil
 		butterflyPanelSpawn.Unlock()
+		close(done)
 	}()
 	return true
 }
 
-// panelWindow 面板窗口（按标题找；窗口在预热期就已经存在，只是停在屏幕外）。
 func panelWindow() uintptr {
-	hwnd, _, _ := procPanelFind.Call(0, uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelTitle))))
+	hwnd, _, _ := procPanelFind.Call(uintptr(unsafe.Pointer(butterflyUTF16(butterflyPanelClass))), 0)
 	return hwnd
 }
 
-// butterflyPanelPark 把面板收回屏幕外（页面上的 × 用它：WebView2 留着，下次点开还是热的）。
-func butterflyPanelPark() {
-	if hwnd := panelWindow(); hwnd != 0 {
-		_, _, _ = procPanelPost.Call(hwnd, panelParkMsg, 0, 0)
+// Closing the window hides it; exiting from the tray ends the owned child too.
+func butterflyPanelClose() {
+	butterflyPanelSpawn.Lock()
+	butterflyPanelSpawn.closing = true
+	process, done := butterflyPanelSpawn.process, butterflyPanelSpawn.done
+	hwnd := panelWindow()
+	butterflyPanelSpawn.Unlock()
+	if process == nil {
+		return
 	}
+	if hwnd != 0 {
+		_, _, _ = procPanelPost.Call(hwnd, panelShutdownMsg, 0, 0)
+		select {
+		case <-done:
+			return
+		case <-time.After(time.Second):
+		}
+	}
+	_ = process.Kill()
 }
 
-// butterflyPanelClose 关掉面板（客户端退出时不让它单独留在桌面上）。
-func butterflyPanelClose() {
+func butterflyPanelPark() {
 	if hwnd := panelWindow(); hwnd != 0 {
-		_, _, _ = procPanelPost.Call(hwnd, 0x0010, 0, 0) // WM_CLOSE
+		_, _, _ = procPanelPost.Call(hwnd, 0x0010, 0, 0) // WM_CLOSE hides the window.
 	}
 }
 
@@ -235,35 +223,20 @@ func panelNavigate(hwnd windows.Handle) {
 		return
 	}
 	if browser := panelHostBrowser(); browser != nil {
-		modeChanged := panelUsesGrok(panelCurrentURL) != panelUsesGrok(target)
 		panelCurrentURL = target
-		if modeChanged {
-			butterflyPanelChrome(hwnd)
-		}
+		butterflyPanelChrome(hwnd)
 		browser.Navigate(target)
-		return
 	}
-	panelHost.Lock()
-	panelHost.want = target
-	panelHost.Unlock()
 }
 
-// butterflyPanelChrome 保留原生缩放、最小/最大化能力，经典面板和设置还使用系统标题栏。
-// 仍不进任务栏（入口是任务栏蝴蝶和托盘），免得屏幕外预热时多出一个按钮。
+// Settings uses the native caption; chat uses its own. Keep the resize and minimize/maximize styles.
 func butterflyPanelChrome(hwnd windows.Handle) {
-	gwlStyle, gwlExStyle := ^uintptr(15), ^uintptr(19) // GWL_STYLE = -16, GWL_EXSTYLE = -20
-	const (
-		wsOverlapped = 0x00CF0000 // WS_OVERLAPPEDWINDOW：标题栏 + 边框 + 可缩放 + 最小/最大化
-		wsClip       = 0x02000000 // WS_CLIPCHILDREN：WebView2 自己画，别让父窗口刷背景
-		wsVisible    = 0x10000000
-		exTopmost    = 0x00000008
-		exToolWindow = 0x00000080
-		exAppWindow  = 0x00040000
-	)
-	_, _, _ = procPanelSetStyle.Call(uintptr(hwnd), gwlStyle, wsOverlapped|wsClip|wsVisible)
-	ex, _, _ := procPanelStyle.Call(uintptr(hwnd), gwlExStyle)
-	_, _, _ = procPanelSetStyle.Call(uintptr(hwnd), gwlExStyle, (ex|exToolWindow)&^exTopmost&^exAppWindow)
-	_, _, _ = procPanelPlace.Call(uintptr(hwnd), 0, 0, 0, 0, 0, 0x0020|0x0002|0x0001|0x0004) // FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER
+	const gwlStyle = ^uintptr(15) // GWL_STYLE (-16)
+	style, _, _ := procPanelStyle.Call(uintptr(hwnd), gwlStyle)
+	if next := panelFrameStyle(style, panelCurrentURL); next != style {
+		_, _, _ = procPanelSetStyle.Call(uintptr(hwnd), gwlStyle, next)
+	}
+	_, _, _ = procPanelPlace.Call(uintptr(hwnd), 0, 0, 0, 0, 0, 0x0020|0x0002|0x0001|0x0004|0x0010) // FRAMECHANGED|NOMOVE|NOSIZE|NOZORDER|NOACTIVATE
 }
 
 // panelGeometry 用户拖过的窗口位置与大小：下次还按它打开（仍然收口在工作区内）。
@@ -333,53 +306,14 @@ func butterflyPanelFrame(anchor, work appuseWinRect, saved *panelGeometry, dpi u
 	return x, y, width, height
 }
 
-// butterflyPanelPlace 摆到蝴蝶所在屏幕的中间：找不到蝴蝶就用鼠标所在的屏幕。
-// 顺手把前台抢过来——面板是新进程，没有输入记录，得借当前前台的输入状态才抢得到。
-func butterflyPanelPlace(hwnd windows.Handle) {
-	anchor, chip := butterflyAnchor()
-	var point appuseWinPoint
-	_, _, _ = procPanelCursor.Call(uintptr(unsafe.Pointer(&point)))
-	dpi := butterflyDPI()
-	if anchor.Right > anchor.Left {
-		point = appuseWinPoint{X: (anchor.Left + anchor.Right) / 2, Y: anchor.Top}
-		// 蝴蝶在哪块屏、什么缩放，面板就跟到哪，不跨屏幕串缩放。
-		if scaled, _, _ := procPanelDpi.Call(chip); scaled >= 96 {
-			dpi = uint32(scaled)
-		}
+// Place the new window once; restoring it from the tray leaves its size and monitor alone.
+func panelInitialFrame() (x, y, width, height int32) {
+	anchor, work, dpi := butterflyAnchorWork()
+	saved, ok := loadPanelGeometry(butterflyPanelDataDir())
+	if ok {
+		return butterflyPanelFrame(anchor, work, &saved, dpi)
 	}
-	work := appuseWinRect{}
-	// MonitorFromPoint 的 POINT 是按值传的：x64 下两个 int32 拼进一个寄存器，传指针会拿到错的显示器。
-	packed := uintptr(uint32(point.X)) | uintptr(uint32(point.Y))<<32
-	if monitor, _, _ := procPanelMonitor.Call(packed, 2); monitor != 0 { // MONITOR_DEFAULTTONEAREST
-		info := struct {
-			Size    uint32
-			Monitor appuseWinRect
-			Work    appuseWinRect
-			Flags   uint32
-		}{}
-		info.Size = uint32(unsafe.Sizeof(info))
-		if ok, _, _ := procPanelInfo.Call(monitor, uintptr(unsafe.Pointer(&info))); ok != 0 {
-			work = info.Work
-		}
-	}
-	if work.Right == 0 && work.Bottom == 0 {
-		_, _, _ = procButterflyParams.Call(0x0030, 0, uintptr(unsafe.Pointer(&work)), 0) // SPI_GETWORKAREA
-	}
-	saved, hasSaved := loadPanelGeometry(butterflyPanelDataDir())
-	var geometry *panelGeometry
-	if hasSaved {
-		geometry = &saved
-	}
-	x, y, width, height := butterflyPanelFrame(anchor, work, geometry, dpi)
-	// SHOWWINDOW|FRAMECHANGED|NOZORDER：已经是普通窗口，位置和大小都按记住的来。
-	_, _, _ = procPanelPlace.Call(uintptr(hwnd), ^uintptr(0), uintptr(x), uintptr(y), uintptr(width), uintptr(height), 0x0040|0x0020|0x0004)
-	panelClaimForeground(hwnd)
-	panelShowState.Lock()
-	panelShowState.at = time.Now()
-	panelShowState.Unlock()
-	// 面板是独立进程，落点只能靠这行日志回查（“位置不对”时先看 client.log）。
-	panelLog("面板落点 %d,%d %dx%d dpi=%d 蝴蝶=%d,%d-%d,%d 工作区=%d,%d-%d,%d", x, y, width, height, dpi,
-		anchor.Left, anchor.Top, anchor.Right, anchor.Bottom, work.Left, work.Top, work.Right, work.Bottom)
+	return butterflyPanelFrame(anchor, work, nil, dpi)
 }
 
 // panelClaimForeground 借当前前台的输入状态把面板拿到前台（新进程自己抢会被系统拒）。
@@ -404,9 +338,4 @@ func panelClaimForeground(hwnd windows.Handle) {
 	if attached {
 		_, _, _ = procPanelAttach.Call(self, target, 0)
 	}
-	panelShowState.Lock()
-	if panelShowState.at.IsZero() {
-		panelShowState.at = time.Now()
-	}
-	panelShowState.Unlock()
 }

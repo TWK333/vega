@@ -4,3 +4,4 @@
 // （windres 来自 mingw-w64；.syso 进仓库，Docker/CI 的交叉编译因此不需要 Windows 工具链）
 #include <winuser.h>
 1 RT_MANIFEST "vega-local.manifest"
+101 ICON "icon.ico"

@@ -1048,7 +1048,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       await this.store.saveSession(session);
       const scenePrimaries = new Map<string, string>();
       await this.catalog.resolve(config, session.model);
-      onStart?.();
+      if (!input?.clientMessageId) onStart?.();
       emit("started");
       await this.recoverPending(key, session.turnInProgress ? "restart" : undefined);
       session.turnInProgress = true;
@@ -1069,6 +1069,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           await this.store.saveSession(session);
         }
       }
+      if (input?.clientMessageId) onStart?.(); // Keep its submission reserved until the initial echo is stored.
       if (input?.text && session.employeeId && !session.taskId && !session.groupId)
         await (await this.employeeFor(session)).acceptUserSchedule(input.text);
       tools = await Tools.create(this, session, config, control.signal, emit);

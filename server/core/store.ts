@@ -375,14 +375,24 @@ export class Store {
    * never per message. Unread counts what others said after it: employees' visible replies and other users' messages in
    * a group (never tool output, system notices or the viewer's own messages); counting stops at UNREAD_MAX.
    */
-  async markRead(user: string, session: string) {
-    const last = (await this.one("SELECT MAX(seq) AS seq FROM messages WHERE session=?", session))?.seq;
-    const seq = Number(last || 0), key = user + "/" + session;
-    if (seq > ((await this.object<{ seq: number }>("read", key))?.seq || 0)) await this.save("read", key, { seq });
-    return seq;
+  async readSeq(user: string, session: string) {
+    return (await this.object<{ seq: number }>("read", user + "/" + session))?.seq || 0;
+  }
+  async lastViewedAt(user: string, session: string, lastAt: number, unread: number) {
+    if (!unread) return lastAt;
+    const seq = await this.readSeq(user, session);
+    return seq ? Math.min((await this.message(session, seq))?.at || 0, Math.max(0, lastAt - 1)) : 0;
+  }
+  async markRead(user: string, session: string, through?: number) {
+    return this.transaction(async () => {
+      const last = await this.lastSeq(session), previous = await this.readSeq(user, session);
+      const seq = Math.min(last, through ?? last);
+      if (seq > previous) await this.save("read", user + "/" + session, { seq });
+      return Math.max(seq, previous);
+    });
   }
   async unread(user: string, session: string) {
-    let after = (await this.object<{ seq: number }>("read", user + "/" + session))?.seq || 0, count = 0;
+    let after = await this.readSeq(user, session), count = 0;
     for (;;) {
       const rows = await this.all("SELECT seq,data FROM messages WHERE session=? AND seq>? ORDER BY seq LIMIT 200", session, after) as any[];
       for (const row of rows) {

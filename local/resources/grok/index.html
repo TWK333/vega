@@ -16,8 +16,24 @@
       type="font/woff2"
       href="./assets/cursor-icons-16-QUmxS7q3.woff2"
     />
-    <title>Grok Bot</title>
-    <script type="module" crossorigin src="./assets/index-DcdocK0f.js"></script>
+    <title>牵牛星</title>
+    <style>
+      #vega-welcome{--bg:#eef0f7;--glow:#e0e5ff;--card:#fff;--ink:#1b1f2a;--muted:#5b6475;--line:#e3e6ef;--brand:#5147dd;position:fixed;inset:0;z-index:2;display:grid;place-items:center;box-sizing:border-box;padding:60px 24px 28px;overflow:auto;background:radial-gradient(ellipse at 50% 0,var(--glow),transparent 66%),var(--bg);color:var(--ink);font:14px/1.6 system-ui,"Segoe UI",sans-serif}
+      #vega-welcome[data-theme=dark]{--bg:#171925;--glow:#29264a;--card:#212435;--ink:#f4f4fb;--muted:#bac2d4;--line:#383d52}
+      #vega-welcome-drag{position:absolute;inset:0 140px auto 0;height:51px}
+      .vega-welcome-card{box-sizing:border-box;width:min(100%,420px);padding:32px 24px 28px;border:1px solid var(--line);border-radius:20px;background:var(--card);box-shadow:0 12px 40px #21254714;text-align:center}
+      .vega-welcome-mark{display:grid;place-items:center;width:54px;height:54px;margin:0 auto 16px;border-radius:15px;background:linear-gradient(145deg,#6a62f0,var(--brand));color:#fff;font-size:28px;font-weight:700}
+      #vega-welcome h1{margin:0 0 8px;font-size:32px;line-height:1.2;font-weight:700}
+      #vega-welcome p{margin:8px 0;color:var(--muted)}
+      #vega-welcome-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:24px 0 10px}
+      #vega-welcome-actions[hidden]{display:none}
+      #vega-welcome-actions button{border:1px solid var(--line);border-radius:10px;padding:8px 14px;background:var(--card);color:var(--ink);font:inherit;font-weight:600;cursor:pointer}
+      #vega-welcome-actions button:focus-visible{outline:2px solid #7a70ff;outline-offset:2px}
+      #vega-welcome-actions button:hover{filter:brightness(.92)}
+      #vega-welcome-actions button:disabled{opacity:.65;cursor:wait}
+      #vega-welcome-actions #vega-authorize{border-color:var(--brand);background:var(--brand);color:#fff}
+      #vega-welcome-status{min-height:24px;font-size:13px;overflow-wrap:anywhere}
+    </style>
     <link rel="modulepreload" crossorigin href="./assets/chunk-rolldown-runtime-BCiCTKAo.js">
     <link rel="modulepreload" crossorigin href="./assets/index.eager-common-DcDxc78C.js">
     <link rel="modulepreload" crossorigin href="./assets/index.eager-vendor-4K645d8W.js">
@@ -30,7 +46,21 @@
     <link rel="modulepreload" crossorigin href="./assets/chunk-prompt-editor-KwEkfiMq.js">
   </head>
   <body>
-    <div id="root"></div>
-    <div id="sand-boot-shell" aria-hidden="true"></div>
+    <main id="vega-welcome" lang="zh-CN" aria-labelledby="vega-welcome-title">
+      <div id="vega-welcome-drag" aria-hidden="true"></div>
+      <div class="vega-welcome-card">
+        <span class="vega-welcome-mark" aria-hidden="true">V</span>
+        <h1 id="vega-welcome-title">牵牛星</h1>
+        <p>Vega 桌面客户端</p>
+        <div id="vega-welcome-actions" hidden>
+          <button type="button" id="vega-authorize">登录并授权</button>
+          <button type="button" id="vega-recheck">检查授权状态</button>
+        </div>
+        <p id="vega-welcome-status" role="status">正在检查本站设备授权…</p>
+      </div>
+    </main>
+    <div id="root" data-vega-entry="./assets/index-DcdocK0f.js"></div>
+    <div id="sand-boot-shell" aria-hidden="true"></div>
+
   </body>
 </html>

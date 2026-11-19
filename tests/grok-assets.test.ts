@@ -19,10 +19,10 @@ test("renderer assets match the original Grok Bot 1.1.0 release byte for byte", 
     assert.equal(createHash("sha256").update(readFileSync(join(resources, path))).digest("hex"), expected, path);
   }
   const html = readFileSync(join(resources, "index.html"), "utf8");
-  assert.match(html, /index-DcdocK0f\.js/);
+  assert.match(html, /data-vega-entry="\.\/assets\/index-DcdocK0f\.js"/);
   assert.match(html, /index-BkOHlEB9\.css/);
   assert.match(html, /grok_bridge\.js/);
-  assert.equal(createHash("sha256").update(html.replace(/    <script src="\.\/grok_bridge\.js"><\/script>\r?\n/, "")).digest("hex"), "0d66097febf3429db9862465a5a2f368b94ed1f56f98d7de1d95f788dcf3a74b");
+  assert.doesNotMatch(html, /<script[^>]+src="\.\/assets\/index-DcdocK0f\.js"/, "the renderer must wait for the local device authorization check");
 });
 
 test("embedded desktop JavaScript parses as browser modules", () => {
@@ -42,11 +42,11 @@ test("desktop always keeps the new interface instead of redirecting to legacy", 
   assert.doesNotMatch(html, /legacy=1|vega-boot-recovery/);
 });
 
-function bridge(dark = true, nativeHost = false, respond?: (url: string, body: any, signal: AbortSignal) => any) {
+function bridge(dark = true, nativeHost = false, respond?: (url: string, body: any, signal: AbortSignal) => any, saved: Record<string, string> = {}) {
   const requests: { url: string; body: any }[] = [], replies: any[] = [], events: any[] = [], native: string[] = [];
   const listeners: Record<string, (event: any) => void> = {}, documentListeners: Record<string, (event: any) => void> = {};
   let port: any;
-  const storage: Record<string, any> = {};
+  const storage: Record<string, any> = { ...saved };
   Object.defineProperties(storage, {
     getItem: { value: (key: string) => storage[key] ?? null },
     setItem: { value: (key: string, value: string) => { storage[key] = value; } },
@@ -60,13 +60,13 @@ function bridge(dark = true, nativeHost = false, respond?: (url: string, body: a
     matchMedia: () => ({ matches: dark, addEventListener() {} }),
     ...(nativeHost ? { chrome: { webview: { postMessage: (message: string) => native.push(message) } } } : {}),
   };
-  const document = { getElementById: () => null, addEventListener: (type: string, listener: (event: any) => void) => { documentListeners[type] = listener; } };
+  const document = { hidden: false, hasFocus: () => true, getElementById: () => null, addEventListener: (type: string, listener: (event: any) => void) => { documentListeners[type] = listener; } };
   window.document = document;
   vm.runInNewContext(readFileSync(join(resources, "grok_bridge.js"), "utf8"), {
     window, document,
     getComputedStyle: (element: any) => ({ getPropertyValue: (property: string) => property === "--sand-app-region" ? element.region : "none" }),
     localStorage: storage, console: { log() {}, error() {} },
-    setTimeout: (fn: () => unknown, ms: number) => { if (!ms) fn(); else timers.set(++timerId, fn); return timerId; },
+    setTimeout: (fn: () => unknown) => { timers.set(++timerId, fn); return timerId; },
     clearTimeout: (id: number) => timers.delete(id), setInterval: () => 1, clearInterval() {},
     AbortController,
     MessageChannel: class {
@@ -77,12 +77,12 @@ function bridge(dark = true, nativeHost = false, respond?: (url: string, body: a
       requests.push({ url, body: JSON.parse(options.body) });
       if (respond) return respond(url, JSON.parse(options.body), options.signal);
       return { ok, json: async () => url.endsWith("threads")
-        ? { employees: [{ id: "e1", name: "测试牛马", thread: "employee:e1", unread: 2, lastText: "最新进展", lastAt: 1200, avatar: "bot:round:purple" }] }
-        : url.endsWith("messages") ? { messages: [{ seq: 12, role: "assistant", text: "新版消息", at: 1000 }] } : { ok } };
+        ? { employees: [{ id: "e1", name: "测试牛马", thread: "employee:e1", unread: 2, lastViewedAt: 930, lastText: "最新进展", lastAt: 1200, avatar: "bot:round:purple" }] }
+        : url.endsWith("messages") ? { messages: [{ seq: 12, role: "assistant", text: "新版消息", at: 1000 }], readSeq: 0 } : { ok } };
     },
   });
   return {
-    desktop: window.desktop, requests, events,
+    desktop: window.desktop, requests, events, storage,
     native, window, listeners, documentListeners,
     fail: () => { ok = false; },
     tick: async () => { const ready = [...timers.values()]; timers.clear(); await Promise.all(ready.map((fn) => fn())); },
@@ -104,6 +104,9 @@ test("new renderer bridge boots synchronously and preserves persistence scope", 
   assert.equal((await desktop.main.getLanguageState()).resolved, "zh-CN");
   assert.equal((await desktop.main.getUpdateStatus()).state.type, "disabled");
   assert.equal(JSON.stringify(await desktop.main.getLocalPitmanState()), '{"isRecorderReady":false,"session":null}');
+  for (const method of ["getSandAccess", "getSandAccessFresh"]) {
+    assert.equal((await desktop.main[method]()).speechUiHidden, true);
+  }
   assert.equal(desktop.boot.experiments.featureGates.grok_bot_files_stage, true);
   assert.equal(desktop.boot.experiments.featureGates.sand_grok_main_agent, true);
   await desktop.main.writeClientPersistence({ key: "kept/a", value: "yes" });
@@ -120,6 +123,7 @@ test("new renderer roster and transcript use the native API and message schema",
   assert.equal(roster.value.agents[0].lastEntry.text, "最新进展");
   assert.equal(roster.value.agents[0].hasUnread, true);
   assert.equal(roster.value.agents[0].lastActivityAt, 1200);
+  assert.equal(roster.value.agents[0].lastViewedAt, 930);
   assert.equal(roster.value.agents[0].lastMessageId, null);
   assert.equal(roster.value.agents[0].avatarShape, "pebble");
   assert.equal(roster.value.agents[0].avatarColor, "violet");
@@ -129,18 +133,54 @@ test("new renderer roster and transcript use the native API and message schema",
     id: "entry-12", seq: 12, timestampMs: 1000, kind: "send-message", streaming: false, message: { type: "text", content: "新版消息" }, tasks: [],
   });
   assert(b.requests.some((request) => request.url === "/assistant/test/api/messages" && request.body.thread === "employee:e1"));
-  assert(b.requests.some((request) => request.url.endsWith("/read")), "opening a chat marks the same Vega history read");
+  await b.tick();
+  assert(b.requests.some((request) => request.url.endsWith("/read") && request.body.through === 12), "the open foreground chat marks the loaded Vega history read");
   assert(!b.requests.some((r) => r.url.includes("//")), "API path must not redirect POST requests");
   const send = { agentId: "e1", prompt: "fixture only", clientNonce: "fixture-send-nonce" };
   assert.equal((await b.request("sendPrompt", send)).value.accepted, true);
   assert.equal((await b.request("sendPrompt", send)).value.accepted, true);
   assert.equal(b.requests.filter((r) => r.url.endsWith("/send")).length, 1, "a repeated renderer nonce never replays a write");
-  assert.deepEqual(b.requests.at(-1)?.body, { thread: "employee:e1", text: "fixture only" });
+  assert.deepEqual(b.requests.at(-1)?.body, { thread: "employee:e1", text: "fixture only", clientMessageId: send.clientNonce });
   b.fail();
   assert.equal((await b.request("sendPrompt", { ...send, clientNonce: "fixture-second-nonce" })).status, "failed");
   assert.equal((await b.request("deleteAgents", { ids: ["e1"] })).failure.code, "capability-unavailable");
   await assert.rejects(b.desktop.main.publishGrokBotAgent({ agentId: "e1" }), /暂未接入/);
   assert.equal((await b.request("sendPrompt", { agentId: "e1", prompt: "fixture", attachmentPaths: ["file"] })).status, "failed");
+});
+
+test("a lost delivery reply is reconciled by message ID; the same draft is not submitted again", async () => {
+  const nonce = "original-nonce-for-test-01", retry = `sand-resend-v1:${nonce.length}:${nonce}:new-nonce-for-retry-001`;
+  let accepted = false;
+  const b = bridge(true, false, (url, data) => {
+    if (url.endsWith("/send")) {
+      accepted = true;
+      return { ok: false, status: 502, json: async () => ({ error: "lost response" }) };
+    }
+    if (url.endsWith("/messages") && data.receiptFor) return { ok: true, json: async () => ({ receiptFor: data.receiptFor,
+      receipt: accepted && data.receiptFor === nonce ? { seq: 13 } : null }) };
+    throw Error("unexpected request");
+  });
+  assert.equal((await b.request("sendPrompt", { agentId: "e1", prompt: "同一条", clientNonce: nonce })).value.accepted, true);
+  assert.equal((await b.request("sendPrompt", { agentId: "e1", prompt: "同一条", clientNonce: retry })).value.accepted, true);
+  assert.equal((await b.request("promptAcceptanceStatus", { agentId: "e1", clientNonce: retry })).value.record.echoEntryId, "entry-13");
+  const missing = "another-really-unknown";
+  assert.equal((await b.request("promptAcceptanceStatus", { agentId: "e1", clientNonce: missing })).value.outcome, "unknown-durability");
+  assert.equal((await b.request("sendPrompt", { agentId: "e1", prompt: "不能重放", clientNonce: `sand-resend-v1:${missing.length}:${missing}:new-nonce-for-retry-002` })).status, "failed");
+  assert.deepEqual(b.requests.filter(r => r.url.endsWith("/send")).map(r => r.body.clientMessageId), [nonce]);
+});
+
+test("reopening parks the send journal without replaying it or replacing ordinary drafts", async () => {
+  const key = "sand.client.slice.account.me.send-journal", stored = "sand_client_p_" + key;
+  const nonce = "fixture-persisted-send-01";
+  const pending = { schemaVersion: 3, value: { records: [{ nonce, input: { agentId: "e1", prompt: "保留文字，不再挂在会话里" } }] } };
+  const data = { [stored]: JSON.stringify(pending), "sand_client_p_sand.client.slice.account.me.composer-drafts": "other draft" };
+  const b = bridge(true, false, undefined, data);
+  assert.equal(await b.desktop.main.readClientPersistence({ key }), null);
+  assert.deepEqual(JSON.parse(b.storage["vega:previous-send-journal:" + stored]).value.records, pending.value.records);
+  assert.equal(b.storage["sand_client_p_sand.client.slice.account.me.composer-drafts"], "other draft");
+  const again = bridge(true, false, undefined, b.storage);
+  assert.deepEqual(JSON.parse(again.storage["vega:previous-send-journal:" + stored]).value.records, pending.value.records);
+  assert.deepEqual(again.requests, []);
 });
 
 test("operations unavailable on master do not make requests to nonexistent routes", async () => {
@@ -149,6 +189,97 @@ test("operations unavailable on master do not make requests to nonexistent route
     assert.match((await b.request(method)).failure.message, /Vega 网页/);
   assert.equal((await b.request("promptAcceptanceStatus")).value.outcome, "unknown-durability");
   assert.deepEqual(b.requests, []);
+});
+
+test("groups use an independent roster ID, show the right sender and acknowledge only loaded foreground rows", async () => {
+  const nonce = "fixture-send-group-1";
+  const group = { id: "e1", kind: "group", thread: "group:e1", name: "协作群", unread: 2, lastAt: 200, lastViewedAt: 100 };
+  const history = [
+    { seq: 1, role: "user", text: "same text", actorId: "peer", clientMessageId: nonce, author: { kind: "user", id: "peer", name: "另一位成员" } },
+    { seq: 2, role: "assistant", text: "收到", author: { kind: "employee", id: "e1", name: "群里的牛马" } },
+    { seq: 3, role: "user", text: "same text", actorId: "me", clientMessageId: nonce, author: { kind: "user", id: "me", name: "自己" } },
+  ];
+  let seen = 0;
+  const b = bridge(true, false, (url, body) => ({ ok: true, json: async () => {
+    if (url.endsWith("metadata")) return { id: "me", name: "本人" };
+    if (url.endsWith("threads")) return { employees: [{ id: "e1", name: "私聊" }], groups: [group] };
+    if (url.endsWith("messages")) return { messages: history.filter((m) => m.seq > (body.after || 0)), readSeq: seen, lastSeq: 4 };
+    if (url.endsWith("read")) seen = body.through;
+    return { ok: true };
+  } }));
+  const roster = (await b.request("getServerAgentRoster")).value.agents;
+  assert.deepEqual(Array.from(roster, (row: any) => [row.id, row.isGroup, row.unreadCount]), [["e1", false, 0], ["group:e1", true, 2]]);
+  assert.equal((await b.request("getMainAgent")).value.agentId, "e1");
+  assert.deepEqual(JSON.parse(JSON.stringify(await b.desktop.main.getHostSidebarSections())).map(({ id, agentIds }: any) => [id, agentIds]), [
+    ["__agents__", []], ["vega-groups", ["group:e1"]],
+  ]);
+  assert.deepEqual(Array.from(await b.desktop.main.setHostPinnedAgents({ pinnedAgentIds: ["e1", "group:e1"] })), ["e1"]);
+  b.window.document.hasFocus = () => false;
+  const { entries } = (await b.request("openAgentTail", { id: "group:e1" })).value;
+  assert.deepEqual(Array.from(entries, (row: any) => [row.kind, row.content ?? row.message.content, row.clientNonce]), [
+    ["send-message", "另一位成员：\nsame text", undefined], ["send-message", "群里的牛马：\n收到", undefined], ["message", "same text", nonce],
+  ]);
+  await b.request("noteTranscriptOpened", { id: "group:e1" });
+  await b.tick();
+  assert.equal(seen, 0, "background focus neither reads nor acknowledges on open");
+  b.window.document.hasFocus = () => true;
+  await b.tick();
+  assert.equal(seen, 3, "focus resumes marking read without swallowing a later unseen message");
+  const receipt = await b.request("promptAcceptanceStatus", { agentId: "group:e1", clientNonce: nonce });
+  assert.equal(receipt.value.record.echoEntryId, "entry-3");
+  await b.request("sendPrompt", { agentId: "group:e1", prompt: "新的发言", clientNonce: "another-group-nonce" });
+  assert.deepEqual(b.requests.at(-1)?.body, { thread: "group:e1", text: "新的发言", clientMessageId: "another-group-nonce" });
+});
+
+test("minimizing preserves the transcript and cursor; restoring catches up without marking unseen messages read", async () => {
+  const rows = [1, 2].map(seq => ({ seq, role: "assistant", text: "message " + seq }));
+  let count = 1, readThrough = 0, held: (() => void) | undefined;
+  const b = bridge(true, true, async (url, body) => {
+    let data: any = { ok: true };
+    if (url.endsWith("messages")) {
+      data = { messages: rows.slice(0, count).filter(row => row.seq > (body.after || 0)), readSeq: readThrough, lastSeq: count };
+      if (count === 2 && !held) await new Promise<void>(resolve => { held = resolve; });
+    } else if (url.endsWith("read")) readThrough = body.through;
+    return { ok: true, json: async () => data };
+  });
+  await b.request("openAgentTail", { id: "e1" });
+  await b.tick();
+  const snapshots = () => b.events.filter(event => event.family === "transcript").map(event => event.payload);
+  const visibility: boolean[] = [];
+  b.desktop.main.subscribe({ "window-visibility": (event: { visible: boolean }) => visibility.push(event.visible) });
+  const state = (visible: boolean) => b.listeners["vega-window-state"]({ detail: { visible, isMaximized: false } });
+  const initial = snapshots().at(-1);
+  assert.equal(initial.entries.length, 1);
+  assert.equal(readThrough, 1);
+  count = 2;
+  const late = b.tick();
+  assert(held, "the incremental poll is in flight");
+  state(false);
+  b.window.document.hidden = true;
+  b.documentListeners.visibilitychange({});
+  assert.equal(await b.desktop.main.isWindowShown(), false);
+  held(); await late;
+  assert.equal(snapshots().length, 1, "late messages do not mutate the hidden transcript");
+  assert.equal(readThrough, 1);
+  b.window.document.hidden = false;
+  b.window.document.hasFocus = () => false;
+  b.documentListeners.visibilitychange({});
+  await b.tick();
+  assert.equal(snapshots().length, 1, "DOM visibility alone cannot wake a minimized WebView");
+  state(true);
+  b.listeners.focus({});
+  await b.tick();
+  const restored = snapshots().at(-1);
+  assert.equal(restored.ordered.epoch, initial.ordered.epoch);
+  assert.deepEqual(Array.from(restored.entries, (row: any) => row.seq), [1, 2]);
+  assert.equal(b.requests.at(-1)?.body.after, 1, "wake resumes the existing cursor");
+  assert.equal(readThrough, 1, "a visible, unfocused window does not mark messages read");
+  b.window.document.hasFocus = () => true;
+  b.listeners.focus({});
+  await b.tick();
+  assert.equal(readThrough, 2);
+  assert.deepEqual(visibility, [false, true], "the renderer sees one transition in each direction");
+  assert(!b.requests.some(request => request.url.endsWith("send")));
 });
 
 test("master history polls append replies, filter internal rows and recover from a reset", async () => {
@@ -249,7 +380,7 @@ test("desktop zoom and window commands use the host instead of fixed placeholder
   assert.deepEqual(native, ["vega-window:minimize", "vega-window:toggle-maximize", "vega-window:close"]);
 });
 
-test("frameless header resolves WebView2's unsupported drag regions and keeps edges resizable", () => {
+test("the renderer delegates title drag but leaves resize border handling to Win32", () => {
   const { native, window, documentListeners } = bridge(true, true);
   window.innerWidth = 1080;
   window.innerHeight = 780;
@@ -261,7 +392,7 @@ test("frameless header resolves WebView2's unsupported drag regions and keeps ed
   target.region = "no-drag";
   documentListeners.mousedown(event);
   documentListeners.mousedown({ ...event, clientX: 1079, clientY: 779 });
-  assert.deepEqual(native, ["vega-window:drag", "vega-window:toggle-maximize", "vega-window:resize-bottomright"]);
+  assert.deepEqual(native, ["vega-window:drag", "vega-window:toggle-maximize"]);
 });
 
 test("all embedded stylesheets parse without truncated rules or displaced prefixes", () => {

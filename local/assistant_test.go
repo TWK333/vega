@@ -37,6 +37,34 @@ func TestAssistantCredentialFollowsTheNewestPairing(t *testing.T) {
 	}
 }
 
+func TestAssistantOpensOnlyThePendingSiteAuthorization(t *testing.T) {
+	a := &Agent{configToken: "fixture", pinnedOrigin: "https://vega.example/vega"}
+	previous := openDeviceAuthorization
+	t.Cleanup(func() { openDeviceAuthorization = previous })
+	var opened []string
+	openDeviceAuthorization = func(address string) { opened = append(opened, address) }
+	mux := http.NewServeMux()
+	a.assistantMount(mux)
+	post := func(origin string) int {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, a.assistantPath()+"api/authorize", strings.NewReader(`{"url":"https://untrusted.test"}`))
+		r.Header.Set("Origin", origin)
+		mux.ServeHTTP(w, r)
+		return w.Code
+	}
+	localOrigin := "http://" + localAddress
+	if code := post(localOrigin); code != http.StatusConflict {
+		t.Fatalf("no pending authorization returned %d", code)
+	}
+	a.deviceAuthURL = a.pinnedOrigin + "/?client_authorization=" + strings.Repeat("A", 43)
+	if post("https://untrusted.test") != http.StatusForbidden || post("") != http.StatusForbidden || len(opened) != 0 {
+		t.Fatal("only requests from the local renderer may open a browser")
+	}
+	if code := post(localOrigin); code != http.StatusOK || len(opened) != 1 || opened[0] != a.deviceAuthURL || len(a.config.Servers) != 0 {
+		t.Fatalf("status %d: expected the existing pinned request, without any new authorization", code)
+	}
+}
+
 func TestAssistantFileProxyPreservesLargeDownloadAndChecksOrigin(t *testing.T) {
 	const token = "fixture-device-token"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

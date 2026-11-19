@@ -7,6 +7,8 @@ import (
 	_ "embed"
 	"os"
 	"sync"
+	"syscall"
+	"unsafe"
 
 	"github.com/getlantern/systray"
 )
@@ -17,33 +19,70 @@ var iconData []byte
 //go:embed icon-connected.ico
 var iconConnectedData []byte
 
-func systrayRun(configure, classic, onQuit func()) {
+// The pinned systray dependency opens its menu on both buttons and has no click callback.
+// Subclass only its own window so the left button can restore the app and right-click still uses its menu.
+func installTrayOpen() {
+	const wndProcIndex = ^uintptr(3) // GWLP_WNDPROC (-4)
+	const notifyMessage = 0x0401     // systray v1.2.2: WM_USER + 1
+	class := butterflyUTF16("SystrayClass")
+	callWindowProc := panelUser32.NewProc("CallWindowProcW")
+	for after := uintptr(0); ; {
+		hwnd, _, _ := procPanelFindChild.Call(0, after, uintptr(unsafe.Pointer(class)), 0)
+		if hwnd == 0 {
+			return
+		}
+		after = hwnd
+		var pid uint32
+		_, _, _ = procPanelOwner.Call(hwnd, uintptr(unsafe.Pointer(&pid)))
+		if pid != uint32(os.Getpid()) {
+			continue
+		}
+		previous, _, _ := procPanelStyle.Call(hwnd, wndProcIndex)
+		if previous == 0 {
+			return
+		}
+		callback := syscall.NewCallback(func(wnd uintptr, message uint32, wparam, lparam uintptr) uintptr {
+			if message == notifyMessage {
+				switch uint16(lparam) {
+				case 0x0202, 0x0203: // WM_LBUTTONUP / WM_LBUTTONDBLCLK
+					go butterflyOpen()
+					return 0
+				}
+			}
+			result, _, _ := callWindowProc.Call(previous, wnd, uintptr(message), wparam, lparam)
+			return result
+		})
+		_, _, _ = procPanelSetStyle.Call(hwnd, wndProcIndex, callback)
+		return
+	}
+}
+
+func systrayRun(configure, onQuit func()) {
 	systray.Run(func() {
 		systray.SetTitle("牵牛星")
-		mButterfly := systray.AddMenuItem("蝴蝶助理", "打开新版对话窗口")
-		mClassic := systray.AddMenuItem("经典面板", "查看群聊、任务确认和产物")
+		mButterfly := systray.AddMenuItem("打开牵牛星", "打开对话窗口")
 		mConfigure := systray.AddMenuItem("设置", "管理站点授权、浏览器和补充内容")
 		mQuit := systray.AddMenuItem("退出", "Stop local agent")
 		trayState.Lock()
 		trayState.ready = true
 		applyTrayAppearance(trayState.connected)
 		trayState.Unlock()
+		installTrayOpen()
+		go butterflyOpen()
 		go func() {
 			for {
 				select {
 				case <-mButterfly.ClickedCh:
 					butterflyOpen()
-				case <-mClassic.ClickedCh:
-					classic()
 				case <-mConfigure.ClickedCh:
 					configure()
 				case <-mQuit.ClickedCh:
-					onQuit()
+					systray.Quit()
 					return
 				}
 			}
 		}()
-	}, func() { os.Exit(0) })
+	}, onQuit)
 }
 
 var trayState struct {

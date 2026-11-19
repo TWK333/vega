@@ -777,26 +777,33 @@ async function clientChat(op: string, a: Obj, userId: string) {
   if (op === "threads") {
     const employees = await Promise.all((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map(async (employee) => {
       const s = await employee.state(), last = s.chatSession ? await store.lastMessage(s.chatSession) : undefined;
+      const unread = s.chatSession ? await store.unread(user.id, s.chatSession) : 0, lastAt = last?.at || 0;
       return {
         thread: "employee:" + s.id, kind: "employee", id: s.id, name: s.name, avatar: s.avatar || "", mine: s.ownerId === user.id,
-        unread: s.chatSession ? await store.unread(user.id, s.chatSession) : 0,
+        unread, lastViewedAt: s.chatSession ? await store.lastViewedAt(user.id, s.chatSession, lastAt, unread) : lastAt,
         running: !!s.chatSession && engine.active.has(s.chatSession),
         runningTasks: s.tasks.filter((task) => task.status === "running").length,
         attention: s.tasks.filter((task) => ["waiting", "approval"].includes(task.status)).length,
-        lastText: last ? String(last.text || "").slice(0, 60) : "", lastAt: last?.at || 0,
+        lastText: last ? String(last.text || "").slice(0, 60) : "", lastAt,
       };
     }));
     const groups = (await engine.groups.list(user)).map((g) => ({
       thread: "group:" + g.id, kind: "group", id: g.id, name: g.name,
       users: g.users?.length || 0, employees: g.employees?.length || 0,
-      unread: g.unread, running: Array.isArray(g.running) && g.running.length > 0,
+      unread: g.unread, lastViewedAt: g.lastViewedAt, running: Array.isArray(g.running) && g.running.length > 0,
       lastText: g.lastText || "", lastAt: g.lastAt || 0,
     }));
     return { employees, groups };
   }
   const thread = String(a.thread || ""), colon = thread.indexOf(":"), kind = thread.slice(0, colon), id = thread.slice(colon + 1);
-  assert(colon > 0 && id, "Invalid thread");
+  assert((kind === "employee" || kind === "group") && id, "Invalid thread");
   if (op === "messages") {
+    const receiptFor = a.receiptFor;
+    assert(receiptFor === undefined || typeof receiptFor === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(receiptFor), "Invalid message ID");
+    const receipt = async (session: string, messageId: string) => {
+      const row = await store.clientMessage(session, user.id, messageId);
+      return { receiptFor: messageId, receipt: row?.role === "user" ? { seq: row.seq } : null };
+    };
     const query = new URLSearchParams();
     if (typeof a.after === "number") query.set("after", String(Math.max(0, Math.floor(a.after))));
     else query.set("limit", String(Math.min(200, Math.max(1, Number(a.limit) || 100))));
@@ -804,6 +811,7 @@ async function clientChat(op: string, a: Obj, userId: string) {
       const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
       assert(employee && await employee.accessible(user), "Employee not found");
       const session = await employee.chat(user.id);
+      if (receiptFor !== undefined) return receipt(session.id, receiptFor);
       const page = await chatHistory(store, session.id, query);
       // 待确认气泡里的任务状态会随作答翻转：返回前把它刷成当前值，面板按它决定还能不能点。
       const live = new Map((await employee.state()).tasks.map((task) => [task.id, task.status]));
@@ -811,26 +819,28 @@ async function clientChat(op: string, a: Obj, userId: string) {
         for (const task of message.tasks || [])
           if (live.has(task.id)) task.status = live.get(task.id)!;
       const state = await employee.state();
-      return { thread, title: state.name, avatar: state.avatar || "", running: engine.active.has(session.id), ...page };
+      return { thread, title: state.name, avatar: state.avatar || "", running: engine.active.has(session.id), readSeq: await store.readSeq(user.id, session.id), ...page };
     }
     const group = await engine.groups.mine(user, id);
+    if (receiptFor !== undefined) return receipt(group.session, receiptFor);
     // 群聊作者头像是预设字符串（bot:shape:color），给面板解析成 BotAvatar；key 为 kind:id。
     const view = await engine.groups.view(group, user);
     const authors = Object.fromEntries([
       ...(view.employees || []).map((p) => ["employee:" + p.id, { avatar: p.avatar || "" }]),
       ...(view.users || []).map((p) => ["user:" + p.id, { avatar: p.avatar || "" }]),
     ]);
-    return { thread, title: group.name, authors, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), ...await chatHistory(store, group.session, query) };
+    return { thread, title: group.name, authors, running: Object.values(group.memberSessions || {}).some((s) => engine.active.has(String(s))), readSeq: await store.readSeq(user.id, group.session), ...await chatHistory(store, group.session, query) };
   }
   if (op === "read") {
+    assert(a.through === undefined || Number.isSafeInteger(a.through) && a.through >= 0, "Invalid read cursor");
     if (kind === "employee") {
       const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
       assert(employee && await employee.accessible(user), "Employee not found");
       const session = await employee.chat(user.id);
-      return { seq: await store.markRead(user.id, session.id) };
+      return { seq: await store.markRead(user.id, session.id, a.through) };
     }
     const group = await engine.groups.mine(user, id);
-    return { seq: await store.markRead(user.id, group.session) };
+    return { seq: await store.markRead(user.id, group.session, a.through) };
   }
   if (op === "control") {
     // 面板上的待确认气泡：只允许对自己的牛马发 approve/answer（群聊任务不在这里控制）。
@@ -841,17 +851,22 @@ async function clientChat(op: string, a: Obj, userId: string) {
     return await employee.control({ id: a.id, action: a.action, approved: a.approved, text: a.text }, { token: "", name: user.username || "用户" });
   }
   if (op === "send") {
-    const text = String(a.text || "").trim();
+    check(user.role !== "viewer", 403, "只读账号不能发送消息");
+    const text = typeof a.text === "string" ? a.text.trim() : "", clientMessageId = a.clientMessageId;
     assert(text && text.length <= 2 << 20, "Message required");
+    assert(clientMessageId === undefined || typeof clientMessageId === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(clientMessageId), "Invalid message ID");
     if (kind === "employee") {
       const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
       assert(employee && await employee.accessible(user), "Employee not found");
       const session = await employee.chat(user.id);
-      await engine.submitChat(session.id, { role: "user", text, actorId: user.id });
+      check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
+      await engine.submitChat(session.id, {
+        role: "user", text, actorId: user.id, clientMessageId,
+        clientMessageHash: clientMessageId ? createHash("sha256").update(JSON.stringify([text, [], [], null])).digest("hex") : undefined,
+      });
       return { ok: true };
     }
-    await engine.groups.send(user, id, { text });
-    return { ok: true };
+    return { ok: true, ...await engine.groups.send(user, id, { text, clientMessageId }) };
   }
   throw createError({ statusCode: 404, statusMessage: "Chat route not found" });
 }

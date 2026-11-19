@@ -34,11 +34,13 @@ func (a *Agent) assistantMount(mux *http.ServeMux) {
 		switch {
 		case strings.HasPrefix(path, "api/"):
 			a.assistantAPI(w, r, strings.TrimPrefix(path, "api/"))
-		case path == "marked.js" && r.Method == http.MethodGet:
+		case path == "" && r.Method == http.MethodGet && assistantGrokAssets != nil:
+			http.Redirect(w, r, base+assistantGrokPath, http.StatusFound)
+		case path == "marked.js" && r.Method == http.MethodGet && assistantGrokAssets == nil:
 			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(assistantMarked)
-		case path == "" && r.Method == http.MethodGet:
+		case path == "" && r.Method == http.MethodGet && assistantGrokAssets == nil:
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			_, _ = w.Write(assistantPage)
@@ -91,6 +93,21 @@ func (a *Agent) assistantAPI(w http.ResponseWriter, r *http.Request, op string) 
 	case "close":
 		butterflyPanelPark()
 		assistantReply(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	case "authorize":
+		if r.Header.Get("Origin") != "http://"+localAddress {
+			http.Error(w, "local browser origin required", http.StatusForbidden)
+			return
+		}
+		a.mu.Lock()
+		address := a.deviceAuthURL
+		a.mu.Unlock()
+		if address == "" {
+			assistantReply(w, http.StatusConflict, map[string]string{"error": "暂无待确认的站点授权。请检查「连接授权」中的站点状态；若授权已失效，请退出并重新启动客户端。"})
+			return
+		}
+		openDeviceAuthorization(address)
+		assistantReply(w, http.StatusOK, map[string]bool{"ok": true})
 		return
 	case "metadata", "threads", "messages", "send", "read", "control", "file":
 	default:
@@ -146,7 +163,7 @@ func (a *Agent) assistantAPI(w http.ResponseWriter, r *http.Request, op string) 
 	}
 	if response.StatusCode == http.StatusNotFound {
 		// 老版本服务端没有这几个接口（还得要网站 cookie）：给页面一句能看懂的话。
-		assistantReply(w, http.StatusConflict, map[string]any{"error": "服务端还没有更新到支持蝴蝶面板的版本（缺少 /api/local-agent/chat）"})
+		assistantReply(w, http.StatusConflict, map[string]any{"error": "服务端还没有更新到支持桌面对话的版本（缺少 /api/local-agent/chat）"})
 		return
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

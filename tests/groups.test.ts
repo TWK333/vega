@@ -471,6 +471,20 @@ test("工作面板 UI: opening a task keeps the main chat beside its topic and t
   assert.match(panel, /\{\{ requester\(task\) \}\} 发起/);
 });
 
+test("group sends deduplicate by sender and message ID, not by the text", async () => {
+  const { engine, close } = await fixture();
+  try {
+    const group = await engine.groups.create(u1, { name: "回显测试", users: ["u2"] });
+    const message = { text: "相同内容", clientMessageId: "desktop-msg-group-1" };
+    const [one, retry] = await Promise.all([engine.groups.send(u1, group.id, message), engine.groups.send(u1, group.id, message)]);
+    const same = await engine.groups.send(u1, group.id, { ...message, clientMessageId: "desktop-msg-group-2" });
+    const peer = await engine.groups.send(u2, group.id, message);
+    assert.equal(one.seq, retry.seq);
+    assert.equal(new Set([one.seq, same.seq, peer.seq]).size, 3);
+    assert.equal((await groupMessages(engine, group.id)).filter(row => row.role === "user").length, 3);
+  } finally { await close(); }
+});
+
 test("unread: one read marker per user and conversation; others' visible messages count, capped at 100", async () => {
   const { store, engine, make, close } = await fixture();
   try {
@@ -478,11 +492,16 @@ test("unread: one read marker per user and conversation; others' visible message
     const group = await engine.groups.create(u1, { name: "未读", users: ["u2"], employees: [a] });
     const session = (await engine.groups.get(group.id))!.session;
     await store.append(session, { role: "user", text: "我自己说的", actorId: "u1", author: { kind: "user", id: "u1", name: "alice" } });
-    await store.append(session, { role: "user", text: "bob 说的", actorId: "u2", author: { kind: "user", id: "u2", name: "bob" } });
-    await store.append(session, { role: "assistant", text: "牛马回复", author: { kind: "employee", id: a, name: "小A" } });
+    const peer = await store.append(session, { role: "user", text: "bob 说的", actorId: "u2", author: { kind: "user", id: "u2", name: "bob" }, at: 1000 });
+    await store.append(session, { role: "assistant", text: "牛马回复", author: { kind: "employee", id: a, name: "小A" }, at: 2000 });
     await store.append(session, { role: "assistant", notice: true, text: "系统通知" });
     const unread = async (user: any) => (await engine.groups.list(user)).find((g) => g.id === group.id)!.unread;
     assert.deepEqual([await unread(u1), await unread(u2)], [2, 2], "own messages and notices never count");
+    await store.markRead("u1", session, peer.seq);
+    assert.equal(await unread(u1), 1, "desktop only marks what has been fetched");
+    assert.equal((await engine.groups.list(u1)).find(g => g.id === group.id)?.lastViewedAt, 1000);
+    await store.markRead("u1", session, peer.seq - 1);
+    assert.equal(await store.readSeq("u1", session), peer.seq, "stale pages cannot roll back the shared marker");
     await store.markRead("u1", session);
     assert.equal(await unread(u1), 0);
     assert.equal(await unread(u2), 2, "markers are per user");
