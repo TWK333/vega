@@ -402,8 +402,11 @@ async function httpApi(path, method = "GET", data) {
     ), { status: response.status });
   return result;
 }
+const inspectedSession = computed(() => view.value === "debug" ? pageSub.value : employeeSession.value);
+const inspectedModel = ref("");
+watch(inspectedSession, () => { inspectedModel.value = ""; }, { flush: "sync" });
 // Token streams and per-tool detail are pushed only for the conversations on screen.
-const subscribedSessions = computed(() => [...new Set([current.value?.id, employee.value?.chatSession, employeeSession.value].filter(Boolean))]);
+const subscribedSessions = computed(() => [...new Set([current.value?.id, employee.value?.chatSession, inspectedSession.value].filter(Boolean))]);
 // All API calls are plain HTTP; the SSE stream only pushes events.
 function api(path, method = "GET", data) {
   return httpApi(path, method, data);
@@ -485,6 +488,7 @@ function openEventSocket(url, generation) {
       // Missed events were replayed in order; only a page outside the replay window reloads its state.
       if (reconnect && !value.replayed)
         void (async () => {
+          inspectedModel.value = "";
           await bootstrap();
           if (generation !== eventGeneration) return;
           if (current.value) await refreshCurrent();
@@ -929,10 +933,16 @@ function resetLive() {
   flushLive();
   live.value = "";
   thinking.value = "";
+  model.value = "";
   liveEpoch++;
 }
 /** Event handlers never wait for the network: refreshes are coalesced and run in the background. */
 function handleEvent(event) {
+  const switchFinished = event.type === "tool_end" && event.data?.call?.name === "switch_scene";
+  if (event.session && event.session === inspectedSession.value) {
+    if (event.type === "message_start") inspectedModel.value = event.data?.model || "";
+    else if (["message_end", "scene", "error", "done"].includes(event.type)) inspectedModel.value = "";
+  }
   if (view.value === "debug" && ["started", "message_end", "tool_end", "done", "employee_changed"].includes(event.type)) debugRevision.value++;
   if (event.session && event.session === employee.value.chatSession) {
     employeeEvent.value = event;
@@ -998,6 +1008,7 @@ function handleEvent(event) {
     return;
   }
   if (event.taskId) {
+    if (switchFinished && event.session === employeeSession.value) employeeSessionVersion.value++;
     if (
       ["started", "message_end", "compacted", "error", "done", "user", "steer"].includes(
         event.type,
@@ -1051,6 +1062,7 @@ function handleEvent(event) {
     case "message_start":
       resetLive();
       model.value = event.data.model;
+      if (nearBottom()) void scrollBottom();
       break;
     case "tool_start":
       activeTools.value.push(event.data);
@@ -1059,6 +1071,7 @@ function handleEvent(event) {
       activeTools.value = activeTools.value.filter(
         (t) => t.id !== event.data.call.id,
       );
+      if (switchFinished) background(refreshCurrentSoon());
       break;
     case "error":
       error.value = event.data;
@@ -1067,7 +1080,8 @@ function handleEvent(event) {
       toast(`模型请求重试 ${event.data.attempt}，尚未重放任何工具`);
       break;
     case "scene":
-      toast(`当前场景：${event.data.scene} · ${event.data.model || ""}`);
+      model.value = "";
+      toast(`当前场景：${event.data.scene}`);
       break;
     case "user":
     case "steer": {
@@ -1511,8 +1525,8 @@ const unread = useUnread(() => ({ api, view, creatingEmployee, employeeSession, 
       </template>
       <GroupChat v-else-if="view === 'group'" :key="selectedGroup || 'new'" :api="api" :user="user" :group-id="selectedGroup" :selected-task="selectedGroupTask" :my-employees="myEmployees" :revision="groupRevision" @task-change="setGroupTask" @changed="loadGroupsSoon()" @created="openGroup" @closed="groupClosed" @cancel="view = 'employee'" @open-employee="openGroupEmployee" @open-task="openEmployeeTaskOf" @inspect="openEmployee($event)" @read="unread.groupRead" />
       <Accounts v-else-if="view === 'account'" :api="api" :user="user" @error="error = $event" @notice="notice = $event" @signed-out="resetLogin" @changed="attempt(bootstrap)" />
-      <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" @tab="setPageTab" />
-      <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" @back="openEmployee()" @open="openEmployee($event)" />
+      <DebugSessions v-else-if="view === 'debug' && isAdmin" :api="api" :revision="debugRevision" :tab="pageSub" :model="inspectedModel" @tab="setPageTab" />
+      <EmployeeSessionView v-else-if="view === 'employee' && employeeSession" :api="api" :session-id="employeeSession" :revision="employeeSessionVersion" :model="inspectedModel" @back="openEmployee()" @open="openEmployee($event)" />
       <section v-else-if="view === 'employee'" class="employee-workspace" :aria-busy="employeeDeleting">
         <template v-if="(creatingEmployee || !employees.length)">
           <PageHeader :title="canExecute ? '创建新牛马' : '数字牛马'" :subtitle="canExecute ? '取个名字，交代工作方向，就可以开始了。' : ''" :back="employees.length ? '返回' : ''" @back="creatingEmployee = false" />

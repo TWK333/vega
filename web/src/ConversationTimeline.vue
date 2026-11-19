@@ -16,7 +16,7 @@ const props = defineProps({
   model: String,
   newFrom: { type: Number, default: 0 },
 });
-const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking }, previous));
+const turns = computed((previous) => conversationTurns(props.messages, { running: props.running, live: props.live, thinking: props.thinking, model: props.model }, previous));
 // 「新」分界：进来时上次看到的位置之后的第一轮（内容可能是旧用户消息加新回复）；来了新消息就收起。
 const markGone = ref(false);
 const newAt = computed(() => props.newFrom > 0
@@ -36,10 +36,11 @@ watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
       <img v-for="(image, n) in turn.user.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="用户附图" />
       <FileCard v-for="(file, n) in turn.user.files || []" :key="'f' + n" :file="file" />
     </article>
-    <div v-if="turn.body.length || turn.running" class="message-meta"><span>{{ name }}</span><span>{{ turn.body.findLast((message) => message.model)?.model || (turn.running ? model : '') || '' }}</span></div>
+    <div v-if="turn.body.length || turn.running" class="message-meta"><span>{{ name }}</span></div>
     <TurnProcess v-if="turn.process.length" :messages="turn.body" :started-at="turn.user?.at" :running="turn.running">
       <template v-for="(entry, i) in turn.process" :key="entry.key">
-        <ToolSteps v-if="entry.kind === 'process'" :items="entry.items" :active="turn.running && i === turn.lastProcessIndex ? activeTools : []" :live="turn.running && (i === turn.process.length - 1 || (activeTools.length && i === turn.lastProcessIndex))" />
+        <p v-if="entry.kind === 'model'" class="turn-model">当前模型 · <code>{{ entry.model }}</code></p>
+        <ToolSteps v-else-if="entry.kind === 'process'" :items="entry.items" :active="turn.running && i === turn.lastProcessIndex ? activeTools : []" :live="turn.running && (i === turn.process.length - 1 || (activeTools.length && i === turn.lastProcessIndex))" />
         <article v-else :class="['message', entry.message.role, { continuation: entry.continuation }]">
           <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" :streaming="entry.message.streaming" />
           <img v-for="(image, n) in entry.message.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="助手附图" />
@@ -47,13 +48,17 @@ watch(() => props.messages.at(-1)?.seq || 0, (seq) => {
         </article>
       </template>
     </TurnProcess>
-    <article v-for="entry in turn.conclusion" :key="entry.key" :class="['message', entry.message.role, { continuation: entry.continuation, error: !!entry.message.error }]" :role="entry.message.error ? 'alert' : undefined">
-      <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" />
-      <img v-for="(image, n) in entry.message.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="助手附图" />
-    </article>
+    <template v-for="entry in turn.conclusion" :key="entry.key">
+      <p v-if="entry.kind === 'model'" class="turn-model">当前模型 · <code>{{ entry.model }}</code></p>
+      <article v-else :class="['message', entry.message.role, { continuation: entry.continuation, error: !!entry.message.error }]" :role="entry.message.error ? 'alert' : undefined">
+        <MessageText v-if="entry.message.text" :text="entry.message.displayText || entry.message.text" />
+        <img v-for="(image, n) in entry.message.images || []" :key="n" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="助手附图" />
+      </article>
+    </template>
     <ToolSteps v-if="turn.running && activeTools.length && turn.lastProcessIndex < 0" :active="activeTools" live />
   </section>
 </template>
 <style scoped>
+.turn-model { margin: 4px 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
 .message img { max-width: 100%; max-height: 360px; object-fit: contain; }
 </style>

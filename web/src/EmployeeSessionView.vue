@@ -9,6 +9,7 @@ const props = defineProps({
   sessionId: String,
   revision: Number,
   debug: Boolean,
+  model: String,
 });
 const emit = defineEmits(["back", "open"]);
 const raw = ref(false);
@@ -181,6 +182,12 @@ watch(
   () => void refresh(),
   { immediate: true },
 );
+watch(() => props.model, async (model) => {
+  const el = transcript.value;
+  if (!model || !running.value || !el || !nearBottom()) return;
+  await nextTick();
+  if (el === transcript.value && model === props.model) el.scrollTop = el.scrollHeight;
+});
 onBeforeUnmount(() => { version++; });
 </script>
 <template>
@@ -210,14 +217,14 @@ onBeforeUnmount(() => { version++; });
       >{{ item.kind === 'main' ? item.title : item.title }}<span v-if="item.status === 'running' || item.status === 'working'" class="dot info pulse"></span></button>
     </nav>
     <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应牛马，不能在这里输入或重放操作。<template v-if="debug">导出该会话截至导出时的全部原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
-    <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>牛马 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>模型 / 场景</dt><dd>{{ session.model || '未配置' }} / {{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
+    <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>牛马 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>会话场景</dt><dd>{{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" class="context-note" role="status"><span class="spinner"></span>正在加载记录…</p>
     <div v-if="hasMore" class="load-older" :aria-busy="loadingOlder">
       <span v-if="loadingOlder" class="spinner" role="status" aria-label="正在加载更早的记录"></span>
       <button v-else type="button" class="sm ghost" @click="loadOlder">上滑查看更早的记录</button>
     </div>
-    <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" />
+    <ConversationTimeline v-if="!raw" :key="sessionId" :messages="messages" :running="running" :model="model" />
     <template v-else><article
       v-for="(message, i) in messages"
       :key="sessionId + '-' + (message.seq || i)"

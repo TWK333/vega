@@ -27,7 +27,8 @@ function mount() {
     view: ref("chat"), debugRevision: ref(0), employee: ref({ chatSession: "employee-chat" }), employeeEvent: ref(null),
     current: ref({ id: "s1" }), live: ref(""), thinking: ref(""), model: ref(""), activeTools: ref([]), error: ref(""),
     running: ref({}), contextBudget: ref(null), fireState: ref(null), draft: ref(""), attachments: ref([]),
-    employeeSession: ref(""), employeeSessionVersion: ref(0), selectedEmployee: ref(""), activeTaskCount: ref(0), employeeError: ref(""),
+    employeeSession: ref(""), employeeSessionVersion: ref(0), inspectedSession: ref(""), inspectedModel: ref(""),
+    selectedEmployee: ref(""), activeTaskCount: ref(0), employeeError: ref(""),
     transcript: ref({ scrollHeight: 1000, scrollTop: 600, clientHeight: 400 }),
     refreshCurrent: slow("refreshCurrent"), bootstrap: slow("bootstrap"), refreshEmployee: slow("refreshEmployee"),
     loadModels: async () => {}, selectSession: async () => {}, queueEmployeeRefresh() {}, toast() {}, api: async () => {}, unread: { onEvent() {} },
@@ -80,6 +81,7 @@ test("events are not held up by refreshes, and refreshes coalesce", async () => 
   for (const p of s.pending.splice(0)) p.resolve();
   await tick(); await tick();
   assert.equal(s.context.live.value, "next", "a finished refresh does not wipe text from a message that started after it");
+  assert.equal(s.context.model.value, "m2", "a finished refresh does not wipe the newer model either");
 });
 
 
@@ -102,6 +104,25 @@ test("events for another session or the employee chat never touch the live trans
   s.runFrames(); s.runTimers();
   assert.equal(s.context.live.value, "");
   assert.equal(s.context.employeeEvent.value.data, "y");
+});
+
+test("the inspected task shows the model that started, not a configured scene model or a different session's model", () => {
+  const s = mount();
+  s.context.view.value = "employee";
+  s.context.employeeSession.value = s.context.inspectedSession.value = "task-session";
+  const send = (type: string, data: object = {}) => s.handleEvent({ type, data, taskId: "task", session: "task-session" });
+  send("message_start", { model: "before" });
+  assert.equal(s.context.inspectedModel.value, "before");
+  send("scene", { scene: "coding", model: "configured" });
+  assert.equal(s.context.inspectedModel.value, "");
+  send("tool_end", { call: { name: "switch_scene" } });
+  assert.equal(s.context.employeeSessionVersion.value, 1, "refresh the stored switch receipt before the next reply ends");
+  send("message_start", { model: "actual" });
+  s.handleEvent({ type: "message_start", data: { model: "different" }, taskId: "other", session: "other" });
+  assert.equal(s.context.inspectedModel.value, "actual");
+  assert.equal(s.context.model.value, "", "the normal chat's model is independent");
+  send("done");
+  assert.equal(s.context.inspectedModel.value, "");
 });
 
 test("markdown re-renders at most every interval while streaming and catches up when it stops", async () => {

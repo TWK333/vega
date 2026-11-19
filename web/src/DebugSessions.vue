@@ -6,7 +6,7 @@ import Icon from "./Icon.vue";
 import { formatBeijing } from "../../shared/time";
 import { taskLabel, taskTone } from "./task-status";
 import { groupDebugSessions, visibleDebugSessions } from "./debug-sessions.js";
-const props = defineProps({ api: Function, revision: Number, tab: String });
+const props = defineProps({ api: Function, revision: Number, tab: String, model: String });
 const emit = defineEmits(["tab"]);
 const sessions = ref([]), selected = ref(""), employee = ref(""), search = ref(""), busy = ref(false), error = ref("");
 const labels = { chat: "沟通", group: "群聊", narrator: "旁白", work: "主执行", computer: "浏览器" };
@@ -61,7 +61,7 @@ onBeforeUnmount(() => { disposed = true; version++; });
       </div>
     </section>
     <section class="debug-detail-pane" aria-label="会话记录">
-      <EmployeeSessionView v-if="selected" :key="selected" :api="api" :session-id="selected" :revision="revision" debug @back="selected = ''" />
+      <EmployeeSessionView v-if="selected" :key="selected" :api="api" :session-id="selected" :revision="revision" :model="model" debug @back="selected = ''" />
       <div v-else class="debug-placeholder"><Icon name="code" :size="32" /><strong>选择一个会话</strong><span>查看完整消息、工具调用与原始参数。</span></div>
     </section>
   </div>

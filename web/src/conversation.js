@@ -64,8 +64,8 @@ export function chatCardVisibility(messages, taskStatus) {
   return visibility;
 }
 
-/** Match Nova: adjacent thoughts/tools form one process segment; text breaks it. */
-export function timelineOf(messages) {
+/** Adjacent thoughts/tools form one process segment; visible text and model changes break it. */
+export function timelineOf(messages, modelState = {}) {
   const groups = [];
   const completedCalls = new Set(messages.filter((message) => message.role === "tool").map((message) => message.callId));
   const callById = new Map();
@@ -86,8 +86,14 @@ export function timelineOf(messages) {
       });
   };
   for (const m of messages) {
-    if (m.role === "tool") addProcess(withArgs(m, callById.get(m.callId)));
-    else {
+    if (m.role === "tool") {
+      addProcess(withArgs(m, callById.get(m.callId)));
+      if (m.name === "switch_scene" && !m.error) modelState.current = "";
+    } else {
+      if (m.role === "assistant" && m.model && m.model !== modelState.current) {
+        groups.push({ kind: "model", key: `model-${m.seq ?? groups.length}`, model: m.model });
+        modelState.current = m.model;
+      }
       if (m.thinking?.trim())
         addProcess({ ...m, role: "thought", text: m.thinking, thinking: undefined });
       if (m.role !== "assistant" || m.text?.trim() || m.images?.length) {
@@ -107,7 +113,7 @@ export function timelineOf(messages) {
   return groups;
 }
 
-export function conversationTurns(messages, { running = false, thinking = "", live = "" } = {}, previous = []) {
+export function conversationTurns(messages, { running = false, thinking = "", live = "", model = "" } = {}, previous = []) {
   const turns = groupTurns(messages);
   const bySeq = new Map();
   for (const turn of previous) for (const message of [turn.user, ...turn.body])
@@ -115,18 +121,25 @@ export function conversationTurns(messages, { running = false, thinking = "", li
   const itemKey = (item) => `${item.role}-${item.callId || item.id || item.seq}`;
   if (running && !turns.length) turns.push({ user: null, body: [], process: [], conclusion: [] });
   return turns.map((turn, index) => {
-    const active = running && index === turns.length - 1;
-    const process = timelineOf(active ? turn.body : turn.process);
-    const conclusion = active ? [] : timelineOf(turn.conclusion);
+    const active = running && index === turns.length - 1, modelState = {};
+    const rows = active && model ? [...turn.body, { role: "assistant", seq: "live-model", model }] : active ? turn.body : turn.process;
+    const process = timelineOf(rows, modelState), conclusion = [];
     const appendThoughts = (items) => {
       const last = process.at(-1);
       if (last?.kind === "process") last.items.push(...items);
-      else process.push({ kind: "process", key: "process-final-thoughts", items });
+      else process.push({ kind: "process", key: `process-final-thoughts-${items[0].seq ?? process.length}`, items });
     };
-    // Final answers can carry reasoning too; keep that reasoning in the fold, not in the result.
-    for (const entry of conclusion) if (entry.kind === "process") appendThoughts(entry.items);
+    // Reasoning stays in the fold, with the model line that precedes it.
+    if (!active) for (const entry of timelineOf(turn.conclusion, modelState)) {
+      if (entry.kind !== "process") conclusion.push(entry);
+      else {
+        if (conclusion.at(-1)?.kind === "model") process.push(conclusion.pop());
+        appendThoughts(entry.items);
+      }
+    }
     if (active && thinking) appendThoughts([{ role: "thought", seq: "live-thought", text: thinking }]);
     if (active && live) process.push({ kind: "message", key: "assistant-live", message: { role: "assistant", text: live, streaming: true }, continuation: false });
+    const lastGroup = process.findLastIndex((entry) => entry.kind !== "message");
     // Prepending can reveal a turn's user or the beginning of an open tool group: keep mounted folds by overlap.
     const old = bySeq.get(turn.user?.seq) || turn.body.map((message) => bySeq.get(message.seq)).find(Boolean);
     const keys = new Map(), used = new Set();
@@ -142,8 +155,8 @@ export function conversationTurns(messages, { running = false, thinking = "", li
       key: old?.key ?? `turn-${turn.user?.seq ?? turn.body[0]?.seq ?? "live"}`,
       running: active,
       process,
-      lastProcessIndex: process.findLastIndex((entry) => entry.kind === "process"),
-      conclusion: conclusion.filter((entry) => entry.kind === "message"),
+      lastProcessIndex: process[lastGroup]?.kind === "process" ? lastGroup : -1,
+      conclusion,
     };
   });
 }

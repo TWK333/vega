@@ -66,6 +66,40 @@ test("running Nova turns preserve reasoning/live text and only the active turn r
   assert.equal(conversationTurns([], {}).length, 0);
 });
 
+test("execution timeline marks models after successful switches and ignores a queued switch", () => {
+  const [turn] = conversationTurns([
+    { role: "user", seq: 1, text: "verify and fix" },
+    { role: "assistant", seq: 2, model: "model-a", calls: [{ id: "switch", name: "switch_scene" }] },
+    { role: "tool", seq: 3, callId: "switch", name: "switch_scene" },
+    { role: "assistant", seq: 4, model: "model-b", calls: [{ id: "blocked", name: "switch_scene" }] },
+    { role: "tool", seq: 5, callId: "blocked", name: "switch_scene", error: true, text: '{"status":"queued"}' },
+    { role: "assistant", seq: 6, model: "model-b", calls: [{ id: "read", name: "read" }] },
+    { role: "tool", seq: 7, callId: "read", name: "read" },
+    { role: "assistant", seq: 8, model: "model-c", text: "final" },
+  ]);
+  const groups: { key: string; model?: string; items?: { callId: string }[] }[] = turn.process;
+  assert.deepEqual(groups.map((entry) => entry.model ?? entry.items?.map((item) => item.callId)), ["model-a", ["switch"], "model-b", ["blocked", "read"]]);
+  assert.deepEqual(turn.conclusion.map((entry) => entry.model || entry.message.text), ["model-c", "final"]);
+});
+
+test("the next live or saved reply marks its actual model even when two scenes share it", () => {
+  const messages = [
+    { role: "assistant", seq: 1, model: "shared", calls: [{ id: "switch", name: "switch_scene" }] },
+    { role: "tool", seq: 2, callId: "switch", name: "switch_scene" },
+  ];
+  const [waiting] = conversationTurns(messages, { running: true });
+  assert.deepEqual(waiting.process.map((entry) => entry.kind), ["model", "process"], "the receipt alone does not prove the next model has run");
+  const [streaming] = conversationTurns(messages, { running: true, model: "shared" });
+  assert.equal(streaming.process.at(-1)?.model, "shared");
+  assert.equal(streaming.lastProcessIndex, -1, "the next active tools must not attach to the previous model's tool group");
+  const [finished] = conversationTurns([...messages, { role: "assistant", seq: 3, model: "shared", thinking: "final check", text: "final" }]);
+  assert.deepEqual(finished.process.map((entry) => entry.kind), ["model", "process", "model", "process"]);
+  const entry = finished.process[3];
+  assert("items" in entry && Array.isArray(entry.items));
+  assert.equal(entry.items[0].text, "final check");
+  assert.equal(finished.conclusion[0].message.text, "final");
+});
+
 test("image-only results stay outside the fold and unfinished tool calls are never final conclusions", () => {
   const [image] = conversationTurns([{ role: "assistant", seq: 1, images: [{ mime: "image/png", blobId: "result" }] }]);
   assert.equal(image.conclusion[0].message.images[0].blobId, "result");

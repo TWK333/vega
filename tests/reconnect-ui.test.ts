@@ -24,7 +24,7 @@ function mount(): any {
     window: { location: { href: "https://vega.test/" }, addEventListener: (type: string, fn: any) => listeners[type] = fn, removeEventListener() {} },
     document: { hidden: false, addEventListener: (type: string, fn: any) => listeners[type] = fn, removeEventListener() {} },
     onMounted: (fn: any) => fn(), onBeforeUnmount() {},
-    computed: (fn: () => any) => ({ get value() { return fn(); } }), watch() {},
+    ref, computed: (fn: () => any) => ({ get value() { return fn(); } }), watch() {},
     setTimeout: (fn: any, ms: number) => { timers.set(++serial, { fn, ms }); return serial; },
     clearTimeout: (id: number) => timers.delete(id),
     setInterval: (fn: any) => { intervals.set(++serial, fn); return serial; },
@@ -45,7 +45,7 @@ function mount(): any {
     eventReconnect: undefined, eventRetryDelay: 500, eventsWatchdog: undefined, eventCursor: "", lastEventAt: 0, EVENT_SILENCE_MS: 75000,
     eventQueue: Promise.resolve(), closed: false,
     csrfToken: ref("csrf"), authenticated: ref(true), error: ref(""), clientListReady: ref(true), onlineClients: ref([{ id: "client" }]),
-    current: ref({ id: "chat-1" }), employee: ref({ chatSession: "employee-chat" }), view: ref("employee"), employeeSession: ref(""), employeeSessionVersion: ref(0),
+    current: ref({ id: "chat-1" }), employee: ref({ chatSession: "employee-chat" }), view: ref("employee"), pageSub: ref(""), employeeSession: ref(""), employeeSessionVersion: ref(0),
     bootstrap: async () => {}, refreshCurrent: async () => {}, loadEmployee: async () => {}, handleEvent: async (value: any) => { handled.push(value); },
   };
   context.resetLogin = () => { context.authenticated.value = false; context.closed = true; };
@@ -65,6 +65,14 @@ async function connected(s: ReturnType<typeof mount>, ready: any = { type: "read
   await tick();
   return s.context.eventsSocket;
 }
+
+test("the open debug session is subscribed for live model events", async () => {
+  const s = mount();
+  s.context.view.value = "debug";
+  s.context.pageSub.value = "debug-session";
+  await connected(s);
+  assert.ok(s.sockets.at(-1)?.url.searchParams.get("sessions")?.split(",").includes("debug-session"));
+});
 
 test("every API call is plain HTTP, and writes still go out while realtime is disconnected", async () => {
   const s = mount();
