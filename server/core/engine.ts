@@ -179,7 +179,8 @@ export class Engine {
   mcpSessions = new Map<string, { key: string; client: MCP }>();
   async mcpFor(session: Session, config: Config) {
     if (session.employeeId) config = await this.config(session);
-    const key = JSON.stringify({ cwd: session.cwd, employeeId: session.employeeId, config: config.mcp || {} }),
+    const key = JSON.stringify({ cwd: session.cwd, ownerId: session.ownerId, employeeId: session.employeeId,
+      localAgent: !!session.localAgent, config: config.mcp || {} }),
       existing = this.mcpSessions.get(session.id);
     if (existing?.key === key) return existing.client;
     if (existing) void existing.client.close();

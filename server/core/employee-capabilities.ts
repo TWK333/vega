@@ -11,6 +11,8 @@ import { type Obj } from "./util";
 export async function migrateEmployeeCapabilities(store: Store) {
   if (await store.get("employee-capabilities:migrated", false) || await store.get("employee:default-deleted", false)) return;
   await store.transaction(async () => {
+        // Another request may have migrated while this one was waiting for the DB writer.
+        if (await store.get("employee-capabilities:migrated", false) || await store.get("employee:default-deleted", false)) return;
         const config = await store.get<Config>("config", { model: "", provider: {} });
         await store.save("employee-capabilities", "default", {
                 mcp: config.mcp || {}, skills: config.skills || [], skillsDirectory: config.skillsDirectory,

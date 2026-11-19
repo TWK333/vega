@@ -386,12 +386,12 @@ test("session MCP connection/discovery survives normal turns, refreshes onconfig
   const { e, store, config } = await engine(),
     session = await store.newSession(),
     first = await Tools.create(e, session, config, new AbortController().signal, () => {});
-  first.mcp.described.set("service/tool", "definition");
+  first.mcp.described.set("service", new Map([["tool", "definition"]]));
   await first.close();
   const next = await Tools.create(e, session, config, new AbortController().signal, () => {});
   try {
     assert.equal(next.mcp, first.mcp);
-    assert.equal(next.mcp.described.get("service/tool"), "definition");
+    assert.equal(next.mcp.described.get("service")?.get("tool"), "definition");
     const changed = await Tools.create(e, session, { ...config, mcp: { different: { command: "not-started" } } }, new AbortController().signal, () => {});
     assert.notEqual(changed.mcp, next.mcp);
     await changed.close();

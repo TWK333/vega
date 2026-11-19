@@ -111,7 +111,7 @@ onBeforeUnmount(() => { disposed = true; });
     <section class="card">
       <div class="card-head row"><div><h3>MCP 客户端</h3><p class="hint">这个牛马去调用的外部 MCP 服务。要让外部客户端来找你的牛马或群聊，请用设置里的「对外 MCP」。</p></div><button v-if="canEdit" class="primary sm" :disabled="busy" @click="saveMcp">保存 MCP</button></div>
       <template v-if="canEdit">
-        <p class="hint">每项配置一个 JSON 对象：远程服务使用 url / headers，本地进程使用 command / args / env。保留 __stored_secret__ 可保留已有密钥。</p>
+        <p class="hint">保存后，这个牛马的新任务会读取最新配置；已开始的 MCP 操作不会重放。每项配置一个 JSON 对象：远程服务使用 url / headers，服务端进程使用 command / args / env。保留 __stored_secret__ 可保留已有密钥。</p>
         <p v-if="!Object.keys(mcp).length" class="empty-state">尚未配置 MCP</p>
         <div v-for="(json, key) in mcp" :key="key" class="mcp-row"><strong>{{ key }}</strong><textarea v-model="mcp[key]" rows="8" spellcheck="false" :aria-label="key + ' JSON配置'" :disabled="busy"></textarea><button type="button" class="icon sm" :disabled="busy" :aria-label="'移除 ' + key" @click="{ const next = { ...mcp }; delete next[key]; mcp = next; }"><Icon name="trash" :size="15" /></button></div>
         <div class="mcp-add"><input v-model="mcpName" placeholder="名称" aria-label="MCP名称" :disabled="busy" /><button type="button" class="sm" :disabled="busy" @click="addMcp">添加 MCP</button></div>

@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import { zipSync, strToU8 } from "fflate";
 import { Store } from "../server/core/store";
 import { Engine } from "../server/core/engine";
@@ -122,6 +125,77 @@ test("built-in legacy employee binds its configuration to the original administr
     const personal = await engine.employee.for((await engine.employee.create({ name: "Personal" }, alice.id)).id);
     await assert.rejects(employeeCapabilities(personal, bob, "GET", ["capabilities"]), (error: any) => error.statusCode === 404);
   } finally { await engine.close(); await store.close(); }
+});
+
+test("a task dispatched from an existing chat uses the newly saved MCP endpoint and headers", async () => {
+  const { store, engine, a } = await fixture();
+  const hits: string[] = [];
+  const secret = "test-rotated-mcp-auth";
+  const server = createServer(async (req, res) => {
+    if (req.method !== "POST") { res.writeHead(405).end(); return; }
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const q = JSON.parse(Buffer.concat(chunks).toString());
+    hits.push(`${req.url} ${q.method} ${req.headers.authorization === "Bearer " + secret ? "new header" : "other header"}`);
+    if (q.id === undefined) { res.writeHead(202).end(); return; }
+    const result = q.method === "initialize" ? { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
+      : q.method === "tools/list" ? { tools: [{ name: "check", inputSchema: { type: "object" } }] }
+      : { content: [{ type: "text", text: `new endpoint answered: ${secret} ` + "data".repeat(10000) }] };
+    res.writeHead(200, { "Content-Type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: q.id, result }));
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    await store.put("config", { scenes: { lightweight: ["p/m"] }, provider: { p: { baseURL: base, models: { m: {} } } } });
+    await employeeCapabilities(a, alice, "PUT", ["mcp"], { mcp: { old: { url: base + "/old", headers: { Authorization: "Bearer test-old" } } } });
+    const chat = await a.chat(alice.id);
+    await engine.mcpFor(chat, await engine.config(chat)); // Already-open chat has a prior MCP configuration.
+    await employeeCapabilities(a, alice, "PUT", ["mcp"], { mcp: { current: { url: base + "/new", headers: { Authorization: "Bearer " + secret } } } });
+    const issued = new Map<string, number>();
+    engine.providers.chat = async (_model, _system, messages, tools, _signal, _emit, session = "") => {
+      const step = (issued.get(session) || 0) + 1;
+      issued.set(session, step);
+      const found = (name: string) => tools.some((tool) => tool.name === name);
+      if (session === chat.id) {
+        assert(!found("mcp"), "chat dispatches work; it does not use the credential itself");
+        return step === 1 ? { role: "assistant", calls: [{ id: "dispatch", name: "employee_task_create", arguments: { instructions: "用 current 服务核对记录" } }] }
+          : { role: "assistant", text: "已派发" };
+      }
+      const dynamic = messages.filter((message) => message.runtime === "dynamic").map((message) => message.text || "").join("\n");
+      assert.match(dynamic, /当前牛马已启用的服务名.*\["current"\]/);
+      assert(!dynamic.includes(secret));
+      assert(found("mcp"));
+      const op = ["list", "describe", "call"][step - 1];
+      return op ? { role: "assistant", calls: [{ id: op, name: "mcp", arguments: { op, server: "current", tool: "check" } }] }
+        : { role: "assistant", text: "MCP 已核对" };
+    };
+    await engine.run(chat.id, { role: "user", actorId: alice.id, text: "用 current 服务核对记录" });
+    const task = (await a.state()).tasks[0];
+    assert(task);
+    const events: any[] = [];
+    engine.events.on("event", (event) => events.push(event));
+    // Run the actual work-session creation/Engine path once, without a live scheduler retrying the fixture.
+    await a.update((state) => { a.task(state, task.id).status = "running"; });
+    a.busy.set(task.id, { computer: false, session: "" });
+    await a.run(task);
+    const work = await store.session((await a.findTask(task.id))!.workSession);
+    assert.equal(work.employeeId, a.employeeId);
+    assert(hits.every((hit) => hit.startsWith("/new ") && hit.endsWith(" new header")));
+    assert.equal(hits.filter((hit) => hit.includes("tools/call")).length, 1);
+    const result = events.find((event) => event.type === "tool_end" && event.data.call.id === "call");
+    assert.match(JSON.stringify(result), /new endpoint answered: \[credential redacted\]/);
+    assert(!JSON.stringify(result).includes(secret));
+    const receipt = (await store.messages(work.id)).find((message) => message.callId === "call");
+    assert(receipt?.text);
+    const archived = JSON.parse(receipt.text);
+    assert(archived.archivePath);
+    assert(!String(await store.files.read(archived.archivePath)).includes(secret));
+  } finally {
+    await engine.close(); await store.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test("invalid MCP updates leave all existing settings unchanged", async () => {
