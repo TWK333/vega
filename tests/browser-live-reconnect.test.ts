@@ -35,7 +35,7 @@ class Stream {
  * Mounts the real component against the real SseSocket, with only `fetch` replaced: lane 0 opens a
  * stream the test drives, upstream POSTs are recorded. No WebSocket is involved anywhere.
  */
-function mount(t: TestContext) {
+function mount(t: TestContext, statuses: number[] = []) {
   const opened: Stream[] = [], posts: { url: string; body: any }[] = [], timers = new Map<number, { fn: () => void; ms: number }>(), listeners: Record<string, () => void> = {};
   let serial = 0, tickets = 0;
   const original = globalThis.fetch;
@@ -45,6 +45,8 @@ function mount(t: TestContext) {
       posts.push({ url: target, body: JSON.parse(init.body) });
       return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
     }
+    const status = statuses.shift();
+    if (status) return new Response(null, { status });
     const stream = new Stream(target);
     opened.push(stream);
     return stream.response;
@@ -92,6 +94,52 @@ test("a dropped live connection reconnects by itself with backoff, keeping the l
   s.opened[3].drop();
   await settle();
   assert.match(s.error.value, /已断开/, "after three failed attempts the user is asked");
+});
+
+test("an HTTP failure before the stream opens retries with a new ticket", async (t) => {
+  const s = mount(t, [502]);
+  await s.capture(s.tab); await settle();
+  assert.equal(s.error.value, "");
+  assert.match(s.info.value, /自动重连/);
+  s.fire(1000); await settle();
+  assert.equal(s.opened.length, 1);
+  assert.equal(new URL(s.opened[0].url).searchParams.get("ticket"), "t2");
+  s.opened[0].send({ type: "ready", tabTag: "T1", mode: "view" });
+  await settle();
+  assert.equal(s.liveState.value, "view");
+});
+
+test("an HTTP 403 before the stream opens is not retried or masked as a proxy error", async (t) => {
+  const s = mount(t, [403]);
+  await s.capture(s.tab); await settle();
+  assert.match(s.error.value, /403/);
+  assert.equal(s.busy.value, false);
+  s.fire(1000); await settle();
+  assert.equal(s.opened.length, 0);
+});
+
+test("SSE headers without a ready event do not leave the view connecting forever", async (t) => {
+  const s = mount(t);
+  await s.capture(s.tab); await settle();
+  assert.equal(s.liveState.value, "connecting");
+  s.fire(15000);
+  assert.match(s.info.value, /自动重连/);
+  s.fire(1000); await settle();
+  assert.equal(s.opened.length, 2);
+  s.opened[1].send({ type: "ready", tabTag: "T1", mode: "view" });
+  await settle();
+  assert.equal(s.liveState.value, "view");
+  assert.equal(s.timers.size, 0, "ready clears the connection deadline");
+});
+
+test("a view superseded by another window does not take the connection back", async (t) => {
+  const s = mount(t);
+  await s.capture(s.tab); await settle();
+  s.opened[0].send({ type: "closed", code: 1000, reason: "已在新窗口连接" });
+  await settle();
+  assert.match(s.error.value, /已在新窗口连接/);
+  s.fire(1000); await settle();
+  assert.equal(s.opened.length, 1);
 });
 
 test("a revoked login or server-reported error does not auto-reconnect", async (t) => {

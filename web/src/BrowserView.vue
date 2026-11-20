@@ -195,7 +195,7 @@ async function capture(tab, resume = false) {
     if (props.employeeId) input.searchParams.set("employeeId", props.employeeId);
     const ws = new SseSocket(url, { csrf: props.csrf, uplink: input });
     socket = ws;
-    let serverError = false, opened = false;
+    let serverError = false;
     const fail = (reason) => {
       if (disposed || request !== version || socket !== ws) return;
       disconnect();
@@ -203,11 +203,10 @@ async function capture(tab, resume = false) {
       busy.value = false;
       error.value = reason;
     };
-    // A dropped connection with nothing in flight reconnects by itself (1s, 2s, 4s); an operation that may
-    // have run, a server-reported error or a revoked login still stops and asks the user.
-    const lost = (code) => {
+    // Don't reclaim a stream deliberately closed by the server, e.g. because another window took over.
+    const lost = ({ code, reason }) => {
       if (disposed || request !== version || socket !== ws) return;
-      if (!inflight && !remoteDrag && !serverError && code !== 4401 && code !== 4403 && liveRetries < 3 && !document.hidden) {
+      if (!inflight && !remoteDrag && !serverError && ![1000, 4401, 4403].includes(code) && liveRetries < 3 && !document.hidden) {
         const delay = 1000 * 2 ** liveRetries++;
         disconnect();
         busy.value = false;
@@ -221,17 +220,17 @@ async function capture(tab, resume = false) {
       fail(
         inflight || remoteDrag
           ? "连接中断，操作可能已执行，请核对网页，不要重复提交"
-          : error.value || "实时连接已断开，点击刷新截图重新连接",
+          : error.value || (code === 4401
+            ? "Nova 登录已失效，请重新登录后再连接"
+            : `${reason || "实时连接已断开"}，点击刷新截图重新连接`),
       );
     };
+    // Headers alone don't mean the server is delivering SSE events.
     connectTimer = setTimeout(
-      () => fail("实时连接超时，请检查反向代理是否支持 SSE 并刷新"),
+      () => lost({ code: 1006, reason: "等待实时通道就绪超时" }),
       15000,
     );
-    ws.onopen = () => {
-      opened = true;
-      clearTimeout(connectTimer);
-    };
+    ws.onclose = lost;
     ws.onmessage = async (event) => {
       if (disposed || request !== version || socket !== ws) return;
       const value = event.value;
@@ -301,6 +300,7 @@ async function capture(tab, resume = false) {
           });
           busy.value = false;
         } else if (value.type === "ready") {
+          clearTimeout(connectTimer);
           liveState.value = "view";
         } else if (value.type === "mode") {
           if (value.mode === "control" && !operating.value) {
@@ -323,10 +323,6 @@ async function capture(tab, resume = false) {
         fail("实时画面格式无效，请重新连接");
       }
     };
-    ws.onerror = () => {
-      if (!opened) fail("实时连接失败；请确认登录状态和反向代理配置");
-    };
-    ws.onclose = (event) => lost(event?.code);
   } catch (e) {
     if (!disposed && request === version) {
       disconnect();
