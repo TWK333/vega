@@ -14,7 +14,7 @@ export async function assertNameFree(root: Employee, name: string, who: { id: st
   for (const other of await root.all()) {
     if (other.employeeId === who.id) continue;
     const p = await other.profile();
-    assert(!(nameKey(p.name) === key && p.ownerId === who.ownerId), `牛马名称「${name.trim()}」已被你的另一个牛马（${p.id}）使用，请换一个名称`);
+    assert(!(nameKey(p.name) === key && p.ownerId === who.ownerId), `名称「${name.trim()}」已被你名下的另一位热心市民（${p.id}）使用，请换一个名称`);
   }
 }
 

@@ -146,7 +146,7 @@ onMounted(() => void run(refresh));
             </form>
           </template>
         </div>
-        <p class="hint isolation-note"><Icon name="lock" :size="12" />每个用户的会话和 Stage 仅本人可见；数字牛马属于创建者本人（管理员可查看和管理）；和别人协作请拉群聊。</p>
+        <p class="hint isolation-note"><Icon name="lock" :size="12" />每个用户的会话和 Stage 仅本人可见；热心市民归创建者所有（管理员可查看和管理）。需要与他人协作时，请创建群聊。</p>
       </section>
     </div>
   </div>

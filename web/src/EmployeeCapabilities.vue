@@ -41,7 +41,7 @@ async function importSkill() {
     upload.value.value = "";
     detail.value = null;
     await refreshSkills();
-    emit("notice", "技能已保存到当前牛马");
+    emit("notice", "已为这位热心市民保存技能");
   });
 }
 async function showSkill(skill) {
@@ -52,7 +52,7 @@ async function showSkill(skill) {
   });
 }
 async function removeSkill(skill) {
-  if (!canEdit.value || !confirm("移除当前牛马的这个技能？")) return;
+  if (!canEdit.value || !confirm("移除这位热心市民的这项技能？")) return;
   await run(async () => {
     await props.api(base + "/skills/" + encodeURIComponent(skill.id), "DELETE");
     detail.value = null;
@@ -73,7 +73,7 @@ async function saveMcp() {
     const value = await refreshSkills();
     if (!value || disposed) return;
     mcp.value = Object.fromEntries(value.mcp.map((entry) => [entry.name, JSON.stringify(entry.config, null, 2)]));
-    emit("notice", "当前牛马的 MCP 已保存");
+    emit("notice", "这位热心市民的 MCP 配置已保存");
   });
 }
 function addMcp() {
@@ -96,7 +96,7 @@ onBeforeUnmount(() => { disposed = true; });
   <div class="page-scroll capabilities">
     <p class="callout capabilities-warning"><Icon name="alert" :size="14" /><span>本系统设计架构不推荐使用 Skill 或 MCP，后续有可能会移除相关支持，请谨慎使用。</span></p>
     <section class="card">
-      <div class="card-head"><h3>技能</h3><p v-if="canEdit" class="hint">上传 ZIP 技能包；勾选覆盖可更新当前牛马的同名技能。</p></div>
+      <div class="card-head"><h3>技能</h3><p v-if="canEdit" class="hint">上传 ZIP 技能包；勾选覆盖可更新这位热心市民的同名技能。</p></div>
       <div v-if="canEdit" class="upload-row">
         <input ref="upload" type="file" accept=".zip" aria-label="选择技能ZIP文件" :disabled="busy" />
         <label class="check"><input v-model="replace" type="checkbox" />覆盖同名技能</label>
@@ -109,9 +109,9 @@ onBeforeUnmount(() => { disposed = true; });
       <section v-if="canEdit && detail" class="skill-detail"><div class="card-head row"><h4>{{ detail.name }}</h4><button type="button" class="icon sm" aria-label="关闭技能详情" @click="detail = null"><Icon name="close" :size="14" /></button></div><p class="hint">文件：{{ detail.files.join('、') }}</p><pre>{{ detail.content }}</pre></section>
     </section>
     <section class="card">
-      <div class="card-head row"><div><h3>MCP 客户端</h3><p class="hint">这个牛马去调用的外部 MCP 服务。要让外部客户端来找你的牛马或群聊，请用设置里的「对外 MCP」。</p></div><button v-if="canEdit" class="primary sm" :disabled="busy" @click="saveMcp">保存 MCP</button></div>
+      <div class="card-head row"><div><h3>MCP 客户端</h3><p class="hint">这位热心市民可以调用的外部 MCP 服务。要让外部客户端与热心市民或群聊对话，请使用设置里的「对外 MCP」。</p></div><button v-if="canEdit" class="primary sm" :disabled="busy" @click="saveMcp">保存 MCP</button></div>
       <template v-if="canEdit">
-        <p class="hint">保存后，这个牛马的新任务会读取最新配置；已开始的 MCP 操作不会重放。每项配置一个 JSON 对象：远程服务使用 url / headers，服务端进程使用 command / args / env。保留 __stored_secret__ 可保留已有密钥。</p>
+        <p class="hint">保存后，这位热心市民的新任务会读取最新配置；已开始的 MCP 操作不会重放。每项配置一个 JSON 对象：远程服务使用 url / headers，服务端进程使用 command / args / env。保留 __stored_secret__ 可保留已有密钥。</p>
         <p v-if="!Object.keys(mcp).length" class="empty-state">尚未配置 MCP</p>
         <div v-for="(json, key) in mcp" :key="key" class="mcp-row"><strong>{{ key }}</strong><textarea v-model="mcp[key]" rows="8" spellcheck="false" :aria-label="key + ' JSON配置'" :disabled="busy"></textarea><button type="button" class="icon sm" :disabled="busy" :aria-label="'移除 ' + key" @click="{ const next = { ...mcp }; delete next[key]; mcp = next; }"><Icon name="trash" :size="15" /></button></div>
         <div class="mcp-add"><input v-model="mcpName" placeholder="名称" aria-label="MCP名称" :disabled="busy" /><button type="button" class="sm" :disabled="busy" @click="addMcp">添加 MCP</button></div>

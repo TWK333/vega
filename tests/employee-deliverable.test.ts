@@ -6,7 +6,7 @@ import { employeeCall } from "./public-call";
 
 const body = "# 测试用例清单\n" + "TC-01 指标卡标题取管理端配置。\n".repeat(30);
 const session: any[] = [
-  { seq: 1, role: "user", text: "[牛马任务] 派单" },
+  { seq: 1, role: "user", text: "[热心市民任务] 派单" },
   { seq: 2, role: "assistant", model: "m", text: "先勘察页面。", calls: [{ id: "a", name: "chrome_inspect", arguments: {} }] },
   { seq: 3, role: "tool", text: "{\"ok\":true}" },
   { seq: 4, role: "assistant", model: "m", text: body, calls: [{ id: "b", ...employeeCall({ action: "progress" }) }] },

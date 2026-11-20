@@ -3,7 +3,7 @@
  *
  * 定时只存在于用户说清了时刻或周期的时候（含每隔几分钟、每 N 分钟/小时、每天、每周）。
  * 到点只做那一件已经记下的事。这里不配置职责或章程，也不扫描仓库、issue，更不在空闲时找活。
- * 要约束「做不做、做到哪」，用这头牛马已有的工作原则。
+ * 要约束「做不做、做到哪」，用这位热心市民已有的工作原则。
  */
 import { createHash } from "node:crypto";
 import { beijingDateTime, beijingParts, beijingTimestamp } from "../../shared/time";
@@ -47,7 +47,7 @@ export type WorkEvent = {
   text: string;
   evidence?: string;
   userInitiated?: boolean;
-  /** 点名了这头牛马，并要它做事。 */
+  /** 点名请这位热心市民做事。 */
   directed?: boolean;
   schedule?: ExplicitSchedule;
   hold?: Hold;

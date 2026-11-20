@@ -122,14 +122,14 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   const out: Tool[] = [];
   const task = ctx.kind === "task";
   out.push(tool("employee_status",
-    "查看当前牛马总览：现在时间（北京时间）、工作原则、任务摘要（每条 id、status、dedupeKey、内容和结果节选、创建/计划/结束时间，最近 50 条，taskCount 是匹配总数）、最近运行、相关记忆和待确认记忆、可用场景。沟通会话系统提示已含活跃任务摘要，新派单不必先调本工具。续做、停止或修改前用它核对 taskId，或要看某条完整内容、计划、进度和结果时传 taskId。派单不必先查重：带 dedupeKey 的 employee_task_create 会自动去重。查记忆细节用 memory_search。",
+    "查看当前热心市民的总览：现在时间（北京时间）、工作原则、任务摘要（每条 id、status、dedupeKey、内容和结果节选、创建/计划/结束时间，最近 50 条，taskCount 是匹配总数）、最近运行、相关记忆和待确认记忆、可用场景。沟通会话系统提示已含活跃任务摘要，新派单不必先调本工具。续做、停止或修改前用它核对 taskId，或要看某条完整内容、计划、进度和结果时传 taskId。派单不必先查重：带 dedupeKey 的 employee_task_create 会自动去重。查记忆细节用 memory_search。",
     { taskId: str("只看这条任务的完整记录（任务 ID）；省略返回总览", { minLength: 1 }),
       dedupeKey: str("只列这个 dedupeKey 的任务", { minLength: 1, maxLength: 200 }),
       status: str("任务过滤：all（默认）全部、active 未收尾、ended 已收尾（完成、失败、停止、取消、封存）", { enum: ["all", "active", "ended"] }),
       memoryQuery: str("只影响返回的相关记忆：按这个关键词挑最相关的 30 条；省略为不按关键词", { maxLength: 2000 }) }));
   out.push(tool("employee_task_create",
-    "给当前牛马派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务但不自动续做；需要继续同一目标时核对状态并用 resume，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。用户明确说出的时刻或重复周期由系统记在同一条任务上，到点只续做这一条，不要为定时另建一条" +
-      (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。" : "。"),
+    "给当前热心市民派一条新的独立任务，默认立即排队；给 runAt 或 delayMinutes（二选一）则到时再做；完成后自动收尾。沟通会话可直接调用，不必先 employee_status；同一条回复用人话说你在做什么并调用本工具，勿说「已派单/已安排」、勿复述。instructions 写目标、范围、约束和交付标准，执行任务的会话会自己选工具；不要照抄历史任务或旧记录里的工具名、动作名（执行端工具会变），需要提到操作时写要达成的效果。dedupeKey 填业务唯一标识（如 tapd:需求ID），同 key 的任务已存在（含已收尾的）时不新建，返回原任务但不自动续做；需要继续同一目标时核对状态并用 resume，所以派单前不必先查重；用户明确要求把已完成的事重做一遍时换一个新 key（如在原 key 后加 :v2），否则沿用同一个 key。要对查到的每一项各走一遍流程时，每项各建一条并用 dedupeKey 去重。用户明确说出的时刻或重复周期由系统记在同一条任务上，到点只续做这一条，不要为定时另建一条" +
+      (task ? "；本任务自己的步骤写进 task_progress，不要拆成新任务。" : ctx.group ? "。群聊里只给按群公告归你的工作派单。其他热心市民负责的工作不要派单，直接在回复里 @ 对应成员。" : "。"),
     { instructions: instructions("任务目标、范围、约束和交付标准，保留用户原话；不写工具名或动作名"),
       dedupeKey: str("业务唯一标识，≤200 字；同 key 已有任务（含已收尾）时直接返回原任务。用户明确要求重做已完成的事时用新 key（如原 key 加 :v2）", { minLength: 1, maxLength: 200 }),
       runAt: beijing("开始时间；省略立即排队"), delayMinutes: delayMinutes("多久后开始"), profile },
@@ -205,7 +205,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   }
   if (!ctx.member) {
     out.push(tool("memory_search",
-      "检索当前牛马的长期记忆（按相关度，默认最多 12 条）。写入或改动前先检索；status 过滤：all（默认）、active、draft、conflict、archived、pending（= draft + conflict）。",
+      "检索当前热心市民的长期记忆（按相关度，默认最多 12 条）。写入或改动前先检索；status 过滤：all（默认）、active、draft、conflict、archived、pending（= draft + conflict）。",
       { query: str("检索词；省略按相关度列出", { maxLength: 2000 }),
         status: str("", { enum: ["all", "active", "draft", "conflict", "archived", "pending"] }),
         memoryScene: str("适用场景过滤", { enum: ["chat", "coding", "computer", "any"] }) }));
@@ -237,7 +237,7 @@ export function vaultTools(ctx: ToolContext): Tool[] {
   // Each employee reads its owner's book, limited to the entries that apply to it; a plain session has no employee and no book.
   if (ctx.kind === "normal") return [];
   return [
-    tool("vault_list", "列出创建者密码本里适用于当前牛马的条目 id、类型（login 账号密码 / token API 密钥或令牌 / ssh_key SSH 私钥 / general 万能）、名称和使用条件（不含凭据内容）。取用前先看 condition，选出唯一适用的条目。增删改由本人在「设置 → 密码本」里操作。"),
+    tool("vault_list", "列出创建者密码本里适用于当前热心市民的条目 id、类型（login 账号密码 / token API 密钥或令牌 / ssh_key SSH 私钥 / general 万能）、名称和使用条件（不含凭据内容）。取用前先看 condition，选出唯一适用的条目。增删改由本人在「设置 → 密码本」里操作。"),
     tool("vault_get",
       "按 credentialId 取一条凭据供本轮使用：purpose 写清本次用途及为什么符合该条 condition；系统结合当前页面核对条件，不符则拒绝且不取出。凭据内容不进入对话记录，只用于当前授权操作，不写进回复、记忆、计划或交接。ssh_key 类型不返回私钥原文：系统在当前执行位置（服务端或所选客户端）写入本轮临时私钥文件，返回 keyFile 和可直接用于 git 的 GIT_SSH_COMMAND，本轮结束自动删除。",
       { credentialId, purpose: str("本次用途及为什么符合使用条件，1–8000 字", { minLength: 1, maxLength: 8000 }), url: vaultUrl },

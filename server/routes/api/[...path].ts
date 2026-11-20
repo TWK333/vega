@@ -106,7 +106,7 @@ export default defineEventHandler(async (event) => {
     catch (e: any) { throw createError({ statusCode: e.statusCode || 400, statusMessage: String(e.message || e).slice(0, 500) }); }
   }
   if (path[0] === "local-agent" && path[1] === "extension" && method === "POST") {
-    // 本机客户端「更新浏览器扩展」：设备凭据自己验，然后把安装任务交给这个账号的第一个牛马。
+    // 本机客户端「更新浏览器扩展」：设备凭据自己验，然后把安装任务交给这个账号名下的第一位热心市民。
     setHeader(event, "Cache-Control", "no-store");
     const request = { headers: new Headers(getRequestHeaders(event) as Record<string, string>), url: getRequestURL(event).href } as unknown as Request;
     let grant: { userId: string; clientId: string };
@@ -156,13 +156,13 @@ export default defineEventHandler(async (event) => {
         const employeeId = session.employeeId || linked?.employee || "";
         // Each administrator's debug view covers only their own employees.
         if (employeeId && !own.has(employeeId)) return undefined;
-        return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联牛马", taskText: linked?.task.text || "", kind: !session.taskId ? (session.groupId ? "group" : "chat") : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
+        return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联热心市民", taskText: linked?.task.text || "", kind: !session.taskId ? (session.groupId ? "group" : "chat") : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
       }))).filter(Boolean)];
     }
     if (path[0] === "bootstrap" && method === "GET") {
-      // 新账号第一次进来就有一只自己的牛马；建失败不挡住登录，下次进入再试。
+      // 首次进入时自动创建一位热心市民；失败不阻断登录，下次再试。
       if (user.role !== "viewer")
-        await engine.employee.ensureOwned(user.id, user.username + " 的牛马").catch((error) => console.warn("[Vega] 自动创建牛马失败：" + error.message));
+        await engine.employee.ensureOwned(user.id, user.username).catch((error) => console.warn("[Vega] 自动创建热心市民失败：" + error.message));
       let cwd = "", cloudError = "";
       if (user.role !== "viewer") {
         try { cwd = await cloudFor({ ownerId: user.id })?.cwd() || process.cwd(); }
@@ -237,7 +237,7 @@ export default defineEventHandler(async (event) => {
       // Group members see each other's employee avatars.
       const avatarOnly = path[2] === "avatar" && path.length === 3 && method === "GET" && !!employee && await engine.groups.sharesGroup(user.id, { employee: employee.employeeId });
       check(employee && (avatarOnly || await employee.accessible(user)), 404, "Employee not found");
-      check(!employee.deleting, 409, "牛马正在删除，请稍候");
+      check(!employee.deleting, 409, "正在删除这位热心市民，请稍候");
       const state = await employee.state();
       // Marking the chat read is reading: read-only accounts may do it.
       if (path[2] === "chat" && path[3] === "read" && path.length === 4 && method === "POST") return { seq: state.chatSession ? await store.markRead(user.id, state.chatSession) : 0 };
@@ -254,14 +254,14 @@ export default defineEventHandler(async (event) => {
           return send(event, Buffer.from(image.data));
         }
         if (method === "POST") {
-          check(await employee.manageable(user), 403, "只有牛马管理者可以修改头像");
+          check(await employee.manageable(user), 403, "只有热心市民的管理者可以修改头像");
           return await updateEmployeeAvatar(employee, a);
         }
         check(false, 405, "Method not allowed");
       }
       // 任务执行权：同一个任务同一时刻只在一个位置跑，交接是唯一改变它的方式。
       if (path[2] === "tasks" && path[4] === "handoff" && method === "POST") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以交接执行权");
+        check(await employee.manageable(user), 403, "只有热心市民的管理者可以交接执行权");
         const taskId = String(path[3] || "");
         if (a.action === "status") return engine.handoffs.status(employee.employeeId, taskId);
         if (a.action === "to-cloud") return engine.handoffs.toCloud(employee.employeeId, taskId, { source: "manual" });
@@ -269,13 +269,13 @@ export default defineEventHandler(async (event) => {
         check(false, 400, "action 是 to-cloud、to-local 或 status");
       }
       if (path[2] === "handoff" && path.length === 3 && method === "POST") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以配置接力");
+        check(await employee.manageable(user), 403, "只有热心市民的管理者可以配置接力");
         return engine.handoffs.configure(employee.employeeId, a);
       }
       if (path.length === 2 && method === "DELETE") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以删除牛马");
-        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认删除牛马及其任务、会话和浏览器登录数据");
-        check(!employee.busy.size && !(state.chatSession && engine.active.has(state.chatSession)), 409, "牛马仍在执行，请先停止任务和当前对话，再删除牛马");
+        check(await employee.manageable(user), 403, "只有管理者可以删除这位热心市民");
+        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请确认删除这位热心市民，以及相关任务、会话和浏览器登录数据");
+        check(!employee.busy.size && !(state.chatSession && engine.active.has(state.chatSession)), 409, "请先停止这位热心市民的任务和当前对话，再删除");
         await engine.removeEmployee(employee.employeeId, async () => {
           // Shared owner browser stays; only drop a live keyed by this employee if any legacy entry exists.
           const live = app().employeeLives.get(employee.employeeId);
@@ -284,13 +284,13 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (path[2] === "reset" && path.length === 3 && method === "POST") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以重置牛马");
-        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的全部会话和任务");
+        check(await employee.manageable(user), 403, "只有管理者可以重置这位热心市民");
+        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请确认清空这位热心市民的全部会话和任务");
         return await engine.resetEmployee(employee.employeeId);
       }
       if (path[2] === "chat" && path[3] === "clear" && method === "POST") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以清空聊天记录");
-        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请明确确认清空该牛马的聊天记录");
+        check(await employee.manageable(user), 403, "只有热心市民的管理者可以清空聊天记录");
+        check(getRequestURL(event).searchParams.get("confirmed") === "true", 400, "请确认清空这位热心市民的聊天记录");
         check(!(state.chatSession && engine.active.has(state.chatSession)), 409, "对话仍在进行，请先停止后再清空聊天记录");
         return await engine.clearEmployeeChat(employee.employeeId);
       }
@@ -305,7 +305,7 @@ export default defineEventHandler(async (event) => {
         const command = newCommand(a.text);
         let newTask = false;
         if (command) {
-          check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
+          check(!employee.deleting && !employee.resetting, 409, "正在删除或重置这位热心市民，请稍候");
           const alone = !command.rest && !a.images?.length && !a.files?.length;
           if (alone) {
             check(!engine.active.has(session.id), 409, "对话仍在进行，请先停止后再标记新任务");
@@ -326,7 +326,7 @@ export default defineEventHandler(async (event) => {
           clientMessageId: a.clientMessageId,
           clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.files || [], a.quoteSeq ?? null])).digest("hex") : undefined,
         };
-        check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
+        check(!employee.deleting && !employee.resetting, 409, "正在删除或重置这位热心市民，请稍候");
         await engine.submitChat(session.id, message);
         return { id: session.id };
       }
@@ -335,7 +335,7 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
       if (path[2] === "chrome") {
-        check(await employee.manageable(user), 403, "只有牛马管理者可以查看和控制浏览器登录环境");
+        check(await employee.manageable(user), 403, "只有热心市民的管理者可以查看和控制浏览器登录环境");
         const profileKey = engine.browserProfileKey(state.ownerId);
         if (method === "POST" && a.operation === "close") {
           check(!employee.busy.size, 409, "Stop browser tasks first");
@@ -345,7 +345,7 @@ export default defineEventHandler(async (event) => {
           return { ok: true };
         }
         const browser = await engine.browsers.get(profileKey);
-        check(!employee.deleting, 409, "牛马正在删除，请稍候");
+        check(!employee.deleting, 409, "正在删除这位热心市民，请稍候");
         if (path[3] === "tabs" && method === "GET") return browserTabs(browser);
         if (path[3] === "live" && method === "POST") return (await employeeLive(employee.employeeId)).ticket(who, a.tabTag);
         if (path[3] === "screenshot" && method === "POST") return browserScreenshot(browser, "employee-view:" + user.id, a.tabTag);
@@ -355,7 +355,7 @@ export default defineEventHandler(async (event) => {
         check(false, 404, "Browser route not found");
       }
       if (path[2] === "control" && method === "POST") {
-        if (a.action === "settings") check(await employee.manageable(user), 403, "只有牛马管理者可以修改设置");
+        if (a.action === "settings") check(await employee.manageable(user), 403, "只有热心市民的管理者可以修改设置");
         if (a.action === "fire") check(false, 400, "职责配置已移除");
         return employee.control(a);
       }
@@ -366,9 +366,9 @@ export default defineEventHandler(async (event) => {
         return { ...visible, tasks, canManage: await employee.manageable(user), canConfigure: await canConfigureEmployee(employee, user), executionClients: await employee.manageable(user) ? engine.localAgents.list(state.ownerId || user.id) : [], busy: [...employee.busy.keys()], chatRunning: !!state.chatSession && engine.active.has(state.chatSession) };
       }
       if (path.length === 2 && method === "POST") {
-        if (!await employee.manageable(user)) check(a.action === "list" || a.action === "memory_search" || (a.action === "add" && a.kind === "todo"), 403, "只有牛马管理者可以修改记忆和凭据");
+        if (!await employee.manageable(user)) check(a.action === "list" || a.action === "memory_search" || (a.action === "add" && a.kind === "todo"), 403, "只有热心市民的管理者可以修改记忆和凭据");
         // Same owner-only rule as the vault page: managing an employee does not open its vault.
-        if (typeof a.action === "string" && a.action.startsWith("vault_")) check(await canConfigureEmployee(employee, user), 403, "只有牛马创建者可以使用它的密码本条目");
+        if (typeof a.action === "string" && a.action.startsWith("vault_")) check(await canConfigureEmployee(employee, user), 403, "只有创建者可以使用适用于这位热心市民的密码本条目");
         const result = await employee.execute("", a);
         return result.secret ? JSON.parse(result.secret) : result.value;
       }
@@ -385,14 +385,14 @@ export default defineEventHandler(async (event) => {
     if (path[0] === "me" && path[1] === "triggers")
       return await triggersApi(engine.triggers, user, method, path.slice(2), a, method === "POST" ? publicOrigin(event) : "");
     if (path[0] === "me" && path[1] === "vault") {
-      // 本人的密码本：名下牛马在任务里按适用范围取用；什么角色都只碰自己这一本。
+      // 本人的密码本：热心市民在任务里按适用范围取用；用户只能管理自己的密码本。
       const vault = engine.vault.book(user.id);
       if (method === "GET" && path.length === 2) return { entries: await vault.list() };
       if (method === "POST" && path.length === 2) {
         if (a.employees !== undefined) {
-          assert(Array.isArray(a.employees) && a.employees.length <= 50 && a.employees.every((value) => typeof value === "string" && value), "employees 必须是牛马 ID 数组");
+          assert(Array.isArray(a.employees) && a.employees.length <= 50 && a.employees.every((value) => typeof value === "string" && value), "employees 必须是热心市民 ID 数组");
           const mine = new Set((await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user))).map((employee) => employee.employeeId));
-          assert((a.employees as string[]).every((value) => mine.has(value)), "只能选择你自己的牛马");
+          assert((a.employees as string[]).every((value) => mine.has(value)), "只能选择你名下的热心市民");
         }
         return await vault.save({ id: a.id, type: a.type, name: a.name, condition: a.condition, content: a.content, employees: a.employees });
       }
@@ -692,7 +692,7 @@ export default defineEventHandler(async (event) => {
         return { ok: true };
       }
     }
-    if (path[0] === "skills") check(false, 410, "Skill 配置已移至各牛马，请在牛马的技能 / MCP 页面管理");
+    if (path[0] === "skills") check(false, 410, "请在对应热心市民的「技能 / MCP」页面管理技能");
     if (path[0] === "employee") {
       if (method === "GET")
         return {
@@ -853,7 +853,7 @@ async function clientChat(op: string, a: Obj, userId: string, clientId?: string)
     return { seq: await store.markRead(user.id, group.session, a.through) };
   }
   if (op === "control") {
-    // 面板上的待确认气泡：只允许对自己的牛马发 approve/answer（群聊任务不在这里控制）。
+    // 面板上的待确认气泡：只允许审批或回复自己名下的热心市民的任务（群聊任务不在这里控制）。
     assert(kind === "employee", "Panel control only applies to an employee thread");
     const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
     assert(employee && await employee.accessible(user), "Employee not found");
@@ -869,7 +869,7 @@ async function clientChat(op: string, a: Obj, userId: string, clientId?: string)
       const employee = (await engine.employee.all()).find((e) => e.employeeId === id);
       assert(employee && await employee.accessible(user), "Employee not found");
       const session = await employee.chat(user.id);
-      check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
+      check(!employee.deleting && !employee.resetting, 409, "正在删除或重置这位热心市民，请稍候");
       await engine.submitChat(session.id, {
         role: "user", text, actorId: user.id, clientMessageId,
         clientMessageHash: clientMessageId ? createHash("sha256").update(JSON.stringify([text, [], [], null])).digest("hex") : undefined,

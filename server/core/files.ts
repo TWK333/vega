@@ -91,7 +91,7 @@ export class Files {
   inside(path: string, dir: string) { return resolve(path).startsWith(dir + sep); }
   readable(session: Session, path: string) {
     const full = this.own(path);
-    assert(full && this.inside(full, this.scope(session)), "只能读取本牛马（普通会话为本人）的存档文件");
+    assert(full && this.inside(full, this.scope(session)), "只能读取当前热心市民的存档文件（普通会话只能读本人的存档）");
     return full;
   }
   read(path: string) { return readFile(path); }

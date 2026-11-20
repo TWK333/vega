@@ -64,7 +64,7 @@ test("a Chromium that exits at startup reports exit code, profile-in-use and std
   await fakeChrome(t, `process.stderr.write("x".repeat(10000) + "\\nThe profile appears to be in use by another Chromium process\\n"); process.exit(21);`);
   const profile = await dir(t), browser = new HeadlessBrowser();
   await assert.rejects(browser.start(join(profile, "vega.db"), { profile, port: 1, token: "t" }), (error: Error) => {
-    assert.match(error.message, /^牛马浏览器 Chromium 启动即退出（code 21）/);
+    assert.match(error.message, /^热心市民使用的 Chromium 浏览器启动后立即退出（code 21）/);
     assert.match(error.message, /配置目录正被残留 Chromium 占用/);
     assert.match(error.message, /profile appears to be in use/);
     assert(error.message.length < 2500, "stderr is clipped to its tail");
@@ -114,12 +114,12 @@ test("repeated launch failures back off, are reported by status, and reset on su
   const entry = { chrome: new Chrome(store, new ChromeBridge(true), ""), browser: new HeadlessBrowser() } as any;
   browsers.entries.set("ea", entry);
   t.mock.method(entry.chrome.bridge, "start", async () => {});
-  const start = t.mock.method(entry.browser, "start", async () => { throw Error("牛马浏览器 Chromium 启动即退出（code 21）"); });
+  const start = t.mock.method(entry.browser, "start", async () => { throw Error("热心市民使用的 Chromium 浏览器启动后立即退出（code 21）"); });
   await assert.rejects(browsers.get("ea"), (e: Error) => !/秒后/.test(e.message));
   await assert.rejects(browsers.get("ea"), /已连续失败 2 次，5 秒后/);
   await assert.rejects(browsers.get("ea"), /code 21.*5 秒后才会再次尝试/);
   assert.equal(start.mock.callCount(), 2, "no respawn during backoff");
-  assert.deepEqual({ ...browsers.failure("ea"), at: undefined }, { error: "牛马浏览器 Chromium 启动即退出（code 21）", failures: 2, at: undefined, retryAfterSeconds: 5 });
+  assert.deepEqual({ ...browsers.failure("ea"), at: undefined }, { error: "热心市民使用的 Chromium 浏览器启动后立即退出（code 21）", failures: 2, at: undefined, retryAfterSeconds: 5 });
   t.mock.timers.tick(5001);
   await assert.rejects(browsers.get("ea"), /3 次，15 秒后/);
   t.mock.timers.tick(15001);
@@ -128,7 +128,7 @@ test("repeated launch failures back off, are reported by status, and reset on su
   await assert.rejects(browsers.get("ea"), /5 次，60 秒后/);
   start.mock.mockImplementation(async () => { throw Error("bridge port busy"); });
   t.mock.timers.tick(60001);
-  await assert.rejects(browsers.get("ea"), /^Error: 牛马浏览器启动失败：bridge port busy/);
+  await assert.rejects(browsers.get("ea"), /^Error: 热心市民的浏览器启动失败：bridge port busy/);
   await browsers.stop("ea");
   assert.equal(browsers.failure("ea"), undefined, "an explicit stop/refresh retries immediately");
 });

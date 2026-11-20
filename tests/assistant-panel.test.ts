@@ -106,8 +106,8 @@ test("蝴蝶面板实际渲染独立产物，并能分别下载文件和导出�
       const body = JSON.parse(Buffer.concat(chunks).toString() || "{}");
       const op = request.url?.split("/").at(-1);
       let value: any = {};
-      if (op === "threads") value = { employees: [{ thread: "employee:e1", kind: "employee", id: "e1", name: "牛马" }], groups: [] };
-      if (op === "messages") value = { title: "牛马", lastSeq: 1, running: false, messages: body.after ? [] : [{ seq: 1, role: "assistant", text: "继续执行", stepOutput: { step: 1, label: "独立方案", text: "**独立方案正文**", files: [{ blobId, name: "app.zip", size: 3 }] } }] };
+      if (op === "threads") value = { employees: [{ thread: "employee:e1", kind: "employee", id: "e1", name: "热心市民小周" }], groups: [] };
+      if (op === "messages") value = { title: "热心市民小周", lastSeq: 1, running: false, messages: body.after ? [] : [{ seq: 1, role: "assistant", text: "继续执行", stepOutput: { step: 1, label: "独立方案", text: "**独立方案正文**", files: [{ blobId, name: "app.zip", size: 3 }] } }] };
       if (op === "file") { requests.push(body); value = { data: Buffer.from([1, 2, 255]).toString("base64") }; }
       response.setHeader("Content-Type", "application/json"); response.end(JSON.stringify(value)); return;
     }

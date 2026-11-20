@@ -38,7 +38,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
   engine.providers.chat = async (_model, _system, history) => {
     const text = JSON.stringify(history);
     if (!text.includes("separate worker input"))
-      assert(!text.includes("[牛马任务"), "ordinary session history must not include employee task rules");
+      assert(!text.includes("[热心市民任务"), "ordinary session history must not include employee task rules");
     return { role: "assistant", text: "ordinary reply" };
   };
   try {
@@ -58,7 +58,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
     );
     const rules = await tools.rules(model);
     assert(rules.includes("普通会话"));
-    assert(rules.includes("不需要牛马启用"));
+    assert(rules.includes("不受热心市民的启用状态或工作时间限制"));
     assert((await tools.definitions(model)).some((tool) => tool.name === "chrome_act"));
     assert(!(await tools.definitions(model)).some((tool) => tool.name.startsWith("vault_")), "a plain session belongs to no employee and has no vault");
     assert(!rules.includes("[密码本]"));
@@ -93,7 +93,7 @@ test("ordinary conversations do not depend on employee state, schedule or task r
     assert(!(await store.fork(session.id)).taskId);
     const taskTools = await Tools.create(engine, taskSession, config, new AbortController().signal, () => {});
     assert(
-      (await taskTools.rules(model)).includes("当前会话属于牛马任务"),
+      (await taskTools.rules(model)).includes("[热心市民任务] 当前会话用于执行任务"),
     );
     assert(
       !(await taskTools.definitions(model)).some((tool) => ["vault_request", "vault_send"].includes(tool.name)), // tools removed with remote relay

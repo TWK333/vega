@@ -80,7 +80,7 @@ async function loadExtension(child: ChildProcess, path: string) {
         try {
           const reply = JSON.parse(raw);
           if (reply.id === 1) {
-            finish(reply.error ? Error("加载牛马扩展失败：" + reply.error.message) : undefined);
+            finish(reply.error ? Error("加载热心市民的浏览器扩展失败：" + reply.error.message) : undefined);
           }
         } catch { finish(Error("Invalid Chromium startup response")); }
       }
@@ -151,9 +151,9 @@ const removeSingletons = (profile: string, cloud?: CloudRuntime) =>
 const stderrTail = (text: string) => text.trim().split("\n").slice(-12).join("\n").slice(-1500);
 function startupError(code: number | null, signal: NodeJS.Signals | null, stderr: string, cause: unknown) {
   const tail = stderrTail(stderr);
-  const parts = [`牛马浏览器 Chromium 启动即退出（${signal ? "signal " + signal : "code " + code}）`];
+  const parts = [`热心市民使用的 Chromium 浏览器启动后立即退出（${signal ? "signal " + signal : "code " + code}）`];
   // 21 = profile in use; 0 = handed off to a live Chromium already holding the profile.
-  if (code === 21 || code === 0) parts.push("该牛马的浏览器配置目录正被残留 Chromium 占用（未能自动清理，请结束占用该目录的 chromium 进程后重试）");
+  if (code === 21 || code === 0) parts.push("浏览器配置目录正被残留的 Chromium 进程占用（未能自动清理，请结束占用该目录的 chromium 进程后重试）");
   if (process.getuid?.() === 0 && process.env.VEGA_CHROMIUM_NO_SANDBOX !== "1")
     parts.push("当前以 root 运行且未关闭沙箱：Chromium 在 root 下必须设置环境变量 VEGA_CHROMIUM_NO_SANDBOX=1 后重启服务");
   parts.push(tail ? "stderr：" + tail : "无错误输出（原始错误：" + (cause instanceof Error ? cause.message : String(cause)) + "）");
@@ -196,7 +196,7 @@ export class HeadlessBrowser {
     if (this.child) return;
     const binary = chromeBinary();
     if (!binary) {
-      if (instance) throw Error("牛马浏览器找不到 Chromium；请配置 VEGA_CHROME_PATH");
+      if (instance) throw Error("热心市民的浏览器找不到 Chromium；请配置 VEGA_CHROME_PATH");
       console.warn(
         "[Vega] VEGA_BROWSER_MODE=isolated but no Chrome/Chromium binary found; set VEGA_CHROME_PATH",
       );
@@ -257,7 +257,7 @@ export class HeadlessBrowser {
         // A live-but-silent Chromium is a hang or a cold start slower than the budget; losing its stderr
         // left every container failure reporting a bare "extension startup timeout".
         throw exited ? startupError(child.exitCode, child.signalCode, stderr, error)
-          : Error(`牛马浏览器 Chromium ${EXTENSION_STARTUP_MS / 1000} 秒内没有响应扩展加载命令（进程仍在运行）` + (tail ? "；stderr：" + tail : "；无错误输出"));
+          : Error(`热心市民使用的 Chromium 浏览器在 ${EXTENSION_STARTUP_MS / 1000} 秒内没有响应扩展加载命令（进程仍在运行）` + (tail ? "；stderr：" + tail : "；无错误输出"));
       }
     }
   }

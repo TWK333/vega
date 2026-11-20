@@ -10,7 +10,7 @@ export async function updateEmployeeAvatar(employee: Employee, input: Obj) {
     await employee.control({ action: "settings", avatar: input.preset });
   } else {
     const data = await avatarImage(input);
-    assert(!employee.deleting && !employee.deleted, "牛马已删除或正在删除");
+    assert(!employee.deleting && !employee.deleted, "这位热心市民已删除或正在删除");
     const avatar = await employee.store.blob("image/webp", data);
     await employee.update(state => { state.avatar = avatar; });
   }

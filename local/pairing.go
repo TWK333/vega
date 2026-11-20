@@ -344,7 +344,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
   <section class="card">
     <h2>浏览器扩展</h2>
     <form method="post">
-      <small>把客户端内置的 Vega Chrome 扩展解压到本机（<code>{{.ExtensionDir}}</code>），再交给一头牛马在电脑会话里用 appuse 打开 chrome://extensions 加载它。要求本机客户端在线；不满足会提示该怎么做。</small>
+      <small>把客户端内置的 Vega Chrome 扩展解压到本机（<code>{{.ExtensionDir}}</code>），再请一位热心市民在电脑会话里用 appuse 打开 chrome://extensions 加载扩展。要求本机客户端在线；不满足会提示该怎么做。</small>
       <div class="row"><button name="updateExtension" value="1">更新浏览器扩展</button></div>
     </form>
   </section>
@@ -379,7 +379,7 @@ details{margin-top:12px}details summary{cursor:pointer;color:var(--muted);font-w
     <form method="post">
       <label for="confirmSeconds">等多少秒（不选就开始）</label>
       <input id="confirmSeconds" name="confirmSeconds" type="number" min="{{.ConfirmMin}}" max="{{.ConfirmMax}}" value="{{.ConfirmSeconds}}">
-      <small>牛马要动你电脑的鼠标键盘前，蝴蝶上方会弹一张「现在接管 / 我在用」的卡，这段时间内不选就当作同意；选「我在用」后 5 分钟内不再问也不操作。可填 {{.ConfirmMin}}–{{.ConfirmMax}} 秒；关掉上面蝴蝶就不会问。</small>
+      <small>热心市民操作你电脑的鼠标或键盘前，蝴蝶上方会弹一张「现在接管 / 我在用」的卡，这段时间内不选就当作同意；选「我在用」后 5 分钟内不再问也不操作。可填 {{.ConfirmMin}}–{{.ConfirmMax}} 秒；关掉上面蝴蝶就不会问。</small>
       <div class="row"><button name="saveConfirm" value="1">保存确认时间</button></div>
     </form>
   </section>

@@ -91,7 +91,7 @@ test("same-named skills and MCP configurations are independent and execution nev
     const empty = await engine.employee.for((await engine.employee.create({ name: "Empty" }, alice.id)).id);
     const fresh = await engine.config(await store.newSession({ employeeId: empty.employeeId, cwd: directory }));
     assert.deepEqual(fresh.mcp, {}); assert.deepEqual(await loadSkills(fresh, store, directory), []);
-    await assert.rejects(engine.saveConfig({ model: "", provider: {}, mcp: { shared: { command: "node" } } }), /各牛马/);
+    await assert.rejects(engine.saveConfig({ model: "", provider: {}, mcp: { shared: { command: "node" } } }), /各位热心市民/);
   } finally {
     await engine.close(); await store.close();
     if (previous === undefined) delete process.env.VEGA_SKILL_CACHE; else process.env.VEGA_SKILL_CACHE = previous;
@@ -168,7 +168,7 @@ test("a task dispatched from an existing chat uses the newly saved MCP endpoint 
           : { role: "assistant", text: "已派发" };
       }
       const dynamic = messages.filter((message) => message.runtime === "dynamic").map((message) => message.text || "").join("\n");
-      assert.match(dynamic, /当前牛马已启用的服务名.*\["current"\]/);
+      assert.match(dynamic, /当前热心市民已启用的服务名.*\["current"\]/);
       assert(!dynamic.includes(secret));
       assert(found("mcp"));
       const prefix = JSON.stringify([_system, tools]);

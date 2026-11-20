@@ -10,7 +10,7 @@ const props = defineProps({ members: Array, loading: Boolean, api: Function, gro
 const emit = defineEmits(["select", "exit", "title", "open", "inspect", "close", "changed"]);
 const selectedKey = computed(() => props.focus || null), selected = ref(null), detailLoading = ref(false), error = ref(""), filter = ref("all");
 const owned = () => props.members?.some((member) => member.mine && member.id === selectedKey.value?.member);
-const requester = (task) => task.requester ? `${task.requester.kind === "employee" ? "牛马" : ""}${task.requester.name}` : "";
+const requester = (task) => task.requester?.kind === "employee" ? `热心市民「${task.requester.name}」` : task.requester?.name || "";
 const note = (task) => task.status === "waiting" ? task.waiting : task.status === "approval" ? task.approval : task.summary || task.progress?.at(-1)?.text || task.queueReason || "";
 /** Strip bare URLs in card previews so Tapd/link-heavy prompts stay readable; full text stays in tooltip & detail. */
 function cardTitle(text) {
@@ -79,7 +79,7 @@ onBeforeUnmount(() => { version++; });
     <div v-if="selectedKey" class="panel-scroll detail" :aria-busy="detailLoading">
       <p v-if="detailLoading && !selected" class="panel-empty">正在读取任务…</p>
       <template v-if="selected">
-        <p class="panel-empty access-note"><Icon name="lock" :size="12" />{{ selected.canControl ? '你可以操作此任务' : '只读 · 仅发起人和牛马归属人可操作' }}<button v-if="owned()" type="button" class="link" @click="emit('open', { employeeId: selectedKey.member, taskId: selectedKey.task })">打开任务会话</button></p>
+        <p class="panel-empty access-note"><Icon name="lock" :size="12" />{{ selected.canControl ? '你可以操作此任务' : '只读 · 仅任务发起人或热心市民的归属用户可操作' }}<button v-if="owned()" type="button" class="link" @click="emit('open', { employeeId: selectedKey.member, taskId: selectedKey.task })">打开任务会话</button></p>
         <TaskDetail :key="selected.id" :task="selected" :employee-id="selectedKey.member" :readonly="!selected.canControl" :act="control" @inspect="emit('inspect', $event)" />
       </template>
     </div>
@@ -90,7 +90,7 @@ onBeforeUnmount(() => { version++; });
         <button type="button" role="tab" :aria-selected="filter === 'ended'" @click="filter = 'ended'">已结束<span>{{ endedCount }}</span></button>
       </div>
       <p v-if="loading && !members?.length" class="panel-empty"><span class="spinner" aria-hidden="true"></span>加载中…</p>
-      <p v-else-if="!members?.length" class="panel-empty">群里还没有牛马。</p>
+      <p v-else-if="!members?.length" class="panel-empty">群里还没有热心市民。</p>
       <section v-for="member in filteredMembers" :key="member.id" class="member-section">
         <h4><span class="member-avatar"><EmployeeAvatar :employee-id="member.id" :name="member.name" :avatar="member.avatar" /></span>{{ member.name }}<small v-if="member.mine">我的</small><span class="count">{{ member.tasks.length }}</span></h4>
         <p v-if="!member.tasks.length" class="panel-empty">{{ filter === 'active' ? '当前没有进行中的任务。' : filter === 'ended' ? '还没有已结束的任务。' : '还没有群里发起的任务。' }}</p>

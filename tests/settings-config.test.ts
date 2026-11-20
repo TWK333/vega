@@ -137,8 +137,8 @@ test("the vault belongs to every account's settings; MCP and skill editors stay 
   assert.match(vaultSettings, /@click="reset"/);
   assert.match(vaultSettings, /v-model="form.content" :required="!form.id"/);
   assert.match(vaultSettings, /form.id \? '保存修改' : '新增并加密保存'/);
-  assert.match(vaultSettings, /value="all".*所有牛马/s);
-  assert.match(vaultSettings, /value="specific".*指定牛马/s);
+  assert.match(vaultSettings, /value="all".*所有热心市民/s);
+  assert.match(vaultSettings, /value="specific".*指定热心市民/s);
   const employeeSettings = readFileSync("web/src/EmployeeSettings.vue", "utf8");
   const app = readFileSync("web/src/App.vue", "utf8");
   assert(!/EmployeeVault|\['vault', '密码本'\]/.test(app), "the employee no longer has a vault tab");
@@ -160,21 +160,21 @@ test("vault keeps the existing name/condition/content form and only saves the ch
   assert.equal(form.value.condition, "仅用于合作伙伴身份验证，不用于业务站邮箱登录");
   assert.equal(form.value.content, "");
   assert.equal(form.value.employees.join(","), "e1");
-  assert.equal(form.value.scope, "specific", "an entry limited to one employee reopens as 指定牛马");
+  assert.equal(form.value.scope, "specific", "an entry limited to one employee reopens as 指定热心市民");
   let body: any, path = "";
   form.value.scope = "all";
   await vaultFunction("save", { form, base: "/me/vault", selected: () => [], props: { api: async (p: string, _method: string, value: any) => { path = p; body = value; } }, run: async (fn: any) => fn(), reset() {}, load: async () => {}, emit() {}, disposed: false })();
   assert.equal(path, "/me/vault");
-  assert.equal(body.employees.length, 0, "所有牛马 is stored as an empty scope, never as a stale list");
+  assert.equal(body.employees.length, 0, "所有热心市民 is stored as an empty scope, never as a stale list");
   assert.equal(body.condition, form.value.condition);
   assert.equal(body.content, "");
-  // 「指定牛马」without a selection must not silently widen the entry to every employee.
+  // 「指定热心市民」without a selection must not silently widen the entry to every employee.
   form.value.scope = "specific";
   body = undefined;
   const errors: string[] = [];
   await vaultFunction("save", { form, base: "/me/vault", selected: () => [], props: { api: async () => { throw Error("must not save"); } }, run: async (fn: any) => fn(), reset() {}, load: async () => {}, emit: (type: string, message: string) => { if (type === "error") errors.push(message); }, disposed: false })();
   assert.equal(body, undefined);
-  assert.match(errors[0], /至少一个牛马/);
+  assert.match(errors[0], /至少一位热心市民/);
   assert(!vaultSettings.includes('v-model="form.site"'));
 });
 

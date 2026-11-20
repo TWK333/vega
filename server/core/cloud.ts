@@ -21,7 +21,7 @@ export function within(root: string, path: string) {
 export class CloudRuntime {
   fs: typeof filesystem;
   constructor(readonly owner: string) {
-    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(owner || "")) throw Error("云端执行缺少所属用户；请先为历史会话/牛马确认归属");
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(owner || "")) throw Error("云端执行缺少所属用户；请先确认历史会话或热心市民归属哪个账号");
     this.fs = Object.fromEntries(methods.map((method) => [method, async (...args: unknown[]) => {
       const value: any = await cloudRequest(socketPath(), { kind: "fs", owner, method, args });
       if (method === "stat" || method === "lstat") return entry(value);

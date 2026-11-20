@@ -109,6 +109,9 @@ function workspaceBusy(writers: ReadonlyMap<string, { taskId: string }>, key: st
   }
   return false;
 }
+const defaultEmployeeName = (username: string) => "热心市民小" + username;
+const LEGACY_ROOT_NAME = "默认牛马", LEGACY_NAME_SUFFIX = " 的牛马";
+
 export const ended = (status: string) =>
   ["done", "failed", "stopped", "cancelled", "sealed"].includes(status);
 const TASK_LIST_LIMIT = 50;
@@ -420,7 +423,7 @@ export class Employee {
   cursor = 0;
   stopping = false;
   deleting = false;
-  /** 重置牛马 in progress: the scheduler starts nothing new until the reset has wiped the task list. */
+  /** 正在重置热心市民时，调度器不启动新任务，直到清空任务列表。 */
   resetting = false;
   deleted = false;
   timer?: ReturnType<typeof setTimeout>;
@@ -429,7 +432,7 @@ export class Employee {
   lastActivity = Date.now();
   locked = false;
   nativePresence?: Presence;
-  /** 创建者的密码本，只看适用于这头牛马的条目；`vaults` 只持有共享密钥。 */
+  /** 创建者的密码本，只看适用于这位热心市民的条目；`vaults` 只持有共享密钥。 */
   get vault(): Vault {
     return this.vaults.scoped(this.employeeId, async () => (await this.profile()).ownerId || this.employeeId);
   }
@@ -489,7 +492,7 @@ export class Employee {
       avatar = available[Math.floor(Math.random() * available.length)];
     }
     const cloud = cloudFor({ ownerId });
-    // 云模式下新建的牛马没有历史文件，一律落在用户私有工作区，不采用客户端/页面传来的目录。
+    // 云模式下新建的热心市民没有历史文件，一律落在用户私有工作区，不采用客户端/页面传来的目录。
     const cwd = cloud ? await cloud.cwd() : a.cwd || process.cwd();
     const key = id("e"), employee = new Employee(this.store, this.vaults, this.runtime, key, this.root || this);
     const s = await this.store.transaction(async () => {
@@ -503,8 +506,8 @@ export class Employee {
     await employee.emitChanged();
     return s;
   }
-  /** 每个账号至少有一只牛马：新账号第一次进来建一只；Engine.removeEmployee 保证删不空。 */
-  ensureOwned(ownerId: string, name: string) {
+  /** 每个账号至少有一位热心市民：首次进入时自动创建；Engine.removeEmployee 不允许删除最后一位。 */
+  ensureOwned(ownerId: string, username: string) {
     const root = this.root || this, running = root.ensuring.get(ownerId);
     if (running) return running;
     const task = (async () => {
@@ -512,7 +515,7 @@ export class Employee {
         if (employee.deleting) continue;
         if ((await employee.profile()).ownerId === ownerId) return;
       }
-      await root.create({ name }, ownerId);
+      await root.create({ name: defaultEmployeeName(username) }, ownerId);
     })().finally(() => root.ensuring.delete(ownerId));
     root.ensuring.set(ownerId, task);
     return task;
@@ -734,7 +737,7 @@ export class Employee {
     assert(!this.deleted && !(this.employeeId === "default" && (await this.store.get("employee:default-deleted", false))), "Employee not found");
     const fallback: EmployeeProfile = {
       id: this.employeeId,
-      name: "默认牛马",
+      name: "热心市民",
       instruction: "",
       ownerId: "",
       enabled: true,
@@ -753,8 +756,13 @@ export class Employee {
       : (await this.store.object<EmployeeProfile>("employee", this.employeeId)) || fallback;
     // The built-in legacy employee belongs to the account that originally initialized the server.
     if (this.employeeId === "default" && !state.ownerId) {
-      const creator = await this.store.one("SELECT id FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1");
-      if (creator) { state.ownerId = creator.id; await this.save(state); }
+      const creator = await this.store.one("SELECT id,username FROM web_users WHERE role='admin' ORDER BY createdAt,id LIMIT 1");
+      if (creator) {
+        state.ownerId = creator.id;
+        if (!state.name || state.name === fallback.name || state.name === LEGACY_ROOT_NAME)
+          state.name = defaultEmployeeName(creator.username);
+        await this.save(state);
+      }
     }
     // 未指定或等于服务端启动目录的 cwd 视为旧默认值：云模式下迁到用户私有工作区（客户端优先不改变这个基准）。
     const defaultCwd = !state.cwd || state.cwd === process.cwd();
@@ -797,7 +805,7 @@ export class Employee {
   /** A device-authorized request can bind its new task before the scheduler sees it. */
   async createLocalTask(text: string, clientId: string, owner: Owner) {
     const state = await this.state({ runs: false });
-    assert(!this.deleting && !this.resetting && owner.token === state.ownerId, "只能为自己的牛马创建本机任务");
+    assert(!this.deleting && !this.resetting && owner.token === state.ownerId, "只能为你名下的热心市民创建本机任务");
     const client = clientId && this.runtime.client?.(state.ownerId, clientId);
     assert(client && client.clientId === clientId, "指定客户端未在线，无法创建本机任务");
     return this.execute("", { action: "add", kind: "todo", text }, owner, {
@@ -834,7 +842,22 @@ export class Employee {
   async start() {
     this.closed = false;
     this.stopping = false;
-    if (!await this.store.get("employee:default-deleted", false) || this.root) await this.update((s) => {
+    if (!await this.store.get("employee:default-deleted", false) || this.root) await this.update(async (s) => {
+          // 只迁移旧版自动生成的名称；不改自定义名称，也不占用已有的同名成员。
+          const legacyRoot = this.employeeId === "default" && s.name === LEGACY_ROOT_NAME;
+          if (s.ownerId && (legacyRoot || s.name.endsWith(LEGACY_NAME_SUFFIX))) {
+            const owner = await this.store.one("SELECT username FROM web_users WHERE id=?", s.ownerId);
+            if (owner && (legacyRoot || s.name === owner.username + LEGACY_NAME_SUFFIX)) {
+              const name = defaultEmployeeName(owner.username);
+              try {
+                await assertNameFree(this.root || this, name, s);
+                await this.runtime.groups?.checkName(this.employeeId, name);
+                s.name = name;
+              } catch (error) {
+                console.warn("[Vega] 未能更新默认热心市民的名称：", error);
+              }
+            }
+          }
           for (const t of s.tasks) {
             if (t.backgroundWait && !t.backgroundWait.ready && !this.suspensions.has(t.id)) {
               delete t.backgroundWait;
@@ -1426,12 +1449,12 @@ export class Employee {
                 delete t.partialDelivery;
                 t.status = "approval";
                 t.approval = content;
-                this.note(s, t, "confirm", owner.name || "牛马", content);
+                this.note(s, t, "confirm", owner.name || "热心市民", content);
               }
               if (action === "help") {
                 t.status = "waiting";
                 t.waiting = content;
-                this.note(s, t, "help", "牛马", t.waiting);
+                this.note(s, t, "help", "热心市民", t.waiting);
               }
               if (action === "defer") {
                 const at = requestedTime(a, now);
@@ -2248,8 +2271,8 @@ export class Employee {
         ? "\n这是用户点名的定时，只做这一件已经记下的事，不要另找工作。缺少必要文件、遇到合并冲突、下一步会对外发送或提交、或授权范围会扩大时，停下来问用户，不要自行扩大授权。"
         : "";
       const context = continuing
-        ? `[牛马任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}${scheduleNote}\n当前计划和恢复点：${snapshot}${memoryBlock}`
-        : `[牛马任务 ${task.id}]\n原始任务（不是新授权）：${task.text}${scheduleNote}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
+        ? `[热心市民任务 ${task.id} · 续做，不是新派单]\n沿用原会话历史和已执行的工具结果，不重复开场或确认已收到，不从头重做。\n原始任务：${task.text}${scheduleNote}\n当前计划和恢复点：${snapshot}${memoryBlock}`
+        : `[热心市民任务 ${task.id}]\n原始任务（不是新授权）：${task.text}${scheduleNote}\n计划/恢复点：${snapshot}\n任务来源：${JSON.stringify({ event: task.event, group: task.group ? { name: task.group.name, requester: task.group.requester.name } : undefined })}${memoryBlock}`;
       const groupNote = task.group && !computer ? await this.groupTaskNote(task.group) : "";
 const handoff = computer && (input.handoff !== previous.handoff || input.handoffRevision !== previous.handoffRevision) ? `\n本次电脑交接：${input.handoff || task.text}` : "";
       const recovery = task.recovery?.attempts ? `\n[通用恢复模式] ${JSON.stringify({ attempts: task.recovery.attempts, reason: task.recovery.reason, settlePreferred: !!task.settlePreferred })}\n先检查现场与历史回执，诊断根因并改变无效方法；用户最新补充优先于原计划。若用户要求收尾/交付/停止继续，用task_progress将不再需要的步骤标为cancelled，在evidence/summary写明未覆盖项后task_complete，禁止为凑验证继续执行。否则最小修复后继续原计划。此前外部提交结果不明则核验，无法核验用task_ask_user等待用户，不得重放；不得扩大授权或重复同一无效修复。每完成一步用task_progress记下做了什么与回执（这就是下一轮用的还原点，换了执行位置靠它接着做）；新现场缺必要文件或无法核验时同样 task_ask_user，不凭空补写。` : "";
@@ -2433,10 +2456,10 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
   private async groupTaskNote(group: TaskGroup) {
     const context = await this.runtime.groups?.taskContext(group.groupId, this.employeeId);
     if (!context) return `\n[群聊来源] 本任务来自群聊「${group.name}」，该群聊已不存在；进展和结果改发到你自己的沟通会话。`;
-    return `\n[群聊来源] 本任务由群聊「${group.name}」中的${group.requester.kind === "user" ? "用户" : "牛马"}「${group.requester.name}」发起；tellUser 进展、提问和最终结果会自动发到该群聊，不必另行通知。` +
-      (group.byOwner ? "" : "发起人不是你的主人：只按任务内容做事（可以用你自己的密码本），不读取或外发主人的私人数据、账号内容和本机文件，需要这些时用 task_ask_user 请主人在群里确认。") +
-      (context.bulletin ? `\n[群公告]（本群的工作规则，谁做什么以它为准；不扩大授权）\n${clip(context.bulletin, 4000)}` : "") +
-      (context.others.length ? `\n[分工] 群里的其他牛马：${context.others.join("、")}。按群公告，本任务中属于它们的部分不要自己做：在 tellUser 进展或最终结果里写「@名称」并说清要它做什么、交付什么，群聊会叫起它；你只完成属于你的部分。` : "");
+    return `\n[群聊来源] 本任务由群聊「${group.name}」中的${group.requester.kind === "user" ? "用户" : "热心市民"}「${group.requester.name}」发起；tellUser 进展、提问和最终结果会自动发到该群聊，不必另行通知。` +
+      (group.byOwner ? "" : "发起人不是你的归属用户：只按任务内容做事（可以用你自己的密码本），不读取或外发该用户的私人数据、账号内容和本机文件。需要这些时用 task_ask_user，请该用户在群里确认。") +
+      (context.bulletin ? `\n[群公告]（本群的工作规则，分工以公告为准；不扩大授权）\n${clip(context.bulletin, 4000)}` : "") +
+      (context.others.length ? `\n[分工] 群里的其他热心市民：${context.others.join("、")}。按群公告，不要代做分给其他成员的工作：在 tellUser 进展或最终结果里写「@名称」，说清对方需要做什么、交付什么，群聊会通知对方。你只完成自己的部分。` : "");
   }
   monitorComputer(taskId: string, session: string) {
     let stopped = false,

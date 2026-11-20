@@ -51,13 +51,13 @@ test("personal trigger CRUD encrypts secrets, preserves edits and rejects other 
     assert.equal(changed.trigger.url, changedUrl);
     const sent: any[] = [];
     engine.triggers.post = async (url, headers, body) => { sent.push({ url, headers, body: JSON.parse(body) }); };
-    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "牛马", message: '引号"\n换行', groupName: "" });
+    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "热心市民小周", message: '引号"\n换行', groupName: "" });
     await until(() => sent.length === 1);
     assert.equal(sent[0].url, changedUrl);
     assert.equal(sent[0].headers.Authorization, "Bearer secret-header");
-    assert.equal(sent[0].body.text.content, '牛马: 引号"\n换行 / ');
+    assert.equal(sent[0].body.text.content, '热心市民小周: 引号"\n换行 / ');
     await triggersApi(engine.triggers, alice, "PATCH", [item.id], { enabled: false });
-    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "牛马", message: "disabled", groupName: "" });
+    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "热心市民小周", message: "disabled", groupName: "" });
     await Promise.allSettled([...engine.triggers.pending]);
     assert.equal(sent.length, 1);
     await triggersApi(engine.triggers, alice, "DELETE", [item.id], {});
@@ -70,7 +70,7 @@ test("trigger scopes match selected employees or groups by ID without crossing a
   try {
     const one = await engine.employee.for((await engine.employee.create({ name: "一号" }, alice.id)).id);
     const two = await engine.employee.for((await engine.employee.create({ name: "二号" }, alice.id)).id);
-    const other = await engine.employee.for((await engine.employee.create({ name: "其他人的牛马" }, bob.id)).id);
+    const other = await engine.employee.for((await engine.employee.create({ name: "热心市民小bob" }, bob.id)).id);
     const group = await engine.groups.create(alice, { name: "同名群", employees: [one.employeeId, two.employeeId], users: [bob.id] });
     const sameName = await engine.groups.create(alice, { name: "同名群", employees: [one.employeeId, two.employeeId] });
     const privateGroup = await engine.groups.create(bob, { name: "私有群", employees: [other.employeeId] });
@@ -83,7 +83,7 @@ test("trigger scopes match selected employees or groups by ID without crossing a
     await engine.triggers.save(alice.id, hook("union", scope([one.employeeId], [group.id])));
     await engine.triggers.save(bob.id, hook("bob"));
     await assert.rejects(engine.triggers.save(alice.id, hook("empty", scope([], []))), /至少选择/);
-    await assert.rejects(engine.triggers.save(alice.id, hook("other", scope([other.employeeId], []))), /自己的牛马/);
+    await assert.rejects(engine.triggers.save(alice.id, hook("other", scope([other.employeeId], []))), /你名下的热心市民/);
     await assert.rejects(engine.triggers.save(alice.id, hook("other-group", scope([], [privateGroup.id]))), /已加入的群聊/);
     await assert.rejects(engine.triggers.save(alice.id, { ...input, scope: { employees: "wrong", groups: [] } }), /范围无效/);
     // An older client that omits scope must not turn a restricted trigger into an unrestricted one.
@@ -105,11 +105,11 @@ test("trigger scopes match selected employees or groups by ID without crossing a
     assert.deepEqual(texts("employee"), ["一号: 私聊一 / ", "一号: 目标群一 / 同名群", "一号: 同名群一 / 同名群"].sort());
     assert.deepEqual(texts("group"), ["一号: 目标群一 / 同名群", "二号: 目标群二 / 同名群"].sort());
     assert.deepEqual(texts("union"), ["一号: 私聊一 / ", "一号: 目标群一 / 同名群", "一号: 同名群一 / 同名群", "二号: 目标群二 / 同名群"].sort());
-    assert.deepEqual(texts("bob"), ["其他人的牛马: 其他人 / 同名群"]);
+    assert.deepEqual(texts("bob"), ["热心市民小bob: 其他人 / 同名群"]);
     await engine.triggers.save(alice.id, { ...input, id: selected.id, url: "", headers: "", scope: null });
     assert.equal((await engine.triggers.list(alice.id)).find((item) => item.id === selected.id)!.scope, undefined);
     const groupSession = (await engine.groups.get(group.id))!.session;
-    const delayed = await store.append(groupSession, { role: "assistant", text: "离群前的延迟消息", author: { kind: "employee", id: other.employeeId, name: "其他人的牛马" } });
+    const delayed = await store.append(groupSession, { role: "assistant", text: "离群前的延迟消息", author: { kind: "employee", id: other.employeeId, name: "热心市民小bob" } });
     await engine.groups.removeUser(bob, group.id, bob.id);
     engine.employeeMessage(other.employeeId, groupSession, delayed, { id: group.id, name: group.name });
     await sleep(80);
@@ -225,7 +225,7 @@ test("failed call status does not leak the URL or response, and calls are not re
     await engine.triggers.save(alice.id, input);
     let attempts = 0;
     engine.triggers.post = async (url) => { attempts++; throw Error("network failed " + url); };
-    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "牛马", message: "hello", groupName: "" });
+    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "热心市民小周", message: "hello", groupName: "" });
     await until(() => attempts === 1);
     await Promise.allSettled([...engine.triggers.pending]);
     const item = (await engine.triggers.list(alice.id))[0];
@@ -240,7 +240,7 @@ test("queue overflow is reported to the owner without sending or exposing it to 
   const { engine, close } = await fixture();
   try {
     for (let i = 0; i < 100; i++) engine.triggers.pending.add(Promise.resolve());
-    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "牛马", message: "overflow", groupName: "" });
+    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "热心市民小周", message: "overflow", groupName: "" });
     assert((await triggersApi(engine.triggers, alice, "GET", [], {}) as any).droppedAt > 0);
     assert.equal((await triggersApi(engine.triggers, bob, "GET", [], {}) as any).droppedAt, null);
     engine.triggers.pending.clear();
@@ -254,7 +254,7 @@ test("HTTP saturation skips the call and records a visible result", async () => 
     (engine.triggers as any).inFlight = 100;
     let attempted = false;
     engine.triggers.post = async () => { attempted = true; };
-    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "牛马", message: "busy", groupName: "" });
+    engine.triggers.fire(alice.id, { employeeId: "e", employeeName: "热心市民小周", message: "busy", groupName: "" });
     await Promise.allSettled([...engine.triggers.pending]);
     assert.equal(attempted, false);
     assert.equal((await engine.triggers.list(alice.id))[0].lastResult, "接口调用过多，本次跳过");
@@ -265,7 +265,7 @@ test("the trigger settings route and form are available to personal settings", (
   assert.equal(formatRoute(parseRoute("/settings/triggers")), "/settings/triggers");
   const settings = readFileSync("web/src/SettingsView.vue", "utf8"), component = readFileSync("web/src/TriggerSettings.vue", "utf8");
   assert.match(settings, /TRIGGERS.*触发器/);
-  assert.match(component, /牛马发送消息/);
+  assert.match(component, /热心市民发送消息/);
   assert.match(component, /调用接口（POST JSON）/);
   assert.match(component, /\{\{message\}\}/);
 });

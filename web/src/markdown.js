@@ -58,7 +58,7 @@ function useMentions(people) {
   const named = (people || []).filter((p) => p?.id && String(p.name || "").trim());
   mentionIds = new Map(named.map((p) => [String(p.name).trim(), { id: String(p.id), link: p.link !== false }]));
   const names = [...mentionIds.keys()].sort((a, b) => b.length - a.length).map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
-  // Longest name first, so "@测试牛马处理" finds 测试牛马; "@" right after a letter or digit (an email) does not count.
+  // Longest name first, so "@研发助手处理" finds 研发助手; "@" right after a letter or digit (an email) does not count.
   mentionPattern = names.length ? new RegExp(`(^|[^\\p{L}\\p{N}_])@(${names.join("|")})`, "gu") : undefined;
 }
 

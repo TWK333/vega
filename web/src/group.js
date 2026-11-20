@@ -14,7 +14,7 @@ export function groupTiles(group, max = 9) {
 export function groupMembers(group, viewerId) {
   if (!group) return [];
   return [
-    ...(group.employees || []).map((e) => ({ id: e.id, name: e.name, kind: "employee", hint: e.mine ? "我的牛马" : `${e.ownerName || "其他用户"}的牛马` })),
+    ...(group.employees || []).map((e) => ({ id: e.id, name: e.name, kind: "employee", hint: e.mine ? "我的热心市民" : `${e.ownerName || "其他用户"}的热心市民` })),
     ...(group.users || []).filter((u) => u.id !== viewerId).map((u) => ({ id: u.id, name: u.name, kind: "user", hint: u.id === group.creatorId ? "群主 · 用户" : "用户" })),
   ];
 }

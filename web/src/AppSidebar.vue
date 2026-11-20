@@ -41,8 +41,8 @@ const unreadLabel = (n) => n > 99 ? "99+" : String(n);
 
     <div class="sidebar-scroll">
       <div class="sidebar-section-head">
-        <span class="nav-label">数字牛马</span>
-        <button v-if="canExecute" type="button" class="icon sm add-employee" :class="{ active: creating }" aria-label="创建牛马" title="创建牛马" @click="emit('create')"><Icon name="plus" :size="16" /></button>
+        <span class="nav-label">热心市民</span>
+        <button v-if="canExecute" type="button" class="icon sm add-employee" :class="{ active: creating }" aria-label="创建热心市民" title="创建热心市民" @click="emit('create')"><Icon name="plus" :size="16" /></button>
       </div>
       <template v-for="group in groups" :key="group.key">
         <div v-if="groups.length > 1" class="sidebar-group nav-label">{{ group.label }}</div>
@@ -63,7 +63,7 @@ const unreadLabel = (n) => n > 99 ? "99+" : String(n);
           <span v-else-if="entry.activeTasks" class="count nav-label">{{ entry.activeTasks }}</span>
         </button>
       </template>
-      <p v-if="!groups.length" class="sidebar-empty nav-label">还没有牛马</p>
+      <p v-if="!groups.length" class="sidebar-empty nav-label">还没有热心市民</p>
 
       <div class="sidebar-section-head">
         <span class="nav-label">群聊</span>
@@ -80,10 +80,10 @@ const unreadLabel = (n) => n > 99 ? "99+" : String(n);
         @click="emit('open-group', chat.id)"
       >
         <span class="nav-avatar group-nav-avatar"><GroupAvatar :group="chat" /><span v-if="chat.running?.length" class="avatar-dot info" aria-hidden="true"></span></span>
-        <span class="nav-text nav-label"><strong class="truncate">{{ chat.name }}</strong><small class="truncate">{{ chat.running?.length ? '牛马回复中…' : chat.lastText || `${chat.users.length} 人 · ${chat.employees.length} 个牛马` }}</small></span>
+        <span class="nav-text nav-label"><strong class="truncate">{{ chat.name }}</strong><small class="truncate">{{ chat.running?.length ? '热心市民回复中…' : chat.lastText || `${chat.users.length} 位用户 · ${chat.employees.length} 位热心市民` }}</small></span>
         <span v-if="chat.unread" class="unread" :aria-label="chat.unread + ' 条未读消息'">{{ unreadLabel(chat.unread) }}</span>
       </button>
-      <p v-if="!chats?.length" class="sidebar-empty nav-label">拉上同事和牛马一起干活</p>
+      <p v-if="!chats?.length" class="sidebar-empty nav-label">与同事和热心市民一起协作</p>
 
       <template v-if="view === 'chat' && sessions?.length">
         <div class="sidebar-section-head"><span class="nav-label">历史会话</span><span class="count nav-label">{{ sessions.length }}</span></div>

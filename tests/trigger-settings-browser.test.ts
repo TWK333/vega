@@ -41,7 +41,7 @@ test("personal trigger settings can create, edit, disable and delete a webhook",
       };
       try {
         window.confirm = () => true;
-        createApp({ render: () => h(SettingsView, { api, config: {}, models: [], userId: 'u1', tab: 'triggers', admin: false, canExecute: true, employees: [{ id: 'e1', name: '一号牛马' }, { id: 'e2', name: '二号牛马' }], onError: error => errors.push(error) }) }).use(vaporInteropPlugin).mount('#app');
+        createApp({ render: () => h(SettingsView, { api, config: {}, models: [], userId: 'u1', tab: 'triggers', admin: false, canExecute: true, employees: [{ id: 'e1', name: '热心市民小周' }, { id: 'e2', name: '热心市民小林' }], onError: error => errors.push(error) }) }).use(vaporInteropPlugin).mount('#app');
         await settle();
         check([...document.querySelectorAll('.settings-nav button')].some(button => button.textContent.includes('触发器')), 'personal settings has no trigger tab');
         let form = document.querySelector('.trigger-form');
@@ -64,7 +64,7 @@ test("personal trigger settings can create, edit, disable and delete a webhook",
         form.requestSubmit(); await settle();
         check(requests.length === 1 && requests[0].data.url.includes('key=secret'), 'create did not submit the URL');
         check(JSON.stringify(requests[0].data.scope) === JSON.stringify({ employees: ['e1'], groups: ['g1'] }), 'selected scope was not submitted');
-        check(document.querySelector('.item-list li')?.textContent.includes('一号牛马') && document.querySelector('.item-list li')?.textContent.includes('项目群'), 'selected scope is missing from the list');
+        check(document.querySelector('.item-list li')?.textContent.includes('热心市民小周') && document.querySelector('.item-list li')?.textContent.includes('项目群'), 'selected scope is missing from the list');
         document.querySelectorAll('.item-list li button')[1].click(); await settle();
         form = document.querySelector('.trigger-form');
         check(form.querySelector('input[name=trigger-webhook-url]').value === 'https://example.com/hook?key=secret', 'saved URL must be visible on edit');

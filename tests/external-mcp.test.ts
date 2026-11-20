@@ -132,7 +132,7 @@ test("two users each own their configs, and a token cannot use another user's bi
     const sameNameId = (await engine.groups.create(alice, { name: "老张", employees: [zhangId] })).id;
     const bobGroup = (await engine.groups.create(bob, { name: "鲍勃的群", employees: [liId] })).id;
 
-    await assert.rejects(externalMcpApi(engine, alice, "POST", [], { name: "越权", employees: [liId], groups: [] }, ORIGIN), /只能绑定你自己的牛马/);
+    await assert.rejects(externalMcpApi(engine, alice, "POST", [], { name: "越权", employees: [liId], groups: [] }, ORIGIN), /只能绑定你名下的热心市民/);
     await assert.rejects(externalMcpApi(engine, alice, "POST", [], { name: "越权群", employees: [], groups: [bobGroup] }, ORIGIN), /只能绑定你已经加入的群聊/);
 
     const aliceConfig = await issued(engine, alice, [], { name: "爱丽丝的 Cursor", employees: [zhangId], groups: [projectId] });
@@ -240,9 +240,9 @@ test("two users each own their configs, and a token cannot use another user's bi
     assert.deepEqual(both.json.candidates.map((item: TargetRef) => item.id).sort(), [sameNameId, zhangId].sort());
     assert.equal((await userTexts(engine, zhangId)).length, beforeAmbiguous);
     assert.equal((await groupMessages(engine, sameNameId)).length, beforeSame);
-    const byId = await call(engine, auth, ambiguous.config.id, ambiguous.token, "send_message", { target: zhangId, message: "按 id 发给牛马" });
+    const byId = await call(engine, auth, ambiguous.config.id, ambiguous.token, "send_message", { target: zhangId, message: "按 ID 发给热心市民" });
     assert.equal(byId.isError, false, byId.text);
-    await until(async () => (await userTexts(engine, zhangId)).includes("按 id 发给牛马"));
+    await until(async () => (await userTexts(engine, zhangId)).includes("按 ID 发给热心市民"));
     await waitReplies(engine, (await chatSession(engine, zhangId))!, 4);
 
     const beforeConflict = (await userTexts(engine, zhangId)).length;

@@ -102,7 +102,7 @@ function exportJson() {
   URL.revokeObjectURL(url);
 }
 function exportMarkdown() {
-  const lines = ["# 数字牛马记忆", ""];
+  const lines = ["# 热心市民记忆", ""];
   for (const m of props.memories || []) {
     lines.push(`- **${kindLabel[m.kind] || m.kind || "记忆"}** (${m.status || "active"} · ${m.scene || "any"}/${m.scope || "global"}): ${m.claim || m.text || ""}${(m.tags || []).length ? "　" + m.tags.map((t) => "#" + t).join(" ") : ""}`);
   }
@@ -150,7 +150,7 @@ function pct(v) { return Math.round((Number(v) || 0) * 100); }
         <button type="button" class="ghost sm" @click="selected = []">清空</button>
       </div>
 
-      <div v-if="!filtered.length" class="empty-state"><Icon name="memory" :size="28" /><strong>{{ tab === 'pending' ? '没有待确认记忆' : tab === 'archived' ? '归档为空' : '还没有记忆' }}</strong><span>{{ tab === 'active' ? '牛马会在工作中沉淀记忆，你也可以在上方手动添加。' : '冲突与草稿会出现在这里。' }}</span></div>
+      <div v-if="!filtered.length" class="empty-state"><Icon name="memory" :size="28" /><strong>{{ tab === 'pending' ? '没有待确认记忆' : tab === 'archived' ? '归档为空' : '还没有记忆' }}</strong><span>{{ tab === 'active' ? '热心市民会在工作中积累记忆，你也可以在上方手动添加。' : '冲突与草稿会出现在这里。' }}</span></div>
       <ul v-else class="memory-list">
         <li v-for="m in filtered" :key="m.id" :class="{ editing: id === m.id, conflict: m.status === 'conflict', draft: m.status === 'draft' }">
           <label v-if="canManage && tab === 'active'" class="check"><input type="checkbox" :checked="selected.includes(m.id)" @change="toggle(m.id)" :aria-label="'选择 ' + (m.claim || m.text)" /></label>

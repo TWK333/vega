@@ -60,7 +60,7 @@ async function copy(id) {
 }
 async function create() {
   if (!creating.value.employees.length && !creating.value.groups.length) {
-    emit("error", "至少选择一个牛马或群聊");
+    emit("error", "至少选择一位热心市民或一个群聊");
     return;
   }
   await run(async () => {
@@ -75,7 +75,7 @@ async function create() {
 }
 async function save(item, form) {
   if (!form.employees.length && !form.groups.length) {
-    emit("error", "至少选择一个牛马或群聊");
+    emit("error", "至少选择一位热心市民或一个群聊");
     return;
   }
   await run(async () => {
@@ -111,7 +111,7 @@ async function revoke(item) {
   });
 }
 async function remove(item) {
-  if (!confirm(`删除对外 MCP「${item.name}」？已有的对话记录仍留在牛马和群聊里。`)) return;
+  if (!confirm(`删除对外 MCP「${item.name}」？热心市民和群聊中已有的对话记录会保留。`)) return;
   await run(async () => {
     await props.api("/me/external-mcp/" + item.id, "DELETE");
     if (disposed) return;
@@ -127,7 +127,7 @@ onBeforeUnmount(() => { disposed = true; revealed.value = {}; });
     <section class="card">
       <div class="card-head">
         <h3>对外 MCP</h3>
-        <p class="hint">让 Cursor、Claude 等外部客户端连接你已经能对话的牛马和群聊，只能看到你勾选的对象。这和牛马「技能 / MCP 客户端」不是一回事：那边是牛马去调用外部服务，这里是外部客户端来找你的牛马。</p>
+        <p class="hint">让 Cursor、Claude 等外部客户端与热心市民或群聊对话。客户端只能看到你勾选的对象。「技能 / MCP 客户端」的方向正好相反：由热心市民调用外部服务。</p>
       </div>
       <p class="callout info"><Icon name="plug" :size="14" /><span>创建后复制 JSON 到支持 Streamable HTTP 的客户端。配置包含访问凭据，请妥善保管。</span></p>
     </section>
@@ -138,9 +138,9 @@ onBeforeUnmount(() => { disposed = true; revealed.value = {}; });
         <label class="check"><input v-model="creating.enabled" type="checkbox" :disabled="busy" />创建后立即启用</label>
         <div class="targets">
           <div>
-            <span class="field-label">牛马</span>
+            <span class="field-label">热心市民</span>
             <div class="checks">
-              <p v-if="!people().length" class="hint">还没有你的牛马</p>
+              <p v-if="!people().length" class="hint">你还没有热心市民</p>
               <label v-for="employee in people()" :key="employee.id" class="check"><input type="checkbox" :checked="creating.employees.includes(employee.id)" :disabled="busy" @change="toggle(creating, 'employees', employee.id)" /><span>{{ employee.name }}</span></label>
             </div>
           </div>
@@ -182,10 +182,10 @@ onBeforeUnmount(() => { disposed = true; revealed.value = {}; });
         <label>名称<input v-model="item.name" required maxlength="40" :disabled="busy" /></label>
         <div class="targets">
           <div>
-            <span class="field-label">牛马</span>
+            <span class="field-label">热心市民</span>
             <div class="checks">
               <label v-for="employee in people()" :key="employee.id" class="check"><input type="checkbox" :checked="item.employees.includes(employee.id)" :disabled="busy" @change="toggle(item, 'employees', employee.id)" /><span>{{ employee.name }}</span></label>
-              <label v-for="id in item.employees.filter((id) => !nameOf(people(), id))" :key="id" class="check"><input type="checkbox" checked :disabled="busy" @change="toggle(item, 'employees', id)" /><span>已不可用的牛马 {{ id }}</span></label>
+              <label v-for="id in item.employees.filter((id) => !nameOf(people(), id))" :key="id" class="check"><input type="checkbox" checked :disabled="busy" @change="toggle(item, 'employees', id)" /><span>不可用的热心市民 {{ id }}</span></label>
             </div>
           </div>
           <div>

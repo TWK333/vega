@@ -14,11 +14,11 @@ import (
 // 桌面操作（appuse）只有 Windows 客户端有；测试里可以覆盖这个入口。
 var browserExtensionInstallSupported = func() bool { return runtime.GOOS == "windows" }
 
-// installExtension 把内置扩展解压到本机，再请站点把安装这件事交给一个牛马：
+// installExtension 把内置扩展解压到本机，再请站点把安装这件事交给一位热心市民：
 // 站点侧校验设备在线，并把新安装任务绑定到这台设备。
 func (a *Agent) installExtension() error {
 	if !browserExtensionInstallSupported() {
-		return fmt.Errorf("浏览器扩展自动安装只支持 Windows 客户端：牛马要在这台电脑上用真实鼠标键盘操作 Chrome")
+		return fmt.Errorf("浏览器扩展自动安装只支持 Windows 客户端：热心市民需要在这台电脑上用鼠标和键盘操作 Chrome")
 	}
 	a.mu.Lock()
 	origin, token := "", ""
@@ -50,12 +50,12 @@ func (a *Agent) installExtension() error {
 	client := &http.Client{Timeout: 30 * time.Second}
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("安装请求结果未确认，任务可能已创建；请先在牛马任务列表核对，不要重复点击：%w", err)
+		return fmt.Errorf("安装请求结果未确认，任务可能已创建；请先到热心市民的任务列表核对，不要重复点击：%w", err)
 	}
 	defer response.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
 	if response.StatusCode != http.StatusOK {
-		// 站点回的是给人看的提示（如没有可用牛马或本机不在线），原样交给用户。
+		// 站点回的是给人看的提示（如没有可用的热心市民或本机不在线），原样交给用户。
 		var failure struct {
 			StatusMessage string `json:"statusMessage"`
 			Message       string `json:"message"`
@@ -73,13 +73,13 @@ func (a *Agent) installExtension() error {
 		EmployeeID string `json:"employeeId"`
 	}
 	if err = json.Unmarshal(data, &result); err != nil {
-		return fmt.Errorf("站点响应无法解析，安装任务可能已创建；请先在牛马任务列表核对，不要重复点击：%w", err)
+		return fmt.Errorf("站点响应无法解析，安装任务可能已创建；请先到热心市民的任务列表核对，不要重复点击：%w", err)
 	}
 	if strings.TrimSpace(result.Employee) == "" {
-		result.Employee = "牛马"
+		result.Employee = "热心市民"
 	}
 	a.mu.Lock()
-	a.lastExtension = fmt.Sprintf("已把安装/更新浏览器扩展的任务交给牛马「%s」。扩展目录：%s。进展在它的对话里；点击本身不代表已经装好。", result.Employee, dir)
+	a.lastExtension = fmt.Sprintf("已把安装或更新浏览器扩展的任务交给「%s」。扩展目录：%s。请在对话中查看进展；点击按钮不代表安装完成。", result.Employee, dir)
 	message := a.lastExtension
 	a.mu.Unlock()
 	a.clientLog("安装浏览器扩展：%s", message)

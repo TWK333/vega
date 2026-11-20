@@ -107,7 +107,7 @@ async function run(action) {
     <form v-if="task.status === 'waiting'" class="attention-block" @submit.prevent="run('answer')">
       <h3><Icon name="alert" :size="16" />需要补充信息</h3>
       <MessageText :text="task.waiting" />
-      <template v-if="!readonly"><label class="sr-only" :for="'answer-' + task.id">你的回复</label><textarea :id="'answer-' + task.id" v-model="answer" rows="3" maxlength="8000" required placeholder="补充信息后，牛马会继续原任务"></textarea><div class="actions end"><button class="primary" :disabled="busy || !answer.trim()">回复并继续</button></div></template>
+      <template v-if="!readonly"><label class="sr-only" :for="'answer-' + task.id">你的回复</label><textarea :id="'answer-' + task.id" v-model="answer" rows="3" maxlength="8000" required placeholder="补充信息后，热心市民会继续处理原任务"></textarea><div class="actions end"><button class="primary" :disabled="busy || !answer.trim()">回复并继续</button></div></template>
     </form>
 
     <section v-if="task.progress?.length" class="detail-section">
@@ -165,13 +165,13 @@ async function run(action) {
       <p v-if="task.recovery?.attempts"><Icon name="refresh" :size="14" />自动恢复 {{ task.recovery.attempts }} 次 · {{ task.recovery.reason }}</p>
       <p v-if="task.checkpoint"><Icon name="clock" :size="14" />恢复点：{{ task.checkpoint }}</p>
     </section>
-    <p v-if="!task.result && !task.plan?.length && !task.checkpoint && !task.progress?.length && !['approval', 'waiting'].includes(task.status)" class="detail-note">牛马开工后，进度会更新在这里。</p>
+    <p v-if="!task.result && !task.plan?.length && !task.checkpoint && !task.progress?.length && !['approval', 'waiting'].includes(task.status)" class="detail-note">任务开始后，进度会显示在这里。</p>
 
     <footer class="detail-foot">
       <button v-if="task.workSession" type="button" @click="emit('inspect', task.workSession)"><Icon name="code" :size="15" />执行记录</button>
       <button v-if="task.computerSession" type="button" @click="emit('inspect', task.computerSession)"><Icon name="globe" :size="15" />浏览器记录</button>
       <span class="spacer"></span>
-      <span v-if="task.status === 'deferred'" class="hint">无需等待，牛马会按恢复点继续检查。</span>
+      <span v-if="task.status === 'deferred'" class="hint">无需在此等待，热心市民会按恢复点继续检查。</span>
       <template v-if="!readonly">
         <button v-if="task.status === 'running'" type="button" :disabled="busy" @click="run('stop')"><Icon name="stop" :size="14" />停止任务</button>
         <button v-else-if="!ended" type="button" :disabled="busy" @click="run('stop')"><Icon name="pause" :size="14" />暂停任务</button>

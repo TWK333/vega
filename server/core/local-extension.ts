@@ -7,7 +7,7 @@ export type ExtensionGrant = { userId: string; clientId: string };
 export type ExtensionDeps = { auth: Auth; engine: Engine };
 export type ExtensionInstall = { employee: string; employeeId: string; session: string };
 
-/** 让牛马把这台电脑的 Chrome 装/更新成 Vega 扩展；路径由客户端解压后报上来。 */
+/** 由热心市民在这台电脑上安装或更新 Chrome 的 Vega 扩展；路径由客户端解压后上报。 */
 export function browserExtensionPrompt(path: string, client?: { name?: string }): string {
   return [
     "【本机客户端请求】用户在本地客户端「连接授权 → 授权 → 浏览器扩展」点了「更新浏览器扩展」：把 Vega Chrome 扩展装进这台电脑（" + (client?.name || "本机客户端") + "）的 Chrome。",
@@ -27,7 +27,7 @@ export function browserExtensionPrompt(path: string, client?: { name?: string })
 }
 
 /**
- * 设备凭据 → 这台电脑 → 一头可用牛马 → 让它用 appuse 在这台电脑的 Chrome 装扩展。
+ * 设备凭据 → 这台电脑 → 一位可用的热心市民，在本机用 appuse 为 Chrome 安装扩展。
  * 装扩展要用这台电脑的桌面（appuse）和这台电脑的 Chrome；这台电脑不在线时不偷偷换机器。
  */
 export async function installBrowserExtension(
@@ -44,7 +44,7 @@ export async function installBrowserExtension(
   );
   assert(
     mine.length,
-    "没有可用的牛马：请先在「数字牛马」里新建一个（或等正在删除的牛马处理完），再点一次「更新浏览器扩展」。",
+    "没有可用的热心市民：请在「热心市民」里新建一位，或等删除操作完成，再点一次「更新浏览器扩展」。",
   );
   const employee = mine[0];
   const name = async () => (await employee.state()).name;
@@ -52,7 +52,7 @@ export async function installBrowserExtension(
   assert(target, "这台电脑当前不在线：请先让这台电脑的客户端上线，再点一次「更新浏览器扩展」。");
   assert(target.platform === "windows", "浏览器扩展自动安装需要 Windows 客户端。");
   const session = await employee.chat(owner.id);
-  assert(!deps.engine.active.has(session.id), "这个牛马正在执行别的请求，等它结束再点一次「更新浏览器扩展」。");
+  assert(!deps.engine.active.has(session.id), "这位热心市民正在处理其他请求，请等当前请求结束后再点一次「更新浏览器扩展」。");
   const client = deps.engine.localAgents.list(owner.id).find((item) => item.id === grant.clientId);
   await employee.createLocalTask(browserExtensionPrompt(path, client), grant.clientId, { token: owner.id, name: owner.username });
   return { employee: await name(), employeeId: employee.employeeId, session: session.id };

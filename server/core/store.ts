@@ -645,7 +645,7 @@ export class Store {
     const { filter, params } = this.usageFilter(opts);
     const page = Math.max(Math.trunc(opts.page || 1), 1), pageSize = Math.min(Math.max(Math.trunc(opts.pageSize || 20), 1), 100);
     const task = this.json("$.task"), employee = this.json("$.employee");
-    // Rows from plain chats carry no task: they group per user and 牛马 instead of being added together.
+    // Rows from plain chats have no task: group them by user and employee.
     const keys = ` FROM token_usage${filter} GROUP BY user,${task},${employee}`;
     const group = `SELECT user,${task} task,${employee} employee,MIN(at) firstAt,MAX(at) lastAt,${this.usageTotalsSql()}${keys}`;
     const rows = await this.all(`SELECT g.* FROM (${group}) g LEFT JOIN employee_tasks t ON t.id=g.task ORDER BY (t.created IS NULL),t.created DESC,g.lastAt DESC,g.user,g.task,g.employee LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`, ...params);

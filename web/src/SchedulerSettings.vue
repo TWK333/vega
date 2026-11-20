@@ -37,7 +37,7 @@ async function save() {
     <div class="card-head row">
       <div>
         <h3>任务调度并发</h3>
-        <p class="hint">限制同时执行的任务数。全站上限与单牛马上限同时生效；默认各为 3。</p>
+        <p class="hint">限制同时执行的任务数。全站上限和每位热心市民的上限同时生效，默认均为 3。</p>
       </div>
       <button class="primary sm" :disabled="busy" @click="save">保存</button>
     </div>
@@ -48,9 +48,9 @@ async function save() {
         <span class="hint">任意时刻全站最多这么多任务在跑</span>
       </label>
       <label class="slot-field">
-        <span>单牛马同时执行上限</span>
+        <span>每位热心市民的并发任务上限</span>
         <input type="number" min="1" max="64" step="1" v-model.number="perEmployeeSlots" />
-        <span class="hint">同一牛马最多同时跑这么多（电脑类仍限 1 个）</span>
+        <span class="hint">每位热心市民可同时执行的任务数，电脑任务仍限 1 个。</span>
       </label>
     </div>
     <p class="callout info"><Icon name="alert" :size="14" /><span>改大可减少「排队像调度慢」；过大可能把模型和浏览器打满。电脑任务仍受桌面空闲/接管规则约束。</span></p>

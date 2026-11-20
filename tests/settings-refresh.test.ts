@@ -225,7 +225,7 @@ test("UI keeps all pages Vapor, settings for every role, separate experiences, n
   assert(nav.includes('"experiences"') && nav.includes('"debug"') && nav.trimEnd().endsWith('"code"]];'));
   assert(sidebar.indexOf("emit('navigate', 'settings')") > sidebar.indexOf("emit('navigate', 'usage')"), "settings follows the personal pages");
   assert(!app.includes("星轨"));
-  assert(!app.includes("牛马工作目录"));
+  assert(!app.includes("热心市民工作目录"));
   assert(!app.includes("模型配置 JSON"));
   assert(!app.includes("Nitro · SQLite"));
   assert(!app.includes("T1/T2/T3"));

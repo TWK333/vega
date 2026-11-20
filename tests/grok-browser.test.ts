@@ -113,7 +113,7 @@ test("the desktop renderer reconciles lost receipts and never turns old unsent d
           { seq: 1, role: "user", text: "群里原有消息", actorId: "peer", at: baseAt, author: { kind: "user", id: "peer", name: "群成员样例" } },
           ...writes.flatMap((row, i) => [
             { seq: 2 + 2 * i, role: "user", text: row.text, actorId: "me", clientMessageId: row.clientMessageId, at: baseAt + 10 * i + 1, author: { kind: "user", id: "me", name: "本人样例" } },
-            { seq: 3 + 2 * i, role: "assistant", text: "群回复样例 " + (i + 1), at: baseAt + 10 * i + 2, author: { kind: "employee", id: "e1", name: "牛马样例" } },
+            { seq: 3 + 2 * i, role: "assistant", text: "群回复样例 " + (i + 1), at: baseAt + 10 * i + 2, author: { kind: "employee", id: "e1", name: "热心市民小林" } },
           ]),
         ] : [];
         if (args.receiptFor) {

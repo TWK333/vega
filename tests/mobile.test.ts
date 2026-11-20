@@ -184,12 +184,12 @@ test(
             { id: "fixture", origin: "https://example.test" },
           );
     const worker = await store.newSession({
-            title: "牛马专属主会话",
+            title: "热心市民专属主会话",
             cwd: dir,
             taskId: "seeded-worker",
           }),
       computer = await store.newSession({
-              title: "牛马专属电脑会话",
+              title: "热心市民专属电脑会话",
               cwd: dir,
               taskId: "seeded-worker",
               scene: "computer",
@@ -931,13 +931,13 @@ test(
       );
       assert(
         !(await evaluate(
-          `(document.querySelector('.topbar')||document.querySelector('.mobile-header')).textContent.includes('牛马专属')`,
+          `(document.querySelector('.topbar')||document.querySelector('.mobile-header')).textContent.includes('热心市民专属')`,
         )),
         "newer employee records must not become the default chat",
       );
       assert(
         !(await evaluate(
-          `document.querySelector('.session-list').textContent.includes('牛马专属')`,
+          `document.querySelector('.session-list').textContent.includes('热心市民专属')`,
         )),
       );
       blockEmployee = false;
@@ -961,7 +961,7 @@ test(
         assert.equal(requests.length, 0, "switching must not submit any draft");
         await tap(".attachments button");
       });
-      await nav("数字牛马");
+      await nav("热心市民");
       await until(
         `document.querySelector('.task-card')?.textContent.includes('seeded employee task')`,
       );
@@ -974,7 +974,7 @@ test(
         false,
         "employee record must not expose ordinary sending/stop/Stage controls",
       );
-      await byText("← 返回数字牛马");
+      await byText("← 返回工作区");
       await until(`document.querySelector('.task-card')`);
       await byText("Chrome 会话 ↗", ".task-card");
       await until(
@@ -987,7 +987,7 @@ test(
         ),
         "ordinary draft stays in its own conversation",
       );
-      await nav("数字牛马");
+      await nav("热心市民");
       await until(`document.querySelector('.task-card')`);
       acceptDialog = true;
       await byText("删除记录", ".task-card");
@@ -1107,7 +1107,7 @@ test(
         await resize(width, height);
         for (const page of [
           "对话",
-          "数字牛马",
+          "热心市民",
           "浏览器",
           "经验图谱",
           "账号",
@@ -1175,7 +1175,7 @@ test(
         body: JSON.stringify({ action: "add", kind: "todo", text: "手机提交的独立任务", cwd: dir }),
       });
       assert.equal(createdTask.status, 200);
-      await nav("数字牛马");
+      await nav("热心市民");
       assert.equal(
         await evaluate(`document.querySelector('input[aria-label="新任务"]')===null`),
         true,
@@ -1209,7 +1209,7 @@ test(
         "vault management belongs in settings, not employee tabs",
       );
       assert.equal(
-        await evaluate(`document.querySelector('.tabs').textContent.includes('团队牛马')`),
+        await evaluate(`document.querySelector('.tabs').textContent.includes('团队热心市民')`),
         false,
       );
       await nav("设置");

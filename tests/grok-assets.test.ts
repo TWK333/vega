@@ -77,7 +77,7 @@ function bridge(dark = true, nativeHost = false, respond?: (url: string, body: a
       requests.push({ url, body: JSON.parse(options.body) });
       if (respond) return respond(url, JSON.parse(options.body), options.signal);
       return { ok, json: async () => url.endsWith("threads")
-        ? { employees: [{ id: "e1", name: "测试牛马", thread: "employee:e1", unread: 2, lastViewedAt: 930, lastText: "最新进展", lastAt: 1200, avatar: "bot:round:purple" }] }
+        ? { employees: [{ id: "e1", name: "热心市民小周", thread: "employee:e1", unread: 2, lastViewedAt: 930, lastText: "最新进展", lastAt: 1200, avatar: "bot:round:purple" }] }
         : url.endsWith("messages") ? { messages: [{ seq: 12, role: "assistant", text: "新版消息", at: 1000 }], readSeq: 0 } : { ok } };
     },
   });
@@ -196,7 +196,7 @@ test("groups use an independent roster ID, show the right sender and acknowledge
   const group = { id: "e1", kind: "group", thread: "group:e1", name: "协作群", unread: 2, lastAt: 200, lastViewedAt: 100 };
   const history = [
     { seq: 1, role: "user", text: "same text", actorId: "peer", clientMessageId: nonce, author: { kind: "user", id: "peer", name: "另一位成员" } },
-    { seq: 2, role: "assistant", text: "收到", author: { kind: "employee", id: "e1", name: "群里的牛马" } },
+    { seq: 2, role: "assistant", text: "收到", author: { kind: "employee", id: "e1", name: "热心市民小林" } },
     { seq: 3, role: "user", text: "same text", actorId: "me", clientMessageId: nonce, author: { kind: "user", id: "me", name: "自己" } },
   ];
   let seen = 0;
@@ -217,7 +217,7 @@ test("groups use an independent roster ID, show the right sender and acknowledge
   b.window.document.hasFocus = () => false;
   const { entries } = (await b.request("openAgentTail", { id: "group:e1" })).value;
   assert.deepEqual(Array.from(entries, (row: any) => [row.kind, row.content ?? row.message.content, row.clientNonce]), [
-    ["send-message", "另一位成员：\nsame text", undefined], ["send-message", "群里的牛马：\n收到", undefined], ["message", "same text", nonce],
+    ["send-message", "另一位成员：\nsame text", undefined], ["send-message", "热心市民小林：\n收到", undefined], ["message", "same text", nonce],
   ]);
   await b.request("noteTranscriptOpened", { id: "group:e1" });
   await b.tick();

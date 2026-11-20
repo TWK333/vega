@@ -18,7 +18,7 @@ async function fixture() {
   for (const user of [owner, requester, member, viewer])
     await store.run("INSERT INTO web_users VALUES(?,?,?,?,?,?,?)", user.id, "user-" + user.id, "unused", user.role, 0, Date.now(), 0);
   await store.put("config", { scenes: { lightweight: ["fixture/model"] }, provider: { fixture: { api: "openai-completions", baseURL: "https://unused.test", models: { model: { limit: { context: 128000, output: 8192 } } } } } });
-  const employee = await engine.employee.for((await engine.employee.create({ name: "执行牛马" }, owner.id)).id);
+  const employee = await engine.employee.for((await engine.employee.create({ name: "热心市民小周" }, owner.id)).id);
   const group = await engine.groups.create(member, { name: "协作", users: [owner.id, requester.id, viewer.id] });
   await engine.groups.addEmployee(owner, group.id, employee.employeeId);
   const shared: Task = { id: "task-shared", text: "群内请求", status: "waiting", createdAt: 1, profile: "lightweight", cwd: process.cwd(), owner: { token: "", name: "owner" }, waiting: "请补充", workSession: "private-session", memorySuggestions: [{ claim: "private" }],
@@ -110,7 +110,7 @@ test("group chat task commands enforce the same authority and never replace the 
     await tools.execute({ id: "owner-followup", name: "employee_task_manage", arguments: { taskId: shared.id, request: { command: "resume", supplement: "补充验收要求" } } }, model);
     assert.equal((await employee.findTask(shared.id))!.group?.requester.id, requester.id, "owner follow-up is not a new task assignment");
     await source(member, false);
-    await assert.rejects(tools.execute({ id: "other-stop", name: "employee_task_manage", arguments: { taskId: shared.id, request: { command: "stop" } } }, model), /只有任务发起人和牛马归属人/);
+    await assert.rejects(tools.execute({ id: "other-stop", name: "employee_task_manage", arguments: { taskId: shared.id, request: { command: "stop" } } }, model), /只有任务发起人或负责该任务的热心市民的归属用户/);
     await source(requester, false);
     await tools.execute({ id: "requester-stop", name: "employee_task_manage", arguments: { taskId: shared.id, request: { command: "stop" } } }, model);
     assert.equal((await employee.findTask(shared.id))!.status, "stopped");

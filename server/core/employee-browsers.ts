@@ -73,7 +73,7 @@ export class EmployeeBrowsers {
           const count = (failure?.count || 0) + 1, delays = EmployeeBrowsers.BACKOFF_MS;
           const wait = count < 2 ? 0 : delays[Math.min(count - 2, delays.length - 1)];
           current.failure = { count, at: Date.now(), retryAt: Date.now() + wait,
-            error: message.startsWith("牛马浏览器") ? message : "牛马浏览器启动失败：" + message };
+            error: message.startsWith("热心市民") ? message : "热心市民的浏览器启动失败：" + message };
           throw Error(current.failure.error + (wait ? `；已连续失败 ${count} 次，${wait / 1000} 秒后才会再次尝试启动` : ""));
         }
         current.failure = undefined;
@@ -96,7 +96,7 @@ export class EmployeeBrowsers {
         } else current.probedAt = undefined;
         await sleep(100);
       }
-      throw Error(`牛马浏览器连接暂不可用：${failure}；已保留浏览器和页面，下次使用会继续恢复，不会重放页面操作`);
+      throw Error(`热心市民的浏览器暂时无法连接：${failure}；已保留浏览器和页面，下次使用会继续恢复，不会重放页面操作`);
     })().finally(() => { current.starting = undefined; });
     return current.starting;
   }

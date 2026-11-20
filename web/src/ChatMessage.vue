@@ -36,7 +36,7 @@ const loadedStep = ref(null), stepLoading = ref(false), stepError = ref("");
 const stepOutput = computed(() => loadedStep.value || (typeof props.message.stepOutput === "object" ? props.message.stepOutput : legacyOutput.value));
 const bodyText = computed(() => legacyOutput.value ? "步骤产物已保存。" : props.message.displayText || props.message.text);
 const sender = computed(() => props.message.author ? { kind: props.message.author.kind, id: props.message.author.id, name: props.message.author.name, avatar: props.message.author.avatar || "" } : { kind: "employee", id: props.employeeId, name: props.name, avatar: props.avatar });
-// My own bubbles take the color of the 牛马 I am talking to (the chat view passes it); the 牛马's replies stay neutral.
+// My own bubbles take the color of the employee I am talking to (the chat view passes it); their replies stay neutral.
 const tint = computed(() => (mine.value && !props.message.error ? props.selfTint : undefined));
 const statusOf = (task) => props.taskStatus?.[task.id] ?? (props.tasks ? "deleted" : task.status);
 const attachedTasks = computed(() => (props.message.tasks || []).filter((task) => !props.hiddenTaskIds?.has(task.id)));

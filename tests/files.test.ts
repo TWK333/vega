@@ -34,7 +34,7 @@ test("task screenshot Markdown resolves against real task files without redirect
     const missing = typo.replace(name, "b".repeat(32) + "-0.webp");
     const untouched = [
       `![其他任务](${sibling})`,
-      `![其他牛马](${typo.replace("e1", "e2")})`,
+      `![其他热心市民](${typo.replace("e1", "e2")})`,
       `![外部图片](https://example.test${typo})`,
       `![未知截图](${missing})`,
       `![正确地址](${url})`,
@@ -63,7 +63,7 @@ test("archived files are written per employee task or user session and read back
     assert.equal((await store.imageData(read.images![0])).data, pixels.toString("base64"));
     // Another employee, a plain session, or a path climbing out of the employee directory cannot.
     for (const [session, path] of [[other, shot], [plain, shot], [chat, join(store.files.employee(a.employeeId), "..", b.employeeId, "x.webp")]] as const)
-      await assert.rejects((await tools(session)).read({ path }), /只能读取本牛马/);
+      await assert.rejects((await tools(session)).read({ path }), /只能读取当前热心市民/);
     await assert.rejects((await tools(chat)).read({ path: join(store.files.dir(work), "gone.webp") }), /存档文件不存在/);
     // A plain session writes under its owner and reads its own files.
     const own = await store.files.write(plain, "note.json", JSON.stringify({ hello: "world" }));
@@ -187,7 +187,7 @@ test("read resolves /api/files and /api/blobs URLs on the server even for local-
     await store.grantBlob(blobId, work.id);
     const viaBlob = await (await tools(work)).read({ path: `/api/blobs/${blobId}` });
     assert.equal(viaBlob.images![0].blobId, blobId);
-    await assert.rejects((await tools(work)).read({ path: "/api/files/employees/other/x.webp" }), /只能读取本牛马|Invalid file path/);
+    await assert.rejects((await tools(work)).read({ path: "/api/files/employees/other/x.webp" }), /只能读取当前热心市民|Invalid file path/);
   } finally { await engine.close(); await store.close(); }
 });
 

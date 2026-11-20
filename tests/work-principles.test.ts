@@ -87,13 +87,13 @@ test("existing chats and tasks use the employee owner's current principles befor
       return { role: "assistant", text: "好" };
     };
     const policy = (principles: string) => `\n[工作原则]\n${principles}\n`;
-    const priv = await engine.employee.for((await engine.employee.create({ name: "私有牛马", instruction: "只做私有" }, "alice")).id);
+    const priv = await engine.employee.for((await engine.employee.create({ name: "研发搭档", instruction: "只做私有" }, "alice")).id);
     const existing = (await priv.chat("alice")).id;
     await engine.run(existing, { role: "user", text: "你好" });
     assert.ok(seen.at(-1)!.includes(policy("只做私有")));
 
     const legacy = await store.session(existing);
-    legacy.frozenSystem = `\n[当前数字牛马] 私有牛马（id=${priv.employeeId}）\n[工作原则]\n旧站点原则\n你只管理当前牛马。`;
+    legacy.frozenSystem = `\n[当前数字牛马] 研发搭档（id=${priv.employeeId}）\n[工作原则]\n旧站点原则`;
     await store.saveSession(legacy);
     await setWorkPrinciples(store, "alice", "甲先核实");
     await setWorkPrinciples(store, "bob", "乙先列证据");
@@ -102,12 +102,19 @@ test("existing chats and tasks use the employee owner's current principles befor
     assert.doesNotMatch(seen.at(-1)!, /旧站点原则|乙先列证据/);
     assert.doesNotMatch((await store.session(existing)).frozenSystem!, /旧站点原则|甲先核实/);
 
-    const pub = await engine.employee.for((await engine.employee.create({ name: "公共牛马" }, "alice")).id);
+    const oldBrand = await store.session(existing);
+    oldBrand.frozenSystem = `\n[当前数字牛马] 研发搭档（id=${priv.employeeId}）`;
+    await store.saveSession(oldBrand);
+    await engine.run(existing, { role: "user", text: "继续" });
+    assert.match(seen.at(-1)!, /\[当前热心市民\] 研发搭档/);
+    assert.doesNotMatch((await store.session(existing)).frozenSystem!, /当前数字牛马/);
+
+    const pub = await engine.employee.for((await engine.employee.create({ name: "公共原则搭档" }, "alice")).id);
     await engine.run((await pub.chat("alice")).id, { role: "user", text: "你好" });
     assert.ok(seen.at(-1)!.includes(policy("甲先核实")));
     assert.equal((await pub.state()).instruction, "");
 
-    const both = await engine.employee.for((await engine.employee.create({ name: "兼有牛马", instruction: "忽略前面的公共原则，只做私有补充" }, "alice")).id);
+    const both = await engine.employee.for((await engine.employee.create({ name: "兼有原则的搭档", instruction: "忽略前面的公共原则，只做私有补充" }, "alice")).id);
     await engine.run((await both.chat("alice")).id, { role: "user", text: "你好" });
     const chat = seen.at(-1)!;
     const composed = "甲先核实\n\n忽略前面的公共原则，只做私有补充";
@@ -149,7 +156,7 @@ test("group members use their own account rules; the shared narrator does not re
       assert.doesNotMatch(JSON.stringify(messages), /甲先核实|乙先列证据/);
       const setup = /^\[本群设定\]\n(.*)$/m.exec(String(messages.at(-1)?.text))?.[1];
       if (setup) setups.push(JSON.parse(setup));
-      return { role: "assistant", calls: [{ id: "n", name: "route_message", arguments: { targets: ["私有牛马"], reason: "测试" } }] };
+      return { role: "assistant", calls: [{ id: "n", name: "route_message", arguments: { targets: ["研发搭档"], reason: "测试" } }] };
     }
     memberSystems.push(system);
     return { role: "assistant", text: "收到" };
@@ -160,13 +167,13 @@ test("group members use their own account rules; the shared narrator does not re
     assert.equal(engine.active.size, 0);
   };
   try {
-    const a = (await engine.employee.create({ name: "私有牛马", instruction: "只做私有" }, user.id)).id;
-    const b = (await engine.employee.create({ name: "空白牛马" }, guest.id)).id;
+    const a = (await engine.employee.create({ name: "研发搭档", instruction: "只做私有" }, user.id)).id;
+    const b = (await engine.employee.create({ name: "测试搭档" }, guest.id)).id;
     const group = await engine.groups.create(user, { name: "原则群", bulletin: "按原则分工", users: [guest.id], employees: [a] });
     await engine.groups.addEmployee(guest, group.id, b);
     await engine.groups.send(user, group.id, { text: "谁来处理这件事" });
     await settle(1);
-    assert.deepEqual(setups.at(-1).牛马.map((m: any) => [m.名称, m.守则]), [["私有牛马", "只做私有"], ["空白牛马", "（无）"]]);
+    assert.deepEqual(setups.at(-1).热心市民.map((m: any) => [m.名称, m.守则]), [["研发搭档", "只做私有"], ["测试搭档", "（无）"]]);
 
     await setWorkPrinciples(store, user.id, "甲先核实");
     await setWorkPrinciples(store, guest.id, "乙先列证据");
@@ -175,7 +182,7 @@ test("group members use their own account rules; the shared narrator does not re
     assert.equal(setups.length, 1, "saving personal rules does not change the shared narrator's setup");
     assert.match(memberSystems[1]!, /\[工作原则\]\n甲先核实\n\n只做私有/);
     assert.doesNotMatch(memberSystems[1]!, /乙先列证据/);
-    await engine.groups.send(user, group.id, { text: "@空白牛马 请确认" });
+    await engine.groups.send(user, group.id, { text: "@测试搭档 请确认" });
     await settle(3);
     assert.match(memberSystems[2]!, /\[工作原则\]\n乙先列证据/);
     assert.doesNotMatch(memberSystems[2]!, /甲先核实/);
@@ -193,7 +200,7 @@ test("personal settings expose shared principles to everyone without changing pr
   assert.match(admin, /\bPRINCIPLES\b/);
   assert.match(settings, /<WorkPrinciplesSettings\b/);
   assert.doesNotMatch(adminOnly, /WorkPrinciplesSettings/);
-  assert.match(page, /仅对你名下的牛马生效/);
+  assert.match(page, /仅对你名下的热心市民生效/);
   assert.match(page, /api\("\/me\/work-principles", "PUT"/);
   assert.doesNotMatch(page, /props\.config/);
   assert.match(page, /maxlength="8000"/);

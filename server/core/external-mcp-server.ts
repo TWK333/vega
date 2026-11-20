@@ -14,26 +14,26 @@ import type { Obj } from "./util";
 
 const MAX_BODY = 256 * 1024;
 const INSTRUCTIONS = [
-  "这是 Vega 的对外 MCP。你只能和这条连接已经绑定的牛马、群聊对话。",
+  "这是 Vega 的对外 MCP。你只能和这条连接已绑定的热心市民和群聊对话。",
   "用户说「给老张说做这个」时，调用 send_message，把「做这个」发给名为「老张」的对象（target 填名称或 id，message 填要说的话；也可以把整句放进 text）。",
   "只绑定了一个对象时，不写名字的消息会发给那一个。",
-  "名字对不上，或有多个同名对象时，把候选告诉用户，不要改发给别人，也不要猜未绑定的牛马或群聊。",
+  "名字对不上，或有多个同名对象时，把候选告诉用户，不要改发给别人，也不要猜未绑定的热心市民或群聊。",
   "send_message 只负责送达。接着用 read_reply，带上返回的 afterSeq，查看回复和是否仍在进行；running 为 true 时稍后再读。",
-  "不能修改牛马设置、密码本、系统设置，也不能改这条连接绑定了谁。",
+  "不能修改热心市民的设置、密码本、系统设置或这条连接的绑定对象。",
 ].join("");
 const TOOLS = [
   {
     name: "list_targets",
-    description: "列出这条连接可以对话的牛马和群聊（id、名称、类型）。未绑定的对象不会出现。",
+    description: "列出这条连接可以对话的热心市民和群聊（id、名称、类型）。未绑定的对象不会出现。",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   {
     name: "send_message",
-    description: "把一句话发给绑定的牛马或群聊，并走该用户原来的对话。用户说「给老张说做这个」时，把「做这个」发给「老张」：target 填「老张」或它的 id，message 填「做这个」；或者只填 text 为「给老张说做这个」。只绑定一个对象时可以不填 target。找不到或有多个同名对象时会返回候选，不要自行改发给别人。",
+    description: "把消息发给已绑定的热心市民或群聊，沿用该用户已有的对话。用户说「给老张说做这个」时，把「做这个」发给「老张」：target 填「老张」或对应的 id，message 填「做这个」；或者只填 text 为「给老张说做这个」。只绑定一个对象时可以不填 target。找不到或有多个同名对象时会返回候选，不要自行改发给别人。",
     inputSchema: {
       type: "object",
       properties: {
-        target: { type: "string", description: "牛马或群聊的显示名或 id。只绑定一个对象时可以省略。" },
+        target: { type: "string", description: "热心市民或群聊的显示名或 id。只绑定一个对象时可以省略。" },
         message: { type: "string", description: "要送达的内容。未填 target 时也可以是整句「给某人说……」。" },
         text: { type: "string", description: "与 message 相同，二选一。" },
       },
@@ -45,7 +45,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        target: { type: "string", description: "牛马或群聊的显示名或 id。只绑定一个对象时可以省略。" },
+        target: { type: "string", description: "热心市民或群聊的显示名或 id。只绑定一个对象时可以省略。" },
         afterSeq: { type: "integer", minimum: 0, description: "只返回该序号之后的消息。用 send_message 返回的 afterSeq。" },
       },
     },

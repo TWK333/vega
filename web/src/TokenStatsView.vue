@@ -132,7 +132,7 @@ onMounted(load);
         <div class="task-row task-header" :class="{ admin: isAdmin }" role="row">
           <span role="columnheader">任务</span>
           <span v-if="isAdmin" role="columnheader">用户</span>
-          <span role="columnheader">牛马</span>
+          <span role="columnheader">热心市民</span>
           <span class="num" role="columnheader">请求</span>
           <span class="num" role="columnheader">合计</span>
           <span class="num optional" role="columnheader">输入</span>

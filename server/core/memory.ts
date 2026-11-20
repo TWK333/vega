@@ -926,7 +926,7 @@ export function exportMemoriesMarkdown(memories: MemoryRecord[]) {
     const key = m.status;
     (groups[key] ||= []).push(m);
   }
-  const parts = ["# 数字牛马记忆导出", ""];
+  const parts = ["# 热心市民记忆导出", ""];
   for (const status of ["active", "draft", "conflict", "archived"]) {
     const rows = groups[status];
     if (!rows?.length) continue;

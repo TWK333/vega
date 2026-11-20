@@ -87,14 +87,14 @@ test("task Markdown and archived images render inside desktop and narrow detail 
         result.groupDebug = { detail: !!groupHost.querySelector('.task-detail'), output: groupHost.querySelector('.step-output')?.textContent || '', html: groupHost.innerHTML.slice(0, 1200) };
         const chatHost = document.querySelector('#chat-app');
         const output = { step: 1, label: '独立方案', text: '**独立产物内容**', files: [{ name: 'app.zip', size: 3, mime: 'application/octet-stream', blobId: 'blob-' + '2'.repeat(32) }] };
-        createVaporApp(ChatMessage, { message: { role: 'assistant', text: '继续处理', stepOutput: output }, name: '牛马' }).mount(chatHost);
+        createVaporApp(ChatMessage, { message: { role: 'assistant', text: '继续处理', stepOutput: output }, name: '热心市民小周' }).mount(chatHost);
         await nextTick();
         await unfoldOutput(chatHost);
         const bubble = chatHost.querySelector('.chat-bubble');
         result.separateOutput = bubble?.textContent.includes('继续处理') && !bubble.textContent.includes('独立产物内容') && !!chatHost.querySelector('.step-output .markdown strong');
         result.fileLink = chatHost.querySelector('.step-output .file-card')?.getAttribute('href')?.includes(output.files[0].blobId);
         const legacyHost = document.querySelector('#legacy-app');
-        createVaporApp(ChatMessage, { message: { role: 'assistant', stepOutput: true, text: '**步骤产物（任务未完成）**\\n\\n旧方案\\n\\n旧的完整内容' }, name: '牛马' }).mount(legacyHost);
+        createVaporApp(ChatMessage, { message: { role: 'assistant', stepOutput: true, text: '**步骤产物（任务未完成）**\\n\\n旧方案\\n\\n旧的完整内容' }, name: '热心市民小周' }).mount(legacyHost);
         await nextTick();
         await unfoldOutput(legacyHost);
         result.legacyOutput = !legacyHost.querySelector('.chat-bubble')?.textContent.includes('旧的完整内容') && legacyHost.querySelector('.step-output')?.textContent.includes('旧的完整内容');

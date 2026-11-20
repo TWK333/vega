@@ -643,7 +643,7 @@ func chipProcedure(hwnd windows.Handle, message uint32, wparam, lparam uintptr) 
 		chipInvalidate(hwnd)
 		return 0
 	case 0x0202: // WM_LBUTTONUP：单击开助理气泡（Nova 单击 → assistant）。
-		// 有 thread 直接进那条牛马会话，没有就退回 BOT 会话列表页。
+		// 有 thread 就打开对应的热心市民会话，否则返回助理的会话列表。
 		// 放到别的 goroutine：蝴蝶是任务栏的子窗口，这里阻塞（拉起进程）会连着 Explorer 一起卡。
 		chipState.Lock()
 		thread := chipState.thread

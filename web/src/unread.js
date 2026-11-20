@@ -1,5 +1,5 @@
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-// Unread badges for 牛马 chats and groups. The server keeps one read marker per user and conversation
+// Unread badges for employee chats and groups. The server keeps one read marker per user and conversation
 // (POST …/read); a conversation on screen is marked read, other new messages refresh the counts.
 // `app()` returns the App state lazily, so this can be set up before that state is declared.
 export function useUnread(app) {
@@ -33,7 +33,7 @@ export function useUnread(app) {
     try { await app().api(`/employees/${id}/chat/read`, "POST", {}); const e = entry(id); if (e) e.unread = 0; }
     finally { marking = false; }
   }
-  /** A new message: mark the 牛马 chat on screen read, else refresh the counts. */
+  /** A new message: mark the employee chat on screen read, else refresh the counts. */
   function onEvent(event) {
     if (event.type !== "message_end" || !event.session) return;
     const a = app();
@@ -44,7 +44,7 @@ export function useUnread(app) {
     const g = app().groups.value.find((g) => g.id === id);
     if (g) g.unread = 0;
   }
-  // Opening a 牛马 chat (or coming back to the tab) marks it read.
+  // Opening an employee chat (or coming back to the tab) marks it read.
   watch(() => { const a = app(); return [a.selectedEmployee.value, a.view.value, a.employeeTab.value, a.employeeSession.value, visible.value, entry(a.selectedEmployee.value)?.unread]; }, () => {
     const a = app();
     if (viewing(a.selectedEmployee.value) && entry(a.selectedEmployee.value)?.unread) a.background(markEmployee());

@@ -265,7 +265,7 @@ export class MCP {
     // Tenant MCP configuration must never expand host environment variables.
     if (cfg.url && Object.values(object(cfg.headers)).some((value) => typeof value === "string" &&
       [...value.matchAll(/\{env:([\w]+)\}|\$\{([\w]+)\}/g)].some((m) => this.cloud || !process.env[m[1] || m[2]])))
-      throw failure(this.cloud ? "隔离部署的 HTTP MCP 不读取宿主环境变量；请在当前牛马的 MCP 配置中保存请求头。"
+      throw failure(this.cloud ? "隔离部署的 HTTP MCP 不读取宿主环境变量；请在当前热心市民的 MCP 配置中保存请求头。"
         : "HTTP MCP 请求头引用了未配置的服务端环境变量；本步未连接。", "unresolved_environment", 0, "initialize");
     for (let attempt = 1; ; attempt++) {
       const step: Step = { stage: "initialize" };

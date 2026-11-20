@@ -162,7 +162,7 @@ test("group task navigation respects later user navigation and still reports mis
   assert.equal(state.employeeTaskFocus.value, "");
   state.view.value = "group";
   await state.openEmployeeTaskOf({ employeeId: "unknown", taskId: "t1" });
-  assert.equal(state.notices.at(-1), "你没有权限查看这个牛马");
+  assert.equal(state.notices.at(-1), "你没有权限查看这位热心市民");
   assert.equal(state.view.value, "group");
 });
 

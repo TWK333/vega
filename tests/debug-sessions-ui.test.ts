@@ -69,7 +69,7 @@ test("the debug page renders task sections and tells the user that task id and t
   assert.match(source, /visibleDebugSessions\(sessions\.value, \{ employeeId: employee\.value, query: search\.value \}\)/);
   assert.match(source, /groupDebugSessions\(visible\.value\)/);
   assert.match(source, /placeholder="任务 ID、任务内容或会话"/);
-  assert.match(source, /aria-label="按任务 ID、任务内容、会话 ID、标题或牛马查找"/);
+  assert.match(source, /aria-label="按任务 ID、任务内容、会话 ID、标题或热心市民查找"/);
   assert.match(source, /v-for="group in groups"/);
   assert.match(source, /v-for="session in group\.sessions"/);
   assert.match(source, /group\.taskText \|\| '任务 ' \+ group\.taskId\.slice\(0, 8\)/);

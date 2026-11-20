@@ -42,15 +42,15 @@ test("moveActive wraps; nothing to highlight in an empty list", () => {
 
 test("@名称 of known employees render as links; emails, code and unknown names do not", async () => {
   const { renderMarkdown } = await import("../web/src/markdown.js");
-  const people = [{ id: "e1", name: "测试牛马" }, { id: "e2", name: "测试" }, { id: "e3", name: "a.b" }];
-  const { html } = renderMarkdown("转交给 @测试牛马处理，问 @测试 和 @a.b；邮件 x@测试 `@测试牛马` @路人", { mentions: people });
-  assert.match(html, /<a class="mention" href="\/employees\/e1" data-employee="e1">@测试牛马<\/a>处理/);
+  const people = [{ id: "e1", name: "测试助手" }, { id: "e2", name: "测试" }, { id: "e3", name: "a.b" }];
+  const { html } = renderMarkdown("转交给 @测试助手处理，问 @测试 和 @a.b；邮件 x@测试 `@测试助手` @路人", { mentions: people });
+  assert.match(html, /<a class="mention" href="\/employees\/e1" data-employee="e1">@测试助手<\/a>处理/);
   assert.match(html, /data-employee="e2">@测试<\/a> 和/);
   assert.match(html, /data-employee="e3">@a\.b<\/a>/);
   assert.match(html, /x@测试 /);
-  assert.match(html, /<code>@测试牛马<\/code>/);
+  assert.match(html, /<code>@测试助手<\/code>/);
   assert.match(html, /@路人/);
-  assert.doesNotMatch(renderMarkdown("@测试牛马").html, /mention/);
+  assert.doesNotMatch(renderMarkdown("@测试助手").html, /mention/);
 });
 
 test("group mentions: own employees link to their chat, users and other people's employees are highlighted only", async () => {
@@ -61,7 +61,7 @@ test("group mentions: own employees link to their chat, users and other people's
   assert.match(html, /<span class="mention">@小B<\/span>/);
   assert.match(html, /<span class="mention">@bob<\/span>/);
   // The picker lists employees first, then the other users (the writer excluded).
-  assert.deepEqual(groupMembers(group, "u1").map((m: any) => [m.name, m.hint]), [["小A", "我的牛马"], ["小B", "bob的牛马"], ["bob", "用户"]]);
+  assert.deepEqual(groupMembers(group, "u1").map((m: any) => [m.name, m.hint]), [["小A", "我的热心市民"], ["小B", "bob的热心市民"], ["bob", "用户"]]);
 });
 
 test("group avatar: the 群主 is the first tile, then users, then employees; up to 9 tiles in a 1/2/3-column grid", () => {

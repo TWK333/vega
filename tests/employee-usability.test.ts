@@ -121,7 +121,7 @@ test("employee deletion removes its sessions/profile and its own vault and survi
     const legacy = await store.newSession({ taskId: job.id, employeeId: a.employeeId, cwd: dir });
     await a.update((state) => { state.tasks[0].workSession = legacy.id; });
     await store.append(legacy.id, { role: "assistant", text: "private record" });
-    // 浏览器 profile 按账号共享：删单只牛马不能清掉兄弟牛马的登录态。
+    // 浏览器配置按账号共享：删除一位热心市民不会清除同一账号的登录数据。
     const profile = engine.browsers.profile(engine.browserProfileKey("alice"));
     await mkdir(profile, { recursive: true }); await writeFile(join(profile, "Cookies"), "private");
     await writeFile(join(dir, "project.txt"), "keep");
@@ -135,7 +135,7 @@ test("employee deletion removes its sessions/profile and its own vault and survi
     await assert.rejects(async () => await store.session(chat.id), /not found/);
     await assert.rejects(async () => await store.session(legacy.id), /not found/);
     await access(profile);
-    assert.equal(await readFile(join(profile, "Cookies"), "utf8"), "private", "删单只牛马不碰账号共享的浏览器 profile");
+    assert.equal(await readFile(join(profile, "Cookies"), "utf8"), "private", "删除热心市民不会清除账号共享的浏览器配置");
     assert.equal(await readFile(join(dir, "project.txt"), "utf8"), "keep");
     assert.deepEqual((await engine.vault.book("alice").list()).map((entry: any) => entry.id), [kept.id], "deleting A drops only the entry scoped to it, in the shared account book");
     assert(!(await b.vault.list()).some((entry) => entry.id === credential.id));

@@ -1,4 +1,4 @@
-// 调试会话列表：按任务归组，并按任务 ID、任务内容以及会话 ID、标题、牛马名筛选。
+// 调试会话列表：按任务归组，并按任务 ID、任务内容以及会话 ID、标题、热心市民名筛选。
 
 /**
  * @typedef {Object} DebugSession
@@ -44,7 +44,7 @@ function looseKind(session) {
 }
 
 /**
- * 员工筛选之后，再按任务 ID / 任务内容（及会话 ID、标题、牛马名）做不区分大小写的子串匹配。空白查询视为不过滤。
+ * 员工筛选之后，再按任务 ID / 任务内容（及会话 ID、标题、热心市民名）做不区分大小写的子串匹配。空白查询视为不过滤。
  * @param {DebugSession[]} sessions
  * @param {{ employeeId?: string, query?: string }} [filter]
  * @returns {DebugSession[]}

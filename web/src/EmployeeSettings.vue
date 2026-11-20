@@ -8,7 +8,7 @@ const emit = defineEmits(["save", "delete", "reset", "avatar", "cancel"]);
   <div class="page-scroll settings-page">
     <div class="settings-grid">
       <form class="card profile" @submit.prevent="emit('save')">
-        <div class="card-head"><h3>牛马资料</h3><p class="hint">私有工作原则只属于这只牛马，会接在公共工作原则之后，不会替换或隐藏公共内容。保存后，新任务会使用更新后的原则。</p></div>
+        <div class="card-head"><h3>热心市民资料</h3><p class="hint">专属工作原则仅适用于这位热心市民，会补充在公共工作原则之后，不会替换或隐藏公共内容。保存后，续做、重新派发和新任务均使用当前原则。</p></div>
         <div class="form-grid">
           <label>姓名<input v-model="employee.name" maxlength="80" required /></label>
           <label>私有工作原则<textarea v-model="employee.instruction" rows="6" maxlength="8000" placeholder="例如：负责项目开发，先检查现有实现，完成后验证并汇报结果。"></textarea></label>
@@ -18,11 +18,11 @@ const emit = defineEmits(["save", "delete", "reset", "avatar", "cancel"]);
       <div class="side">
         <EmployeeAvatarPicker :key="employee.id" :api="api" :employee-id="employee.id" :name="employee.name" :avatar="employee.avatar" @change="emit('avatar', $event)" />
         <section class="card danger-zone">
-          <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只删除对话记录；重置会停止并删除全部会话和任务，保留记忆、工作原则、牛马设置、密码本和浏览器登录；删除会连同记忆、任务和浏览器登录一并清除；密码本在「设置」里维护，其中只指向它的条目也会删除。项目文件不会删除。</p></div>
+          <div class="card-head"><h3>危险操作</h3><p class="hint">清空聊天只删除对话记录。重置会停止并清空所有会话和任务，保留记忆、工作原则、热心市民设置、密码本和浏览器登录。删除还会清除记忆、浏览器登录，以及密码本中仅授权给这位热心市民的条目。项目文件不会删除。</p></div>
           <div class="danger-actions">
             <button type="button" class="danger" :disabled="!!resetting || deleting" @click="emit('reset', 'chat')"><Icon name="trash" :size="15" />{{ resetting === 'chat' ? '正在清空…' : '清空聊天记录' }}</button>
-            <button type="button" class="danger" :disabled="!!resetting || deleting" @click="emit('reset', 'all')"><Icon name="trash" :size="15" />{{ resetting === 'all' ? '正在重置…' : '重置牛马' }}</button>
-            <button type="button" class="danger" :disabled="deleting || !!resetting" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除牛马' }}</button>
+            <button type="button" class="danger" :disabled="!!resetting || deleting" @click="emit('reset', 'all')"><Icon name="trash" :size="15" />{{ resetting === 'all' ? '正在重置…' : '重置热心市民' }}</button>
+            <button type="button" class="danger" :disabled="deleting || !!resetting" @click="emit('delete')"><Icon name="trash" :size="15" />{{ deleting ? '正在删除…' : '永久删除热心市民' }}</button>
           </div>
         </section>
       </div>

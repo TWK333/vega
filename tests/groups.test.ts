@@ -70,7 +70,7 @@ test("membership: users join by invitation, bring only their own employees, and 
     const a = await make("小A", "u1"), b = await make("小B", "u2"), a2 = await make("小A2", "u1");
     const group = await engine.groups.create(u1, { name: "发布群", bulletin: "小A 写代码，小B 测试", employees: [a] });
     assert.equal(group.isCreator, true);
-    await assert.rejects(engine.groups.addEmployee(u1, group.id, b), /只能把你自己的牛马/);
+    await assert.rejects(engine.groups.addEmployee(u1, group.id, b), /只能邀请你名下的热心市民/);
     await assert.rejects(engine.groups.mine(u2, group.id), /群聊不存在|不在/);
     await assert.rejects(engine.groups.addEmployee(u2, group.id, b), /群聊不存在|不在/, "a non-member cannot add anything");
     await engine.groups.addUsers(u1, group.id, ["u2"]);
@@ -79,7 +79,7 @@ test("membership: users join by invitation, bring only their own employees, and 
     assert.deepEqual(view.users.map((u) => u.name), ["alice", "bob"], "creator first: the avatar grid starts with the 群主");
     assert.deepEqual(view.employees.map((e) => [e.name, e.mine]), [["小A", false], ["小B", true]]);
     await assert.rejects(engine.groups.update(u2, group.id, { bulletin: "x" }), /只有群主/);
-    await assert.rejects(engine.groups.removeEmployee(u2, group.id, a), /只有牛马的主人或群主/);
+    await assert.rejects(engine.groups.removeEmployee(u2, group.id, a), /归属用户或群主可以将其移出群聊/);
     // Names must stay unique in the group, also on rename.
     await assert.rejects((await engine.employee.for(a2)).control({ action: "settings", name: "小B" }).then(() => engine.groups.addEmployee(u1, group.id, a2)), /同名/);
     // bob leaves: his employee leaves with him.
@@ -111,7 +111,7 @@ test("an @ starts that member's turn with the group context; members @ each othe
     const seen = script(engine, { [a]: ["写好了 @小B 请测一下"], [b]: ["测试通过"] });
     await engine.groups.send(u1, group.id, { text: "@bob 大家好" });
     await settle(engine);
-    assert.equal(seen.length, 0, "no 牛马 was @mentioned (only a user): nobody answers");
+    assert.equal(seen.length, 0, "only a user was @mentioned: no employee answers");
     await engine.groups.send(u1, group.id, { text: "@小A 实现登录页" });
     await settleRuns(engine);
     const messages = await groupMessages(engine, group.id);
@@ -120,12 +120,12 @@ test("an @ starts that member's turn with the group context; members @ each othe
     // A's turn saw the group context (both messages it had not seen), the bulletin and who its owner is.
     const turnA = seen.find((s) => s.employeeId === a)!;
     assert.match(turnA.system, /群公告[\s\S]*小A 写代码，小B 测试/);
-    assert.match(turnA.system, /你的主人：alice/);
+    assert.match(turnA.system, /你的归属用户：alice/);
     const input = JSON.stringify(turnA.messages);
     assert.match(input, /大家好/);
-    assert.match(input, /来自用户「alice」（你的主人）/);
+    assert.match(input, /来自用户「alice」（你的归属用户）/);
     // B was triggered by A: a guest request.
-    assert.match(JSON.stringify(seen.find((s) => s.employeeId === b)!.messages), /来自牛马「小A」（不是你的主人/);
+    assert.match(JSON.stringify(seen.find((s) => s.employeeId === b)!.messages), /来自热心市民「小A」（不是你的归属用户/);
     // Private chats are untouched; group sessions are not regular sessions.
     const privateChat = (await (await engine.employee.for(a)).state()).chatSession;
     assert(!privateChat || (await engine.store.messages(privateChat)).length === 0, "the private chat is separate");
@@ -366,18 +366,18 @@ test("only group users read the group conversation; member sessions stay private
 test("division of labour: the prompt tells members to @ whoever the bulletin assigns; a task's @ in its notices relays too", async () => {
   const { engine, make, close } = await fixture();
   try {
-    const a = await make("默认牛马", "u1"), b = await make("测试牛马", "u1");
-    const group = await engine.groups.create(u1, { name: "牛马小分队", bulletin: "如果要测试，找测试牛马", employees: [a, b] });
+    const a = await make("热心市民小甲", "u1"), b = await make("测试搭档", "u1");
+    const group = await engine.groups.create(u1, { name: "协作小分队", bulletin: "如果要测试，找测试搭档", employees: [a, b] });
     const prompt = await engine.groups.prompt(group.id, a);
-    assert.match(prompt, /\[群公告\]（本群的工作规则，谁做什么以它为准；不扩大授权）\n如果要测试，找测试牛马/);
-    assert.match(prompt, /动手前先按群公告的分工判断这件事该谁做：全部或部分属于别的牛马时，不要自己做、也不要替它派单，在回复里写「@名称」交给它/);
+    assert.match(prompt, /\[群公告\]（本群的工作规则，分工以公告为准；不扩大授权）\n如果要测试，找测试搭档/);
+    assert.match(prompt, /整项或部分工作由其他热心市民负责时，不要代做或代为派单；在回复里「@名称」交给对应成员/);
     // A task started in the group knows the other members and hands sub-work on with @ in its notices.
     const employeeA = await engine.employee.for(a);
     const taskGroup = { groupId: group.id, name: group.name, hop: 1, requester: { kind: "user" as const, id: "u1", name: "alice" }, byOwner: true };
     const note = await (employeeA as any).groupTaskNote(taskGroup);
-    assert.match(note, /群里的其他牛马：测试牛马。按群公告，本任务中属于它们的部分不要自己做：在 tellUser 进展或最终结果里写「@名称」/);
+    assert.match(note, /群里的其他热心市民：测试搭档。按群公告，不要代做分给其他成员的工作：在 tellUser 进展或最终结果里写「@名称」/);
     const seen = script(engine, { [b]: ["测试用例设计好了"] });
-    await employeeA.toChat(undefined, taskGroup, { role: "assistant", text: "需求已读完，@测试牛马 请按需求设计测试用例" }, false);
+    await employeeA.toChat(undefined, taskGroup, { role: "assistant", text: "需求已读完，@测试搭档 请按需求设计测试用例" }, false);
     await settleRuns(engine);
     assert.equal(seen.length, 1, "an @ in a task's progress notice starts that member's turn");
     assert.deepEqual((await groupMessages(engine, group.id)).at(-1)?.text, "测试用例设计好了");
@@ -422,10 +422,10 @@ test("group panel: invite and bring rows always show, with a reason when empty; 
   const { readFile } = await import("node:fs/promises");
   const source = await readFile("web/src/GroupChat.vue", "utf8");
   assert.match(source, /<div v-if="!readonly" class="add-row"><select v-model="invite" aria-label="邀请用户" :disabled="!invitable.length">/);
-  assert.match(source, /<div v-if="!readonly" class="add-row"><select v-model="bring" aria-label="拉入我的牛马" :disabled="!available.length">/);
+  assert.match(source, /<div v-if="!readonly" class="add-row"><select v-model="bring" aria-label="邀请我的热心市民" :disabled="!available.length">/);
   assert.match(source, /在左下角「账号与安全」→ 成员里新建账号/);
-  assert.match(source, /你的牛马都已在群里/);
-  assert.match(source, /被邀请的用户在这个面板里拉入他们自己的牛马/);
+  assert.match(source, /你名下的热心市民都已在群里/);
+  assert.match(source, /其他群成员也可以在这里邀请各自名下的热心市民/);
   assert.match(source, /<fieldset><legend>邀请用户<\/legend>/);
   assert.match(source, /:task-status="taskStatus"/);
 });
@@ -466,7 +466,7 @@ test("工作面板 UI: opening a task keeps the main chat beside its topic and t
   assert.match(panel, /watch\(\(\) => props\.members/, "open detail reloads with live task updates");
   assert.match(panel, /<TaskDetail[^>]*:readonly="!selected\.canControl"/);
   assert.match(chat, /:focus="taskFocus" @select="selectTopic" @exit="exitTask"/);
-  assert.doesNotMatch(chat, /只有它的主人能查看详情/);
+  assert.doesNotMatch(chat, /只有[^。\n]*归属用户[^。\n]*查看详情/, "group members can view task details");
   assert.match(panel, /props\.api\(taskPath\(key\), "POST"/);
   assert.match(panel, /action === "redispatch" && !confirm/);
   assert.match(panel, /\{\{ requester\(task\) \}\} 发起/);
@@ -494,7 +494,7 @@ test("unread: one read marker per user and conversation; others' visible message
     const session = (await engine.groups.get(group.id))!.session;
     await store.append(session, { role: "user", text: "我自己说的", actorId: "u1", author: { kind: "user", id: "u1", name: "alice" } });
     const peer = await store.append(session, { role: "user", text: "bob 说的", actorId: "u2", author: { kind: "user", id: "u2", name: "bob" }, at: 1000 });
-    await store.append(session, { role: "assistant", text: "牛马回复", author: { kind: "employee", id: a, name: "小A" }, at: 2000 });
+    await store.append(session, { role: "assistant", text: "热心市民回复", author: { kind: "employee", id: a, name: "小A" }, at: 2000 });
     await store.append(session, { role: "assistant", notice: true, text: "系统通知" });
     const unread = async (user: any) => (await engine.groups.list(user)).find((g) => g.id === group.id)!.unread;
     assert.deepEqual([await unread(u1), await unread(u2)], [2, 2], "own messages and notices never count");
@@ -530,14 +530,14 @@ test("group avatars open the employee chat for its owner only; unread badges in 
   assert.match(chat, /:open-author="canOpen\(message\.author\)"/);
   assert.match(chat, /@author="emit\('open-employee', \$event\)"/);
   assert.match(sidebar, /const unreadLabel = \(n\) => n > 99 \? "99\+" : String\(n\);/);
-  assert.equal((sidebar.match(/class="unread"/g) || []).length, 2, "both 牛马 and 群聊 rows show the count");
+  assert.equal((sidebar.match(/class="unread"/g) || []).length, 2, "both employee and group rows show the count");
   assert.match(chat, /props\.api\(`\/groups\/\$\{id\}\/read`, "POST", \{\}\)/);
   const unread = await readFile("web/src/unread.js", "utf8");
   assert.match(unread, /app\(\)\.api\(`\/employees\/\$\{id\}\/chat\/read`, "POST", \{\}\)/);
   assert.match(app, /@read="unread\.groupRead"/);
 });
 
-test("unread UI: the 牛马 chat on screen is marked read; a message elsewhere refreshes the counts", async () => {
+test("unread UI: the employee chat on screen is marked read; a message elsewhere refreshes the counts", async () => {
   const { ref, nextTick } = await import("vue");
   const { useUnread } = await import("../web/src/unread.js");
   const calls: string[] = [];
@@ -570,62 +570,62 @@ test("unread UI: the 牛马 chat on screen is marked read; a message elsewhere r
 test("an @mentioned member's assembled request: group rules after the general dispatch rules, the bulletin next to the request, a group note on employee_task_create", async () => {
   const { engine, make, close } = await fixture();
   try {
-    const a = await make("默认牛马A", "u1"), b = await make("测试牛马", "u1");
-    const group = await engine.groups.create(u1, { name: "牛马小分队", bulletin: "如果要测试或者设计测试用例，找测试牛马", employees: [a, b] });
+    const a = await make("热心市民小甲", "u1"), b = await make("测试搭档", "u1");
+    const group = await engine.groups.create(u1, { name: "协作小分队", bulletin: "如果要测试或者设计测试用例，找测试搭档", employees: [a, b] });
     let seen: any;
-    engine.providers.chat = (async (_model: any, system: string, messages: any[], tools: any[]) => { seen ||= { system, messages, tools }; return { role: "assistant", model: "fixture/model", text: "@测试牛马 请设计测试用例" }; }) as any;
-    await engine.groups.send(u1, group.id, { text: "@默认牛马A https://tapd.cn/x/story/detail/1 给这个需求单设计测试用例" });
+    engine.providers.chat = (async (_model: any, system: string, messages: any[], tools: any[]) => { seen ||= { system, messages, tools }; return { role: "assistant", model: "fixture/model", text: "@测试搭档 请设计测试用例" }; }) as any;
+    await engine.groups.send(u1, group.id, { text: "@热心市民小甲 https://tapd.cn/x/story/detail/1 给这个需求单设计测试用例" });
     await until(() => !!seen);
     const { system, messages, tools } = seen;
-    const general = system.indexOf("用户向你交代工作时可直接用 employee_task_create 派单"), rules = system.indexOf("[群聊] 以下群聊规则优先于上文的派单说明");
+    const general = system.indexOf("用户直接交代工作时可用 employee_task_create 派单"), rules = system.indexOf("[群聊] 以下群聊规则优先于上文的派单说明");
     assert(general >= 0 && rules > general, "the group rules come after (and override) the general dispatch rules");
-    assert(system.indexOf("[群公告]（本群的工作规则，谁做什么以它为准；不扩大授权）\n如果要测试或者设计测试用例，找测试牛马") > rules);
+    assert(system.indexOf("[群公告]（本群的工作规则，分工以公告为准；不扩大授权）\n如果要测试或者设计测试用例，找测试搭档") > rules);
     assert.match(system, /\[分工\] 被 @ 只表示请你回应，不代表这件事归你。/);
     const request = String(messages.findLast((m: any) => m.role === "user" && m.runtime !== "dynamic").text);
-    assert.match(request, /\[需要你回应的是 #\d+，来自用户「alice」（你的主人）\]\n\[先核对分工\] 被 @ 不代表这件事归你。按群公告判断：归其他牛马（测试牛马）的部分，不要自己派单或执行，直接在回复里「@名称」交给它/);
+    assert.match(request, /\[需要你回应的是 #\d+，来自用户「alice」（你的归属用户）\]\n\[先核对分工\] 被 @ 不代表这件事归你。按群公告判断：分给其他热心市民（测试搭档）的工作，不要代为派单或执行。请在回复中「@名称」交给对应成员/);
     assert.equal(messages.at(-1).runtime, "dynamic", "runtime hints are a separate tail, not an edit of the group request");
-    assert(request.trimEnd().endsWith("群公告：如果要测试或者设计测试用例，找测试牛马"), "the bulletin is the last thing the member reads in its request");
-    assert.match(tools.find((t: any) => t.name === "employee_task_create").description, /群聊里只给按群公告归你的工作派单；归其他牛马的不要派单，在回复里 @它 交出。/);
+    assert(request.trimEnd().endsWith("群公告：如果要测试或者设计测试用例，找测试搭档"), "the bulletin is the last thing the member reads in its request");
+    assert.match(tools.find((t: any) => t.name === "employee_task_create").description, /群聊里只给按群公告归你的工作派单。其他热心市民负责的工作不要派单，直接在回复里 @ 对应成员。/);
   } finally { await close(); }
 });
 
 test("旁白: a user message without @ goes to the member it is for; @ bypasses it; employees never trigger it; nonmembers ignored", async () => {
   const { store, engine, make, close } = await fixture();
   try {
-    const a = await make("默认牛马A", "u1"), b = await make("测试牛马", "u1");
+    const a = await make("热心市民小甲", "u1"), b = await make("测试搭档", "u1");
     await (await engine.employee.for(b)).control({ action: "settings", instruction: "负责测试与测试用例设计" });
-    const group = await engine.groups.create(u1, { name: "小分队", bulletin: "如果要测试或者设计测试用例，找测试牛马", employees: [a, b] });
-    const seen = script(engine, { narrator: [{ targets: ["测试牛马", "不存在的牛马"], reason: "公告：测试用例找测试牛马" }], [b]: ["好的，我来设计测试用例"] });
+    const group = await engine.groups.create(u1, { name: "小分队", bulletin: "如果要测试或者设计测试用例，找测试搭档", employees: [a, b] });
+    const seen = script(engine, { narrator: [{ targets: ["测试搭档", "不存在的热心市民"], reason: "公告：测试用例找测试搭档" }], [b]: ["好的，我来设计测试用例"] });
     await engine.groups.send(u1, group.id, { text: "https://tapd.cn/x/story/detail/1 给这个需求单设计测试用例" });
     await settleRuns(engine);
     assert.equal(narrated.length, 1);
     const input = narrated[0].setup;
     assert.equal(narrated[0].session, undefined, "the first judgement opens the session afterwards");
-    assert.equal(input.群公告, "如果要测试或者设计测试用例，找测试牛马");
-    assert.deepEqual(input.牛马.map((m: any) => [m.名称, m.守则]), [["默认牛马A", "（无）"], ["测试牛马", "负责测试与测试用例设计"]]);
+    assert.equal(input.群公告, "如果要测试或者设计测试用例，找测试搭档");
+    assert.deepEqual(input.热心市民.map((m: any) => [m.名称, m.守则]), [["热心市民小甲", "（无）"], ["测试搭档", "负责测试与测试用例设计"]]);
     assert.match(narrated[0].last, /\[新消息\] #\d+ 用户「alice」：https:\S+ 给这个需求单设计测试用例/);
     assert.deepEqual(seen.map((s) => s.employeeId), [b], "only the real member it named answers");
-    assert.match(JSON.stringify(seen[0].messages), /\[旁白\] 这条消息没有 @ 谁，旁白判断交给你：公告：测试用例找测试牛马/);
+    assert.match(JSON.stringify(seen[0].messages), /\[旁白\] 这条消息没有 @ 谁，旁白判断交给你：公告：测试用例找测试搭档/);
     const messages = await groupMessages(engine, group.id);
     assert(!messages.some((m) => /旁白|交给/.test(String(m.text)) && m.author?.kind !== "user"), "the 旁白 only judges: nothing is posted to the group");
-    assert.deepEqual(messages.filter((m) => !m.notice).map((m) => m.author?.name), ["alice", "测试牛马"]);
+    assert.deepEqual(messages.filter((m) => !m.notice).map((m) => m.author?.name), ["alice", "测试搭档"]);
     assert(!JSON.stringify(seen[0].messages).includes("旁白：交给"), "the member's turn does not rely on a group post");
-    assert.deepEqual(messages.at(-1)?.[ "author" as "author"]?.name, "测试牛马");
+    assert.deepEqual(messages.at(-1)?.[ "author" as "author"]?.name, "测试搭档");
     assert.equal(messages.at(-1)?.hop, 1, "a routed turn is one hop from the user message, as a mention would be");
     // An @ goes straight to that member; the 旁白 is not asked. The reply (no @) does not reach the 旁白 either.
     narrated.length = 0;
     const direct = script(engine, { [a]: ["收到"] });
-    await engine.groups.send(u1, group.id, { text: "@默认牛马A 看下" });
+    await engine.groups.send(u1, group.id, { text: "@热心市民小甲 看下" });
     await settleRuns(engine);
     assert.deepEqual([narrated.length, direct.length], [0, 1]);
-    // An @ of a user is explicit too. No choice is never nobody: the 牛马 that spoke last answers.
+    // An @ of a user is explicit too. If the narrator does not choose, the last employee to speak answers.
     script(engine, { narrator: [{ targets: [], reason: "闲聊" }], [a]: ["不客气"] });
     await engine.groups.send(u1, group.id, { text: "@alice 你看看" });
     await engine.groups.send(u1, group.id, { text: "大家辛苦了" });
     await settleRuns(engine);
     assert.equal(narrated.length, 1, "only the message without any @ is judged");
     const thanked = (await groupMessages(engine, group.id)).at(-1)!;
-    assert.deepEqual([thanked.author?.name, thanked.text], ["默认牛马A", "不客气"], "the last speaker answers when the 旁白 picks nobody");
+    assert.deepEqual([thanked.author?.name, thanked.text], ["热心市民小甲", "不客气"], "the last speaker answers when the 旁白 picks nobody");
     // A failing model leaves a short notice.
     script(engine, { narrator: [Error("model down")] });
     await engine.groups.send(u1, group.id, { text: "这个谁来看" });
@@ -652,7 +652,7 @@ test("旁白 session: append-only per group (cache-friendly); setup change or to
     assert.deepEqual(narrated[1].messages.slice(0, narrated[0].messages.length).map(sent), narrated[0].messages.map(sent), "append-only: the earlier call is a prefix");
     assert.deepEqual(narrated[1].messages.slice(narrated[0].messages.length, -1).map((m: any) => m.role), ["assistant", "tool"], "its route_message call and result follow");
     assert.equal(narrated[1].setup, undefined, "the setup is not repeated");
-    assert.match(narrated[1].last, /\[上次判断之后的群消息\]\n#\d+ 牛马「小A」：写好了\n\[新消息\] #\d+ 用户「alice」：辛苦/, "it learns who has been talking since");
+    assert.match(narrated[1].last, /\[上次判断之后的群消息\]\n#\d+ 热心市民「小A」：写好了\n\[新消息\] #\d+ 用户「alice」：辛苦/, "it learns who has been talking since");
     assert((await engine.store.session(first.session)).groupId === group.id, "hidden, tied to the group");
     // A changed bulletin starts a fresh session (no stale routing precedent); the old one is deleted.
     await engine.groups.update(u1, group.id, { bulletin: "小B 也写代码" });
@@ -768,16 +768,16 @@ test("旁白 without a lightweight model: a notice every time (a missed one woul
   } finally { await close(); }
 });
 
-test("旁白 (reported: 「牛马们 起床啦」 got no reply): greetings go to a member; every judgement is recorded; a reply without the call is a visible failure; admins see the session", async () => {
+test("旁白: greetings go to a member; every judgement is recorded; a reply without the call is a visible failure; admins see the session", async () => {
   const { engine, make, close } = await fixture();
   try {
-    const a = await make("默认牛马A", "u1"), b = await make("测试牛马", "u1");
-    const group = await engine.groups.create(u1, { name: "牛马小分队", employees: [a, b] });
-    assert.match(NARRATOR_SYSTEM, /打招呼、喊大家（如「起床啦」「有人吗」）[\s\S]*交给最合适的一个牛马/);
-    assert.match(NARRATOR_SYSTEM, /每条消息至少交给一个牛马，不要没人理/);
+    const a = await make("热心市民小甲", "u1"), b = await make("测试搭档", "u1");
+    const group = await engine.groups.create(u1, { name: "协作小分队", employees: [a, b] });
+    assert.match(NARRATOR_SYSTEM, /打招呼、喊大家（如「起床啦」「有人吗」）[\s\S]*选择最合适的一位/);
+    assert.match(NARRATOR_SYSTEM, /每条消息至少交给一位热心市民/);
     // The model follows the prompt for a greeting; a model answering in text instead of calling the tool is not silence.
-    const seen = script(engine, { narrator: [{ targets: ["默认牛马A"], reason: "打招呼，交给默认牛马" }, { text: "没有人需要回应" }], [a]: ["早！我在"] });
-    await engine.groups.send(u1, group.id, { text: "牛马们 起床啦" });
+    const seen = script(engine, { narrator: [{ targets: ["热心市民小甲"], reason: "打招呼，交给热心市民小甲" }, { text: "没有人需要回应" }], [a]: ["早！我在"] });
+    await engine.groups.send(u1, group.id, { text: "各位热心市民，起床啦" });
     await settle(engine);
     assert.deepEqual(seen.map((s) => s.employeeId), [a]);
     await engine.groups.send(u1, group.id, { text: "没人在吗" });
@@ -787,7 +787,7 @@ test("旁白 (reported: 「牛马们 起床啦」 got no reply): greetings go to
     // The narrator's own session holds the judged message; the failed one is shown to the next judgement.
     const state = (await engine.groups.get(group.id))!.narrator!;
     const rows = await engine.store.messages(state.session);
-    assert.match(String(rows[0].text), /牛马们 起床啦/);
+    assert.match(String(rows[0].text), /各位热心市民，起床啦/);
     assert.deepEqual(rows.map((m) => m.role), ["user", "assistant", "tool"]);
     const route = readFileSync("server/routes/api/[...path].ts", "utf8");
     assert(route.includes('kind: "narrator"') && readFileSync("web/src/DebugSessions.vue", "utf8").includes('narrator: "旁白"'), "调试会话 lists the 旁白 session");

@@ -86,7 +86,7 @@ export async function employeeLive(employeeId?: string) {
   let live = application.employeeLives.get(profileKey);
   if (!live) {
     const chrome = application.engine.browsers.peek(profileKey);
-    if (!chrome) throw Error("牛马浏览器尚未启动");
+    if (!chrome) throw Error("热心市民的浏览器尚未启动");
     live = new BrowserLive(chrome, application.auth, async (principal) => await employee.manageable(principal.user));
     application.employeeLives.set(profileKey, live);
   }

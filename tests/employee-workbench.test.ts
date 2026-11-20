@@ -923,17 +923,46 @@ test("every account owns one employee from its first entry, and the last one can
   };
   try {
     // Two overlapping page loads still create exactly one employee.
-    await Promise.all([engine.employee.ensureOwned("alice", "alice 的牛马"), engine.employee.ensureOwned("alice", "alice 的牛马")]);
+    await Promise.all([engine.employee.ensureOwned("alice", "alice"), engine.employee.ensureOwned("alice", "alice")]);
     const [only] = await owned("alice");
     assert.equal((await owned("alice")).length, 1);
-    assert.equal((await only.profile()).name, "alice 的牛马");
-    await engine.employee.ensureOwned("alice", "alice 的牛马");
+    assert.equal((await only.profile()).name, "热心市民小alice");
+    await engine.employee.ensureOwned("alice", "alice");
     assert.deepEqual((await owned("alice")).map((employee) => employee.employeeId), [only.employeeId], "an account that already has one keeps it");
-    await assert.rejects(engine.removeEmployee(only.employeeId), /唯一的牛马/);
+    await assert.rejects(engine.removeEmployee(only.employeeId), /唯一的热心市民/);
     assert.equal((await owned("alice")).length, 1);
-    const next = await engine.employee.for((await engine.employee.create({ name: "接班的牛马" }, "alice")).id);
+    const next = await engine.employee.for((await engine.employee.create({ name: "接班的热心市民" }, "alice")).id);
     await engine.removeEmployee(only.employeeId);
     assert.deepEqual((await owned("alice")).map((employee) => employee.employeeId), [next.employeeId]);
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("startup names the built-in employee and upgrades old default names without changing custom names", async () => {
+  const store = await Store.open(":memory:");
+  const engine = await Engine.create(store, new Catalog(store, new Subscriptions(store, "")), new Chrome(store, new ChromeBridge(), ""));
+  try {
+    const root = engine.employee;
+    await root.start(); root.close(); // The built-in record exists before the first account is set up.
+    await store.run("INSERT INTO web_users(id,username,password,role,createdAt) VALUES (?,?,?,?,?)", "admin-id", "first.admin", "unused", "admin", 1);
+    await store.run("INSERT INTO web_users(id,username,password,role,createdAt) VALUES (?,?,?,?,?)", "member-id", "alice", "unused", "operator", 2);
+    await root.ensureOwned("admin-id", "first.admin");
+    assert.equal((await root.profile()).name, "热心市民小first.admin");
+    assert.equal((await root.profile()).ownerId, "admin-id");
+    assert.equal((await root.all()).length, 1);
+
+    await root.updateProfile((profile) => { profile.name = "默认牛马"; });
+    const legacy = await root.create({ name: "alice 的牛马" }, "member-id");
+    const custom = await root.create({ name: "研发搭档" }, "member-id");
+    await store.run("INSERT INTO web_users(id,username,password,role,createdAt) VALUES (?,?,?,?,?)", "other-id", "bob", "unused", "operator", 3);
+    const conflicting = await root.create({ name: "bob 的牛马" }, "other-id");
+    const reserved = await root.create({ name: "热心市民小bob" }, "other-id");
+    await root.start(); root.close();
+    assert.equal((await root.profile()).name, "热心市民小first.admin");
+    assert.equal((await (await root.for(legacy.id)).profile()).name, "热心市民小alice");
+    assert.equal((await (await root.for(custom.id)).profile()).name, "研发搭档");
+    assert.equal((await (await root.for(conflicting.id)).profile()).name, "bob 的牛马");
+    assert.equal((await (await root.for(reserved.id)).profile()).name, "热心市民小bob");
+    assert.equal((await root.all()).length, 5);
   } finally { await engine.close(); await store.close(); }
 });
 

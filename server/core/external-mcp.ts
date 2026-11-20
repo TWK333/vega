@@ -6,8 +6,8 @@ import type { Message, Store } from "./store";
 import { id, sleep, type Obj } from "./util";
 
 /**
- * 对外 MCP：外部客户端连到 Vega，向用户选定的牛马或群聊发消息。
- * 和牛马「MCP 客户端」（server/core/mcp.ts，牛马去调用外部服务）方向相反，存储也不共用。
+ * 对外 MCP：外部客户端连到 Vega，向用户选定的热心市民或群聊发消息。
+ * 「MCP 客户端」则由热心市民调用外部服务（server/core/mcp.ts），方向相反，配置也分开保存。
  * 每条配置属于创建它的用户，令牌只代表该用户，且只能碰到这条配置绑定的对象。
  */
 const KIND = "external-mcp";
@@ -107,10 +107,10 @@ async function owned(store: Store, userId: string, configId: string) {
   return record;
 }
 async function assertBindings(engine: Engine, user: User, employees: string[], groups: string[]) {
-  check(employees.length + groups.length > 0, 400, "至少选择一个牛马或群聊");
+  check(employees.length + groups.length > 0, 400, "至少选择一位热心市民或一个群聊");
   for (const employeeId of employees) {
     const employee = (await engine.employee.all()).find((item) => item.employeeId === employeeId && !item.deleting && !item.deleted);
-    check(employee && await employee.accessible(user), 400, "只能绑定你自己的牛马");
+    check(employee && await employee.accessible(user), 400, "只能绑定你名下的热心市民");
   }
   for (const groupId of groups) {
     try { await engine.groups.mine(user, groupId); }
@@ -127,7 +127,7 @@ export async function externalMcpApi(engine: Engine, user: User, method: string,
   }
   if (!path.length && method === "POST") {
     const name = configName(body.name);
-    const employees = idList(body.employees ?? [], "牛马");
+    const employees = idList(body.employees ?? [], "热心市民");
     const groups = idList(body.groups ?? [], "群聊");
     const enabled = flag(body.enabled, true);
     await assertBindings(engine, user, employees, groups);
@@ -174,7 +174,7 @@ export async function externalMcpApi(engine: Engine, user: User, method: string,
       if (body.name !== undefined) current.name = configName(body.name);
       if (body.enabled !== undefined) current.enabled = flag(body.enabled, current.enabled);
       if (body.employees !== undefined || body.groups !== undefined) {
-        current.employees = body.employees === undefined ? current.employees : idList(body.employees, "牛马");
+        current.employees = body.employees === undefined ? current.employees : idList(body.employees, "热心市民");
         current.groups = body.groups === undefined ? current.groups : idList(body.groups, "群聊");
         await assertBindings(engine, user, current.employees, current.groups);
       }
@@ -212,7 +212,7 @@ export async function authenticateExternalMcp(store: Store, configId: string, to
 
 function listing(targets: TargetRef[]) {
   if (!targets.length) return "当前没有可对话的对象。";
-  return "可选：" + targets.map((target) => `${target.type === "employee" ? "牛马" : "群聊"}「${target.name}」（${target.id}）`).join("、") + "。";
+  return "可选：" + targets.map((target) => `${target.type === "employee" ? "热心市民" : "群聊"}「${target.name}」（${target.id}）`).join("、") + "。";
 }
 function resolveQuery(query: string, targets: TargetRef[]) {
   const byId = targets.filter((target) => target.id === query);
@@ -254,7 +254,7 @@ export function interpretDelivery(text: string, explicit: string, targets: Targe
   const body = text.trim();
   check(body, 400, "消息是空的");
   check([...body].length <= MESSAGE_MAX, 400, `消息最多 ${MESSAGE_MAX} 字`);
-  if (!targets.length) throw new TargetError("这条配置没有可对话的牛马或群聊。", []);
+  if (!targets.length) throw new TargetError("这条配置没有可对话的热心市民或群聊。", []);
   const addressed = matchAddress(body, targets);
   const named = explicit.trim();
   const one = (query: string, found: TargetRef[], pool: TargetRef[]) => {
@@ -281,7 +281,7 @@ export function interpretDelivery(text: string, explicit: string, targets: Targe
     return { target, message };
   }
   if (targets.length === 1) return { target: targets[0], message: body };
-  throw new TargetError(`请指明要发给哪一个牛马或群聊。${listing(targets)}`, targets);
+  throw new TargetError(`请指明要发给哪位热心市民或哪个群聊。${listing(targets)}`, targets);
 }
 
 export async function visibleTargets(engine: Engine, user: User, record: ExternalMcpRecord): Promise<TargetRef[]> {
@@ -328,7 +328,7 @@ export async function sendExternalMessage(engine: Engine, user: User, record: Ex
     };
   }
   const employee = (await engine.employee.all()).find((item) => item.employeeId === target.id);
-  check(employee && await employee.accessible(user) && !employee.deleting && !employee.resetting, 404, "牛马不存在");
+  check(employee && await employee.accessible(user) && !employee.deleting && !employee.resetting, 404, "热心市民不存在");
   const session = await employee.chat(user.id);
   const before = await engine.store.lastSeq(session.id);
   const clientMessageId = id("m");
@@ -342,7 +342,7 @@ export async function sendExternalMessage(engine: Engine, user: User, record: Ex
   }
   return {
     ok: true,
-    summary: `已把消息发给牛马「${target.name}」。用 read_reply 查看回复。`,
+    summary: `已把消息发给热心市民「${target.name}」。用 read_reply 查看回复。`,
     target, sentSeq: sentSeq ?? null, afterSeq: sentSeq ?? before,
   };
 }
@@ -375,7 +375,7 @@ export async function readExternalReply(engine: Engine, user: User, record: Exte
     if (found.length !== 1) throw new TargetError(found.length ? `「${named}」对应多个对象，请改用 id。${listing(found)}` : `没有找到名为「${named}」的对象。${listing(targets)}`, found.length ? found : targets);
     target = found[0];
   } else if (targets.length === 1) target = targets[0];
-  else throw new TargetError(`请指明要查看哪一个牛马或群聊。${listing(targets)}`, targets);
+  else throw new TargetError(`请指明要查看哪位热心市民或哪个群聊的回复。${listing(targets)}`, targets);
   const after = afterSeqOf(input.afterSeq);
   if (target.type === "group") {
     const group = await engine.groups.mine(user, target.id);
@@ -387,7 +387,7 @@ export async function readExternalReply(engine: Engine, user: User, record: Exte
     return replyView(target, messages, await engine.store.lastSeq(group.session), running);
   }
   const employee = (await engine.employee.all()).find((item) => item.employeeId === target.id);
-  check(employee && await employee.accessible(user), 404, "牛马不存在");
+  check(employee && await employee.accessible(user), 404, "热心市民不存在");
   const sessionId = (await employee.profile()).chatSession;
   if (!sessionId) return replyView(target, [], 0, false);
   const page = after === undefined ? await engine.store.messagePage(sessionId, { limit: REPLY_MESSAGES }) : await engine.store.messagePage(sessionId, { after });

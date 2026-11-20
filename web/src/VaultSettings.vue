@@ -1,7 +1,7 @@
 <script setup vapor>
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import Icon from "./Icon.vue";
-// 账号自己的密码本：名下牛马共用，一条凭据可以只给指定的牛马用。
+// 账号自己的密码本：可授权给名下所有热心市民，也可仅授权给指定成员。
 const props = defineProps({ api: Function, userId: String, employees: Array });
 const emit = defineEmits(["error", "notice"]);
 const confirm = window.confirm.bind(window);
@@ -10,8 +10,8 @@ const base = "/me/vault";
 const types = [
   { value: "login", label: "账号密码", placeholder: "例如：\n账号：name@example.com\n密码：……", hint: "用于网页登录等需要账号密码的场景。" },
   { value: "token", label: "API 密钥/令牌", placeholder: "粘贴 API Key、Access Token 等", hint: "用于调用接口、命令行工具等。" },
-  { value: "ssh_key", label: "SSH 私钥", placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----\n……\n-----END OPENSSH PRIVATE KEY-----", hint: "牛马拿不到私钥原文：取用时系统在执行位置写一个只有自己能读的临时文件，给出 GIT_SSH_COMMAND 供 git clone / pull 使用，本轮结束即删除。不支持带口令的私钥，请先用 ssh-keygen -p 去掉口令。" },
-  { value: "general", label: "万能", placeholder: "任意文本，例如账号、密钥和使用说明的组合", hint: "不好归类的凭据选这一项，内容原样提供给牛马。" },
+  { value: "ssh_key", label: "SSH 私钥", placeholder: "-----BEGIN OPENSSH PRIVATE KEY-----\n……\n-----END OPENSSH PRIVATE KEY-----", hint: "热心市民不会收到私钥原文。取用时，系统会在执行位置写入仅当前执行账号可读的临时文件，给出 GIT_SSH_COMMAND 供 git clone / pull 使用，本轮结束即删除。不支持带口令的私钥，请先用 ssh-keygen -p 去掉口令。" },
+  { value: "general", label: "万能", placeholder: "任意文本，例如账号、密钥和使用说明的组合", hint: "不好归类的凭据选这一项，内容会原样提供给获授权的热心市民。" },
 ];
 const typeOf = (value) => types.find((type) => type.value === value) || types[3];
 const blank = () => ({ type: "login", name: "", condition: "", content: "", scope: "all", employees: [] });
@@ -34,9 +34,9 @@ function edit(item) {
 function toggle(id) {
   form.value.employees = form.value.employees.includes(id) ? form.value.employees.filter((value) => value !== id) : [...form.value.employees, id];
 }
-// 只认当前还存在的牛马；「指定」保存成空列表就等于放开给全部牛马，所以空集合不提交。
+// 只接受仍存在的热心市民；空列表等于授权给所有成员，所以「指定」时不提交空列表。
 const selected = () => form.value.employees.filter((id) => people.value.some((employee) => employee.id === id));
-const scopeOf = (item) => item.employees?.length ? item.employees.map((id) => people.value.find((employee) => employee.id === id)?.name || "已删除的牛马").join("、") : "所有牛马";
+const scopeOf = (item) => item.employees?.length ? item.employees.map((id) => people.value.find((employee) => employee.id === id)?.name || "已删除的热心市民").join("、") : "所有热心市民";
 async function load() {
   const value = await props.api(base);
   if (!disposed) entries.value = value.entries;
@@ -44,7 +44,7 @@ async function load() {
 async function save() {
   const employees = form.value.scope === "specific" ? selected() : [];
   if (form.value.scope === "specific" && !employees.length) {
-    emit("error", "选择至少一个牛马，或在「所有牛马」下保存");
+    emit("error", "请选择至少一位热心市民，或改选「所有热心市民」");
     return;
   }
   await run(async () => {
@@ -70,8 +70,8 @@ onBeforeUnmount(() => { disposed = true; });
 <template>
   <div class="page-scroll vault-settings">
     <section class="card">
-      <div class="card-head row"><div><h3>密码本 · {{ entries.length }} 条</h3><p class="hint">凭据加密保存，只有你能查看和修改；牛马在任务里按使用条件取用，默认所有牛马可用，也可以只给指定牛马。</p></div><button type="button" class="sm" :disabled="busy" @click="reset">新增凭据</button></div>
-      <p class="hint">使用条件可写适用系统、账号角色、登录方式和限制，不必填写网站名；有网站名或地址会更容易判断。牛马会结合当前任务与页面核对条件，无法确定时询问，不混用其他系统的账号。</p>
+      <div class="card-head row"><div><h3>密码本 · {{ entries.length }} 条</h3><p class="hint">凭据加密保存，只有你能查看和修改。热心市民按使用条件在任务中取用；默认授权给所有热心市民，也可以只授权给指定成员。</p></div><button type="button" class="sm" :disabled="busy" @click="reset">新增凭据</button></div>
+      <p class="hint">使用条件可写适用系统、账号角色、登录方式和限制，不必填写网站名；有网站名或地址会更容易判断。热心市民会根据当前任务与页面核对条件，无法确定时会询问你，不会混用其他系统的账号。</p>
       <p v-if="form.id" class="hint">正在编辑「{{ form.name }}」，凭据留空保留原内容。</p>
       <form class="form-grid two vault-form" @submit.prevent="save">
         <label>类型<select v-model="form.type"><option v-for="type in types" :key="type.value" :value="type.value">{{ type.label }}</option></select></label>
@@ -79,13 +79,13 @@ onBeforeUnmount(() => { disposed = true; });
         <label class="span-2">允许使用的条件<input v-model="form.condition" required maxlength="500" placeholder="例如：仅用于某系统的邮箱密码登录，不用于 OA 登录" /></label>
         <div class="span-2 scope-field">
           <span class="scope-label">应用于</span>
-          <div class="scope-options" role="radiogroup" aria-label="适用于哪些牛马">
-            <label class="scope-option"><input v-model="form.scope" type="radio" value="all" />所有牛马</label>
-            <label class="scope-option"><input v-model="form.scope" type="radio" value="specific" />指定牛马</label>
+          <div class="scope-options" role="radiogroup" aria-label="适用于哪些热心市民">
+            <label class="scope-option"><input v-model="form.scope" type="radio" value="all" />所有热心市民</label>
+            <label class="scope-option"><input v-model="form.scope" type="radio" value="specific" />指定热心市民</label>
           </div>
           <div v-if="form.scope === 'specific'" class="scope-list">
             <label v-for="employee in people" :key="employee.id" class="scope-option"><input type="checkbox" :checked="form.employees.includes(employee.id)" @change="toggle(employee.id)" />{{ employee.name }}</label>
-            <p v-if="!people.length" class="hint">还没有牛马：先在「数字牛马」里创建一个。</p>
+            <p v-if="!people.length" class="hint">还没有热心市民，请先在「热心市民」里创建一位。</p>
           </div>
         </div>
         <label class="span-2">凭据<textarea v-model="form.content" :required="!form.id" :class="{ mono: form.type === 'ssh_key' }" :placeholder="form.id ? '凭据已加密，留空视为不修改凭据' : typeOf(form.type).placeholder" :rows="form.type === 'ssh_key' ? 8 : 3" maxlength="16000" autocomplete="off" spellcheck="false"></textarea><small class="hint">{{ typeOf(form.type).hint }}</small></label>

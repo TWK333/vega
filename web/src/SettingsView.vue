@@ -20,10 +20,10 @@ const props = defineProps({
   employees: Array,
 });
 const emit = defineEmits(["saved", "error", "notice", "tab"]);
-const TRIGGERS = ["triggers", "触发器", "zap", "牛马发送消息时调用接口"];
-const PRINCIPLES = ["principles", "公共工作原则", "scroll", "当前账号名下的牛马共用"];
-const ADMIN_SECTIONS = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["scheduler", "任务调度", "tasks", "全站与单牛马并发上限"], PRINCIPLES, ["external-mcp", "对外 MCP", "plug", "把外部客户端接到你自己的牛马和群聊"], ["vault", "密码本", "key", "加密保存的账号、密钥和 SSH 私钥，可指定适用的牛马"], TRIGGERS];
-const PERSONAL_SECTIONS = [["vault", "密码本", "key", "加密保存的账号、密钥和 SSH 私钥，可指定适用的牛马"], ["external-mcp", "对外 MCP", "plug", "把外部客户端接到你自己的牛马和群聊"], PRINCIPLES, TRIGGERS];
+const TRIGGERS = ["triggers", "触发器", "zap", "热心市民发送消息时调用接口"];
+const PRINCIPLES = ["principles", "公共工作原则", "scroll", "当前账号名下的热心市民共用"];
+const ADMIN_SECTIONS = [["providers", "服务商", "server", "模型服务商与可用模型"], ["scenes", "场景模型", "layers", "不同工作场景使用的模型"], ["scheduler", "任务调度", "tasks", "全站和每位热心市民的并发上限"], PRINCIPLES, ["external-mcp", "对外 MCP", "plug", "让外部客户端与热心市民或群聊对话"], ["vault", "密码本", "key", "加密保存账号、密钥和 SSH 私钥，可指定适用的热心市民"], TRIGGERS];
+const PERSONAL_SECTIONS = [["vault", "密码本", "key", "加密保存账号、密钥和 SSH 私钥，可指定适用的热心市民"], ["external-mcp", "对外 MCP", "plug", "让外部客户端与热心市民或群聊对话"], PRINCIPLES, TRIGGERS];
 const sections = computed(() => (props.admin ? ADMIN_SECTIONS : PERSONAL_SECTIONS).filter(([id]) => id !== "triggers" || props.canExecute));
 const first = computed(() => props.admin ? "providers" : "vault");
 // The open section lives in the address (/settings/scenes) so refresh keeps it.

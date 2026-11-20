@@ -40,7 +40,7 @@ export async function canConfigureEmployee(employee: Employee, user: { id: strin
 export async function employeeCapabilities(employee: Employee, user: { id: string; role: string }, method: string, path: string[], body: Obj = {}) {
   await migrateEmployeeCapabilities(employee.store);
   check(await employee.accessible(user), 404, "Employee not found");
-  check(!employee.deleting, 409, "牛马正在删除，请稍候");
+  check(!employee.deleting, 409, "正在删除这位热心市民，请稍候");
   const store = employee.store, id = employee.employeeId, canEdit = await canConfigureEmployee(employee, user);
   const config = await store.object<Obj>("employee-capabilities", id) || {};
   if (method === "GET" && path[0] === "capabilities" && path.length === 1) {
@@ -53,7 +53,7 @@ export async function employeeCapabilities(employee: Employee, user: { id: strin
       mcp: Object.keys(config.mcp || {}).map((name) => canEdit ? { name, config: masked![name] } : { name }),
     };
   }
-  check(canEdit, 403, "只有牛马创建者可以查看或修改 skill / MCP 配置详情");
+  check(canEdit, 403, "只有这位热心市民的创建者可以查看或修改 Skill / MCP 配置详情");
   if (path[0] === "mcp" && path.length === 1 && method === "PUT") {
     const mcp = body.mcp;
     check(mcp && typeof mcp === "object" && !Array.isArray(mcp) && Object.keys(mcp).length <= 50, 400, "MCP配置必须为对象，最多50项");

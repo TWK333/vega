@@ -52,7 +52,7 @@ let settled = false, baseSeq = 0;
 watch(lastSeq, (seq) => { if (settled && seq > baseSeq) markGone.value = true; });
 watch(visible, (rows) => markSeen(props.userId, props.employeeId, rows.at(-1)?.seq));
 const typingContinued = computed(() => continuesPrevious(displayed.value.at(-1)?.message, { role: "assistant" }));
-// My own bubbles wear the color of the employee I am talking to, so each 牛马's chat looks different.
+// 我发出的消息跟随对方的头像色，让每位热心市民的对话各有辨识度。
 const selfTint = computed(() => { const color = avatarBubble(props.avatar, props.employeeId); return { background: color.fill, color: color.ink }; });
 const history = createChatHistory({ api: (path, ...args) => props.api(path + "&stepSummaries=1", ...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
 

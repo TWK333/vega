@@ -126,8 +126,8 @@ export class Triggers {
         const validIds = (values: unknown, max: number) => Array.isArray(values) && values.length <= max && values.every((value) => typeof value === "string" && value.length > 0 && value.length <= 128);
         check(validIds(selected.employees, 50) && validIds(selected.groups, 100), 400, "触发范围无效");
         scope = { employees: [...new Set(selected.employees as string[])], groups: [...new Set(selected.groups as string[])] };
-        check(scope.employees.length || scope.groups.length, 400, "请至少选择一个牛马或群聊");
-        if (input.scope !== undefined) check(await this.canScope(userId, scope), 400, "只能选择自己的牛马或已加入的群聊");
+        check(scope.employees.length || scope.groups.length, 400, "请至少选择一位热心市民或一个群聊");
+        if (input.scope !== undefined) check(await this.canScope(userId, scope), 400, "只能选择你名下的热心市民或已加入的群聊");
       }
       const previous: Secret | undefined = old && await this.vault.openObject(old.secret, this.aad(userId, old.id));
       check(input.url === undefined || typeof input.url === "string", 400, "接口地址无效");
@@ -136,7 +136,7 @@ export class Triggers {
       const secret = { url: input.url?.trim() || previous?.url || "", headers: input.headers?.trim() || previous?.headers || "{}", body: input.body, siteOrigin: siteOrigin ? httpURL(siteOrigin, true).origin : previous?.siteOrigin || "" };
       endpoint(secret.url);
       headersOf(secret.headers);
-      bodyOf(secret.body, { message: '消息"\n\\', employeeName: "牛马", employeeId: "id", groupName: "群聊" });
+      bodyOf(secret.body, { message: '消息"\n\\', employeeName: "热心市民", employeeId: "id", groupName: "群聊" });
       const key = old?.id || id("tr"), record: Trigger = { ...old, id: key, name: input.name.trim(), enabled: input.enabled, condition: "employee_message", action: "http", scope, secret: await this.vault.sealObject(secret, this.aad(userId, key)), updatedAt: Date.now() };
       await this.store.save(kind(userId), key, record);
       return await this.view(userId, record);

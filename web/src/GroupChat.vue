@@ -293,7 +293,7 @@ function showTask(selection) {
 }
 function openTask(message, taskId) {
   const author = group.value?.employees.find((e) => e.id === message.author?.id);
-  if (!author) { error.value = "该牛马已离开群聊，任务请联系它的归属人"; return; }
+  if (!author) { error.value = "这位热心市民已离开群聊。需要跟进任务时，请联系对应的归属用户"; return; }
   selectTopic({ employeeId: author.id, taskId, title: message.tasks?.find((task) => task.id === taskId)?.title });
 }
 // 工作面板: the group's tasks by member, reloaded with the group (task status changes bump the revision too).

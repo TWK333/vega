@@ -91,7 +91,7 @@ func TestInstallExtensionAsksSiteWithBundledPath(t *testing.T) {
 		}
 		path = body.Path
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"employee":"测试牛马","employeeId":"e1"}`))
+		_, _ = w.Write([]byte(`{"employee":"测试热心市民","employeeId":"e1"}`))
 	}))
 	defer server.Close()
 	a := pairedAgent(t, server.URL, token)
@@ -113,7 +113,7 @@ func TestInstallExtensionAsksSiteWithBundledPath(t *testing.T) {
 	a.mu.Lock()
 	message := a.lastExtension
 	a.mu.Unlock()
-	if !strings.Contains(message, "测试牛马") || !strings.Contains(message, path) {
+	if !strings.Contains(message, "测试热心市民") || !strings.Contains(message, path) {
 		t.Fatalf("lastExtension = %q", message)
 	}
 }
@@ -123,12 +123,12 @@ func TestInstallExtensionSurfacesSiteConfigurationHint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(`{"statusMessage":"没有可用的牛马：请先在「数字牛马」里新建一个，或等它空闲"}`))
+		_, _ = w.Write([]byte(`{"statusMessage":"没有可用的热心市民：请先在「热心市民」里新建一位，或等待任务结束"}`))
 	}))
 	defer server.Close()
 	a := pairedAgent(t, server.URL, strings.Repeat("s", 43))
 	err := a.installExtension()
-	if err == nil || !strings.Contains(err.Error(), "没有可用的牛马") {
+	if err == nil || !strings.Contains(err.Error(), "没有可用的热心市民") {
 		t.Fatalf("err = %v", err)
 	}
 	a.mu.Lock()
@@ -186,7 +186,7 @@ func TestConfigPageOffersExtensionUpdate(t *testing.T) {
 	allowExtensionInstall(t, true)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"employee":"测试牛马"}`))
+		_, _ = w.Write([]byte(`{"employee":"测试热心市民"}`))
 	}))
 	defer server.Close()
 	a := pairedAgent(t, server.URL, strings.Repeat("p", 43))
@@ -214,7 +214,7 @@ func TestConfigPageOffersExtensionUpdate(t *testing.T) {
 	if location := w.Header().Get("Location"); location != "/config/test?saved=1&tab=access" {
 		t.Fatalf("location = %q", location)
 	}
-	if !strings.Contains(page(), "测试牛马") {
+	if !strings.Contains(page(), "测试热心市民") {
 		t.Fatal("the page must show which employee got the install task")
 	}
 }

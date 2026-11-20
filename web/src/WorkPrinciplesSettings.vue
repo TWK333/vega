@@ -26,7 +26,7 @@ onMounted(() => void sync());
     <div class="card-head row">
       <div>
         <h3>公共工作原则</h3>
-        <p class="hint">仅对你名下的牛马生效，下次对话或任务运行时使用。单只牛马的私有工作原则接在这段后面；留空时只使用各自的私有原则。</p>
+        <p class="hint">仅对你名下的热心市民生效；后续对话、续做、重新派发和新任务均使用当前原则。每位热心市民的专属工作原则会补充在这段之后；此处留空时，只使用各自的专属工作原则。</p>
       </div>
       <button v-if="loaded" class="primary sm" :disabled="busy" @click="sync(true)">{{ busy ? '保存中…' : '保存' }}</button>
       <button v-else class="sm" :disabled="busy" @click="sync()">{{ busy ? '加载中…' : '重新加载' }}</button>

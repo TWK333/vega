@@ -264,7 +264,7 @@ test("memory prompt: tool-list gate and owner remember-now rule", async () => {
   const { readFileSync } = await import("node:fs");
   const prompt = readFileSync("server/core/prompt.ts", "utf8");
   assert.match(prompt, /以本轮工具列表为准：有 memory_propose 就能写/);
-  assert.match(prompt, /主人要求记住的跨会话偏好或事实/);
+  assert.match(prompt, /归属用户要求记住的跨会话偏好或事实/);
   assert.match(prompt, /记忆工具仍按本轮列表使用/);
   assert(!/schema 无记忆写入权限/.test(prompt));
 });

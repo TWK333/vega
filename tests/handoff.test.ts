@@ -256,7 +256,7 @@ test("non-terminal tasks whose client died move to the cloud by default; only an
   assert.equal(kept.state.tasks[0].execution.localAgent, true, "显式关闭自动接管时保留本地绑定");
 });
 
-test("旧的服务端优先上报不再自动把任务交到云端，要改这头牛马的 Master 才会交接", async () => {
+test("旧的服务端优先上报不再自动把任务交到云端，要改这位热心市民的 Master 才会交接", async () => {
   const w = world({ clientOnline: true, prefer: "cloud" });
   w.local.put("/local/work/a.ts", "v1");
   const handoffs = new TaskHandoffs(w.deps);

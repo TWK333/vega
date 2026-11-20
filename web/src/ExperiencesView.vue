@@ -88,7 +88,7 @@ onMounted(() => void refresh());
         </ol>
         <div v-if="current.pitfalls?.length" class="callout experience-cautions"><Icon name="alert" :size="16" /><div><strong>注意事项</strong><p v-for="text in current.pitfalls" :key="text">{{ text }}</p></div></div>
       </template>
-      <div v-else class="detail-empty"><Icon name="graph" :size="32" /><strong>{{ busy ? '加载中…' : '暂无经验' }}</strong><span>牛马保存的网页与电脑操作路线会显示在这里。</span></div>
+      <div v-else class="detail-empty"><Icon name="graph" :size="32" /><strong>{{ busy ? '加载中…' : '暂无经验' }}</strong><span>这里会显示热心市民保存的网页与电脑操作路线。</span></div>
     </section>
   </div>
 </template>

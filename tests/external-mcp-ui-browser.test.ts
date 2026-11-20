@@ -68,7 +68,7 @@ test("external MCP configuration is copyable JSON only when a token is issued", 
       };
       try {
         window.confirm = () => true;
-        const app = createApp({ render: () => h(ExternalMcpSettings, { api, employees: [{ id: 'e1', name: '牛马' }], onError: error => errors.push(error) }) });
+        const app = createApp({ render: () => h(ExternalMcpSettings, { api, employees: [{ id: 'e1', name: '热心市民小周' }], onError: error => errors.push(error) }) });
         app.use(vaporInteropPlugin).mount('#app');
         await waitFor(() => document.body.textContent.includes('已有连接'), 'existing configuration did not load');
         check(!document.querySelector('.config-json'), 'existing tokens must not be recoverable');

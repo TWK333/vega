@@ -47,14 +47,14 @@ const clicked = ref([]), requests = ref([]), selectedTask = ref(null);
 const output = { step: 1, label: "设计结果", text: "ONLY_IN_ARTIFACT " + "报告正文 ".repeat(200) };
 const message = (id) => ({ role: "assistant", text: "已生成", stepOutput: output, tasks: [{ id, title: "工作", status: "running" }] });
 const legacy = { role: "assistant", text: "**步骤产物（任务未完成）**\\n\\n旧报告\\n\\nONLY_IN_ARTIFACT 旧正文", stepOutput: true, tasks: [{ id: "old", title: "旧任务" }] };
-const groupMessage = { ...message('group-task'), seq: 1, author: { kind: 'employee', id: 'worker', name: '牛马' } };
+const groupMessage = { ...message('group-task'), seq: 1, author: { kind: 'employee', id: 'worker', name: '热心市民小周' } };
 const groupDeleted = { ...message('removed'), seq: 2, author: groupMessage.author };
 const groupLegacy = { ...legacy, seq: 3, author: groupMessage.author };
 const compact = (row) => ({ ...row, stepOutput: { step: row.stepOutput.step, label: row.stepOutput.label, omitted: true } });
 const repeated = (row, start) => [start, start + 1].map((seq) => compact({ ...row, seq, text: '核对进度 ' + seq }));
 const compactLegacy = { ...groupLegacy, text: '步骤产物已保存。', stepOutput: { step: 0, label: '旧报告', omitted: true, legacy: true } };
 const task = { id: 'group-task', text: '工作', status: 'running', createdAt: Date.now(), stepOutputs: [output], canControl: false };
-const group = { name: '测试群', users: [{ id: 'viewer', name: '成员' }], employees: [{ id: 'worker', name: '牛马', mine: false }], running: [] };
+const group = { name: '测试群', users: [{ id: 'viewer', name: '成员' }], employees: [{ id: 'worker', name: '热心市民小周', mine: false }], running: [] };
 async function api(path) {
   requests.value.push(path);
   if (path.startsWith('/employees/worker/chat')) {
@@ -66,7 +66,7 @@ async function api(path) {
     return { group, messages, taskStatus: { 'group-task': 'running', removed: 'deleted', old: 'deleted' } };
   }
   if (path === '/groups/fixture/tasks/worker/group-task') return task;
-  if (path === '/groups/fixture/tasks?stepSummaries=1') return { members: [{ id: 'worker', name: '牛马', mine: false, tasks: [{ ...task, stepOutputs: undefined }] }] };
+  if (path === '/groups/fixture/tasks?stepSummaries=1') return { members: [{ id: 'worker', name: '热心市民小周', mine: false, tasks: [{ ...task, stepOutputs: undefined }] }] };
   return {};
 }
 </script>
@@ -76,7 +76,7 @@ async function api(path) {
   <div id="deleted"><ChatMessage :message="message('deleted')" :task-status="{ deleted: 'deleted' }" /></div>
   <div id="legacy"><ChatMessage :message="legacy" /></div>
   <div id="detail"><StepOutput :output="output" /></div>
-  <div id="employee"><EmployeeChat :api="api" user-id="viewer" employee-id="worker" name="牛马" :composer="{ text: '', attachments: [] }" :tasks="[{ id: 'private', status: 'running' }]" @task="clicked.push('employee:' + $event)" /></div>
+  <div id="employee"><EmployeeChat :api="api" user-id="viewer" employee-id="worker" name="热心市民小周" :composer="{ text: '', attachments: [] }" :tasks="[{ id: 'private', status: 'running' }]" @task="clicked.push('employee:' + $event)" /></div>
   <div id="groupnav"><GroupChat :api="api" :user="{ id: 'viewer', role: 'operator' }" group-id="fixture" :my-employees="[]" :selected-task="selectedTask" @task-change="selectedTask = $event" /></div>
   <span id="clicked">{{ clicked.join('|') }}</span><span id="requests">{{ requests.join('|') }}</span>
 </template>`);

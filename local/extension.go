@@ -1,7 +1,7 @@
 package main
 
 // 扩展随客户端一起发布：二进制里带着一份解压好的文件，配置页点「更新浏览器扩展」时写回本机，
-// 再交给一个牛马在电脑会话里用 appuse 加载（见 installExtension）。
+// 再请一位热心市民在电脑会话里用 appuse 加载扩展（见 installExtension）。
 
 import (
 	"embed"

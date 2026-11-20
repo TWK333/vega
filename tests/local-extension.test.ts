@@ -32,7 +32,7 @@ function fixture(options: Options = {}) {
     chat: async () => ({ id: "chat-" + id }),
     state: async () => ({ name }),
   });
-  const employees = options.employees ?? [employeeOf("e1", "牛马一号")];
+  const employees = options.employees ?? [employeeOf("e1", "热心市民小周")];
   for (const employee of employees) employee.createLocalTask = async (text: string, clientId: string, owner: any) => { submitted.push({ id: employee.employeeId, text, clientId, owner }); };
   const self = { clientId: "c1", name: "本机", cwd: "C:/work", platform: "windows", browser: "local", active: true };
   const engine = {
@@ -104,7 +104,7 @@ test("the install prompt names the extracted directory and forbids installing th
 test("the install endpoint refuses missing employees, an offline computer and a bad directory", async () => {
   await assert.rejects(
     () => installBrowserExtension(fixture({ employees: [] }).deps, GRANT, { path: WINDOWS_PATH }),
-    /没有可用的牛马/,
+    /没有可用的热心市民/,
   );
   await assert.rejects(
     () => installBrowserExtension(fixture({ offline: true }).deps, GRANT, { path: WINDOWS_PATH }),
@@ -117,7 +117,7 @@ test("the install endpoint refuses missing employees, an offline computer and a 
     );
   await assert.rejects(
     () => installBrowserExtension(fixture({ busy: true }).deps, GRANT, { path: WINDOWS_PATH }),
-    /正在执行别的请求/,
+    /正在处理其他请求/,
   );
   const ok = fixture();
   assert.equal(ok.touched.length, 0, "nothing is refused before the checks pass");
@@ -126,7 +126,7 @@ test("the install endpoint refuses missing employees, an offline computer and a 
 test("while this computer is online any manageable employee gets the install task", async () => {
   const ok = fixture();
   assert.deepEqual(await installBrowserExtension(ok.deps, GRANT, { path: WINDOWS_PATH }), {
-    employee: "牛马一号",
+    employee: "热心市民小周",
     employeeId: "e1",
     session: "chat-e1",
   });
@@ -138,11 +138,11 @@ test("while this computer is online any manageable employee gets the install tas
   assert.match(ok.submitted[0].text, /本机/, "the prompt names the computer that will load it");
   assert.deepEqual(ok.touched, [], "the employee chat's execution is left to its own binding, not rewritten here");
 
-  // 任一头可管理的牛马都能领这个安装任务；执行端由任务自己的执行位置决定。
+  // 任一位可管理的热心市民都能接安装任务；执行位置由任务决定。
   const second = fixture({
     employees: [
-      { employeeId: "e1", deleting: false, manageable: async () => true, chat: async () => ({ id: "chat-e1" }), state: async () => ({ name: "云端牛马" }) },
-      { employeeId: "e2", deleting: false, manageable: async () => true, chat: async () => ({ id: "chat-e2" }), state: async () => ({ name: "本机牛马" }) },
+      { employeeId: "e1", deleting: false, manageable: async () => true, chat: async () => ({ id: "chat-e1" }), state: async () => ({ name: "云端热心市民" }) },
+      { employeeId: "e2", deleting: false, manageable: async () => true, chat: async () => ({ id: "chat-e2" }), state: async () => ({ name: "本机热心市民" }) },
     ],
   });
   const picked = await installBrowserExtension(second.deps, GRANT, { path: POSIX_PATH });
@@ -166,7 +166,7 @@ test("a real install request creates a task bound to the requesting Windows clie
     assert.equal(task.execution.clientId, clientId);
     assert.equal(task.execution.localPlatform, "windows");
     assert.equal(task.cwd, "C:\\work");
-    await assert.rejects(employee.createLocalTask("wrong owner", clientId, { token: "bob", name: "Bob" }), /自己的牛马/);
+    await assert.rejects(employee.createLocalTask("wrong owner", clientId, { token: "bob", name: "Bob" }), /你名下的热心市民/);
     await assert.rejects(employee.createLocalTask("offline", "e".repeat(32), { token: "alice", name: "Alice" }), /未在线/);
   } finally { await engine.close(); await store.close(); }
 });
