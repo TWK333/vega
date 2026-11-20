@@ -3,15 +3,28 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import TaskDetail from "./TaskDetail.vue";
-import { taskLabel, taskTone, planProgress, shortTime } from "./task-status";
+import { taskLabel, taskTone, planProgress, shortTime, isEnded, needsAttention } from "./task-status";
 // The group's 工作面板: tasks started from this group, by member employee (GET /groups/:id/tasks, already ordered).
 // Task details stay beside the chat; owners can explicitly open their execution workspace.
 const props = defineProps({ members: Array, loading: Boolean, api: Function, groupId: String, focus: Object });
 const emit = defineEmits(["select", "exit", "title", "open", "inspect", "close", "changed"]);
-const selectedKey = computed(() => props.focus || null), selected = ref(null), detailLoading = ref(false), error = ref("");
+const selectedKey = computed(() => props.focus || null), selected = ref(null), detailLoading = ref(false), error = ref(""), filter = ref("all");
 const owned = () => props.members?.some((member) => member.mine && member.id === selectedKey.value?.member);
 const requester = (task) => task.requester ? `${task.requester.kind === "employee" ? "牛马" : ""}${task.requester.name}` : "";
-const note = (task) => task.status === "waiting" ? task.waiting : task.status === "approval" ? task.approval : task.progress?.at(-1)?.text || task.queueReason || "";
+const note = (task) => task.status === "waiting" ? task.waiting : task.status === "approval" ? task.approval : task.summary || task.progress?.at(-1)?.text || task.queueReason || "";
+/** Strip bare URLs in card previews so Tapd/link-heavy prompts stay readable; full text stays in tooltip & detail. */
+function cardTitle(text) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  const cleaned = raw.replace(/https?:\/\/\S+/g, "").replace(/\s{2,}/g, " ").trim();
+  return cleaned.length >= 6 ? cleaned : raw;
+}
+const allTasks = computed(() => (props.members || []).flatMap((member) => member.tasks || []));
+const activeCount = computed(() => allTasks.value.filter((task) => !isEnded(task.status)).length);
+const endedCount = computed(() => allTasks.value.filter((task) => isEnded(task.status)).length);
+const filteredMembers = computed(() => (props.members || []).map((member) => ({
+  ...member,
+  tasks: (member.tasks || []).filter((task) => filter.value === "all" || (filter.value === "active" ? !isEnded(task.status) : isEnded(task.status))),
+})));
 let version = 0;
 const taskPath = (key) => `/groups/${encodeURIComponent(props.groupId)}/tasks/${encodeURIComponent(key.member)}/${encodeURIComponent(key.task)}`;
 async function loadDetail() {
@@ -71,19 +84,32 @@ onBeforeUnmount(() => { version++; });
       </template>
     </div>
     <div v-else class="panel-scroll">
+      <div v-if="allTasks.length" class="work-filters" role="tablist" aria-label="任务筛选">
+        <button type="button" role="tab" :aria-selected="filter === 'all'" @click="filter = 'all'">全部<span>{{ allTasks.length }}</span></button>
+        <button type="button" role="tab" :aria-selected="filter === 'active'" @click="filter = 'active'">进行中<span>{{ activeCount }}</span></button>
+        <button type="button" role="tab" :aria-selected="filter === 'ended'" @click="filter = 'ended'">已结束<span>{{ endedCount }}</span></button>
+      </div>
       <p v-if="loading && !members?.length" class="panel-empty"><span class="spinner" aria-hidden="true"></span>加载中…</p>
       <p v-else-if="!members?.length" class="panel-empty">群里还没有牛马。</p>
-      <section v-for="member in members" :key="member.id" class="member-section">
+      <section v-for="member in filteredMembers" :key="member.id" class="member-section">
         <h4><span class="member-avatar"><EmployeeAvatar :employee-id="member.id" :name="member.name" :avatar="member.avatar" /></span>{{ member.name }}<small v-if="member.mine">我的</small><span class="count">{{ member.tasks.length }}</span></h4>
-        <p v-if="!member.tasks.length" class="panel-empty">还没有群里发起的任务。</p>
-        <button v-for="task in member.tasks" :key="task.id" type="button" class="task-row" :data-task-id="task.id" @click="open(member, task)">
-          <span class="task-row-head"><span :class="['badge', taskTone(task.status)]">{{ taskLabel(task.status) }}</span><time>{{ shortTime(task.createdAt) }}</time></span>
-          <strong>{{ task.text }}</strong>
-          <span class="task-row-meta">{{ requester(task) }} 发起</span>
-          <span v-if="note(task)" class="task-row-note">{{ note(task) }}</span>
-          <span v-if="planProgress(task.plan)" class="mini-progress" :title="`计划 ${planProgress(task.plan).done}/${planProgress(task.plan).total}`"><span :style="{ width: planProgress(task.plan).percent + '%' }"></span></span>
-        </button>
-        <p v-if="member.endedHidden" class="panel-empty">更早结束的 {{ member.endedHidden }} 个任务未显示。</p>
+        <p v-if="!member.tasks.length" class="panel-empty">{{ filter === 'active' ? '当前没有进行中的任务。' : filter === 'ended' ? '还没有已结束的任务。' : '还没有群里发起的任务。' }}</p>
+        <div v-else class="task-grid">
+          <button v-for="task in member.tasks" :key="task.id" type="button" class="task-row" :class="[taskTone(task.status), { ended: isEnded(task.status), attention: needsAttention(task.status) }]" :data-task-id="task.id" :title="task.text" @click="open(member, task)">
+            <span class="task-row-head">
+              <span class="task-state"><i class="state-dot" aria-hidden="true"></i>{{ taskLabel(task.status) }}</span>
+              <time>{{ shortTime(task.createdAt) }}</time>
+            </span>
+            <strong>{{ cardTitle(task.text) }}</strong>
+            <span v-if="note(task)" class="task-row-note">{{ note(task) }}</span>
+            <span class="task-row-foot">
+              <span class="task-row-meta">{{ requester(task) }} 发起</span>
+              <span v-if="!isEnded(task.status) && planProgress(task.plan)" class="task-step-count">{{ planProgress(task.plan).done }}/{{ planProgress(task.plan).total }}</span>
+            </span>
+            <span v-if="!isEnded(task.status) && planProgress(task.plan)" class="mini-progress" :title="`计划 ${planProgress(task.plan).done}/${planProgress(task.plan).total}`"><span :style="{ width: planProgress(task.plan).percent + '%' }"></span></span>
+          </button>
+        </div>
+        <p v-if="filter !== 'active' && member.endedHidden" class="panel-empty">更早结束的 {{ member.endedHidden }} 个任务未显示。</p>
       </section>
     </div>
   </aside>
@@ -92,19 +118,44 @@ onBeforeUnmount(() => { version++; });
 .group-work { display: flex; flex-direction: column; flex: none; min-height: 0; width: min(clamp(340px, 30vw, 560px), 50%); border-left: 1px solid var(--border); background: var(--bg); }
 .panel-head { display: flex; align-items: center; gap: 8px; flex: none; height: 44px; padding: 0 8px 0 16px; border-bottom: 1px solid var(--border); }
 .panel-head h3 { flex: 1; font-size: 13px; }
-.panel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 4px 12px 16px; scrollbar-width: thin; }
+.panel-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px 16px; scrollbar-width: thin; }
 .panel-scroll.detail { display: flex; flex-direction: column; padding: 0; }
-.member-section h4 { display: flex; align-items: center; gap: 8px; margin: 12px 4px 8px; color: var(--text-2); font-size: 12px; }
+.work-filters { display: flex; align-items: center; gap: 4px; margin: 0 0 8px; padding: 3px; border-radius: var(--r-md); background: var(--surface-2); }
+.work-filters button { flex: 1; justify-content: center; gap: 5px; min-height: 26px; padding: 0 8px; border: 0; border-radius: calc(var(--r-md) - 2px); background: transparent; color: var(--muted); font-size: 12px; font-weight: 500; }
+.work-filters button span { font-size: 11px; opacity: .75; font-variant-numeric: tabular-nums; }
+.work-filters button[aria-selected="true"] { background: var(--surface); color: var(--text); box-shadow: var(--sh-sm); }
+.member-section h4 { display: flex; align-items: center; gap: 8px; margin: 10px 2px 8px; color: var(--text-2); font-size: 12px; }
 .member-section h4 small { color: var(--muted); font-weight: 400; }
 .member-section h4 .count { margin-left: auto; }
 .member-avatar { display: inline-grid; width: 22px; height: 22px; }
-.task-row { display: grid; grid-template-columns: minmax(0, 1fr); justify-content: stretch; gap: 4px; width: 100%; height: auto; margin-bottom: 6px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-.task-row:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface); box-shadow: var(--sh-sm); }
-.task-row-head { display: flex; align-items: center; justify-content: space-between; }
-.task-row time, .task-row-meta { color: var(--muted); font-size: 11px; }
-.task-row strong { display: -webkit-box; overflow: hidden; color: var(--text); font-size: 13px; font-weight: 500; line-height: 1.45; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.task-row-note { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 12px; line-height: 1.5; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.mini-progress { display: block; height: 3px; margin-top: 2px; overflow: hidden; border-radius: 2px; background: var(--surface-3); }
+.task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(205px, 1fr)); gap: 8px; }
+.task-row { display: flex; flex-direction: column; align-items: stretch; gap: 6px; width: 100%; height: auto; min-width: 0; padding: 10px 11px; border: 1px solid var(--border); border-radius: var(--r-lg, 10px); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; transition: border-color .14s, box-shadow .14s, transform .14s; }
+.task-row:hover:not(:disabled) { border-color: var(--accent); background: var(--surface); box-shadow: var(--sh-sm); transform: translateY(-1px); }
+.task-row.attention { grid-column: 1 / -1; border-color: var(--warn-border, var(--border)); border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 4%, var(--surface)); }
+.task-row.info { border-left: 3px solid var(--accent); }
+.task-row.danger { border-left: 3px solid var(--danger); }
+.task-row.ended { background: color-mix(in srgb, var(--surface) 76%, var(--bg)); }
+.task-row.ended:hover:not(:disabled) { background: var(--surface); }
+.task-row-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.task-state { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 600; color: var(--text-2); }
+.state-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
+.task-row.info .task-state { color: var(--accent-text); }
+.task-row.info .state-dot { background: var(--accent); }
+.task-row.warn .task-state { color: var(--warn); }
+.task-row.warn .state-dot { background: var(--warn); }
+.task-row.ok .task-state { color: var(--muted); font-weight: 500; }
+.task-row.ok .state-dot { background: var(--ok); opacity: .75; }
+.task-row.danger .task-state { color: var(--danger); }
+.task-row.danger .state-dot { background: var(--danger); }
+.task-row time, .task-row-meta { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.task-row strong { display: -webkit-box; overflow: hidden; color: var(--text); font-size: 12.5px; font-weight: 500; line-height: 1.45; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.task-row.ended strong { color: var(--text-2); }
+.task-row-note { display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 11.5px; line-height: 1.45; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.task-row.ended .task-row-note { -webkit-line-clamp: 1; opacity: .88; }
+.task-row-foot { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-top: auto; padding-top: 2px; }
+.task-row-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-step-count { flex: none; padding: 0 5px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.mini-progress { display: block; height: 2px; overflow: hidden; border-radius: 2px; background: var(--surface-3); }
 .mini-progress span { display: block; height: 100%; border-radius: 2px; background: var(--accent); }
 .panel-empty { display: flex; gap: 8px; padding: 8px 4px; color: var(--muted); font-size: 12px; line-height: 1.55; }
 .group-work:has(.detail) { width: min(clamp(500px, 38vw, 680px), 50%); }
