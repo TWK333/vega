@@ -19,5 +19,5 @@ const layout = computed(() => groupTiles(props.group));
 .group-avatar { display: grid; align-content: center; gap: 1px; width: 100%; height: 100%; padding: 2px; overflow: hidden; border-radius: inherit; background: var(--surface-3, #e5e7eb); box-sizing: border-box; }
 .tile { display: grid; aspect-ratio: 1; min-width: 0; overflow: hidden; border-radius: 2px; background: var(--surface, #fff); font-size: 9px; }
 .group-avatar[data-cols="1"] .tile { font-size: inherit; border-radius: inherit; }
-.tile :deep(.employee-picture.is-bot) { overflow: hidden; }
+.tile :deep(.employee-picture.is-pixel) { overflow: hidden; }
 </style>

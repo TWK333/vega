@@ -1,8 +1,26 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
-import { ZODIAC_AVATARS, BOT_AVATAR_SHAPES, BOT_AVATAR_COLORS, isAvatarPreset, employeeAvatarURL, parseBotAvatar, defaultBotAvatar, botAvatarPreset, bubbleTint, avatarBubble } from "../shared/employee-avatars";
-import { BOT_SHAPE_GEOMETRY, BOT_POSES, LOOK_POSES, MESSAGE_POSE, projectFace, shade, nextPose, holdDuration, blinkPlan } from "../web/src/bot-avatar.js";
+import {
+  ZODIAC_AVATARS,
+  BOT_AVATAR_SHAPES,
+  BOT_AVATAR_COLORS,
+  PIXEL_AVATAR_ROLES,
+  PIXEL_AVATAR_COLORS,
+  PIXEL_AVATAR_GENDERS,
+  isAvatarPreset,
+  employeeAvatarURL,
+  parseBotAvatar,
+  parsePixelAvatar,
+  defaultBotAvatar,
+  defaultPixelAvatar,
+  resolvePixelAvatar,
+  botAvatarPreset,
+  pixelAvatarPreset,
+  bubbleTint,
+  avatarBubble,
+} from "../shared/employee-avatars";
+import { PIXEL_GRID_SIZE, PIXEL_SPRITES, PIXEL_ROLE_IDS, renderPixelFrame, shade } from "../web/src/pixel-avatar.js";
 import { updateEmployeeAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
 import { Store } from "../server/core/store";
@@ -36,38 +54,72 @@ test("all 12 zodiac presets are real square WebP assets and avatar URLs never ac
   }
 });
 
-test("bot avatars encode shape and color in the preset string and every shape has original geometry", () => {
-  assert(BOT_AVATAR_SHAPES.length >= 15 && BOT_AVATAR_COLORS.length >= 12);
-  assert.equal(new Set(BOT_AVATAR_SHAPES.map(shape => shape.id)).size, BOT_AVATAR_SHAPES.length);
-  for (const shape of BOT_AVATAR_SHAPES) {
-    const geometry = (BOT_SHAPE_GEOMETRY as any)[shape.id];
-    assert(geometry, shape.id);
-    assert.match(geometry.d, /^M[\d.\- ]+[CQLA]/, shape.id);
-    assert(!/NaN|Infinity/.test(geometry.d), shape.id);
-    for (const color of BOT_AVATAR_COLORS) {
-      const value = botAvatarPreset(shape.id, color.id);
+test("pixel citizen avatars span diverse genders and professions, each with its own independent multi-frame pixel animation", () => {
+  assert(PIXEL_AVATAR_ROLES.length >= 20 && PIXEL_AVATAR_COLORS.length >= 12);
+  assert.equal(new Set(PIXEL_AVATAR_ROLES.map(role => role.id)).size, PIXEL_AVATAR_ROLES.length);
+  assert.equal(new Set(PIXEL_AVATAR_ROLES.map(role => role.action)).size, PIXEL_AVATAR_ROLES.length, "every role has a distinct animation name");
+  const females = PIXEL_AVATAR_ROLES.filter(role => role.gender === "female");
+  const males = PIXEL_AVATAR_ROLES.filter(role => role.gender === "male");
+  assert(females.length >= 8 && males.length >= 8, "both genders are well represented");
+  assert.deepEqual(PIXEL_AVATAR_GENDERS.map(g => g.id), ["all", "female", "male"]);
+  assert.deepEqual(PIXEL_ROLE_IDS, PIXEL_AVATAR_ROLES.map(role => role.id));
+
+  const animationSignatures = new Set<string>();
+  for (const role of PIXEL_AVATAR_ROLES) {
+    const sprite = (PIXEL_SPRITES as Record<string, any>)[role.id];
+    assert(sprite, role.id);
+    assert.equal(sprite.gender, role.gender, role.id);
+    assert(sprite.frames.length >= 4, `${role.id} has multi-frame animation`);
+    assert.equal(sprite.durations.length, sprite.frames.length, `${role.id} has per-frame cadence`);
+    for (const ms of sprite.durations) assert(ms >= 100 && ms <= 600, `${role.id} duration in range`);
+
+    const frameHashes = new Set<string>();
+    for (let f = 0; f < sprite.frames.length; f++) {
+      const grid = sprite.frames[f];
+      assert.equal(grid.length, PIXEL_GRID_SIZE, `${role.id} frame ${f} height`);
+      for (const row of grid) assert.equal(row.length, PIXEL_GRID_SIZE, `${role.id} frame ${f} width`);
+      const rendered = renderPixelFrame(role.id, "#3878fb", f);
+      assert(rendered.layers.length >= 5, `${role.id} frame ${f} has multi-color pixel layers`);
+      assert.match(rendered.bg, /^#[0-9a-f]{6}$/);
+      for (const layer of rendered.layers) {
+        assert.match(layer.d, /^M\d+ \d+h\d+v1h-\d+z/, `${role.id} valid pixel path`);
+      }
+      frameHashes.add(JSON.stringify(rendered.layers.map((l: { fill: string; d: string }) => [l.fill, l.d])));
+    }
+    assert(frameHashes.size >= 3, `${role.id} animation frames visually change across its cycle`);
+    animationSignatures.add([...frameHashes].join("|"));
+
+    for (const color of PIXEL_AVATAR_COLORS) {
+      const value = pixelAvatarPreset(role.id, color.id);
       assert(isAvatarPreset(value), value);
-      assert.deepEqual(parseBotAvatar(value), { shape: shape.id, color: color.id, hex: color.hex });
-      assert.equal(employeeAvatarURL("employee", value), "", "bot avatars render inline, never as a URL");
+      assert.deepEqual(parsePixelAvatar(value), { role: role.id, color: color.id, hex: color.hex, gender: role.gender });
+      assert.equal(employeeAvatarURL("employee", value), "", "pixel avatars render inline, never as a URL");
     }
   }
-  for (const value of ["bot:", "bot:round", "bot:round:", "bot:unknown:red", "bot:round:unknown", "bot:round:red:extra", "bot:round:#ff0000", "bot:../x:red", "BOT:round:red"]) assert.equal(isAvatarPreset(value), false, value);
-  assert.deepEqual(defaultBotAvatar("employee-a"), defaultBotAvatar("employee-a"), "the default bot is stable per employee");
-  assert(new Set(["a", "b", "c", "d", "e", "f", "g", "h"].map(seed => JSON.stringify(defaultBotAvatar(seed)))).size > 4, "default bots vary across employees");
-  assert(LOOK_POSES.length >= 15 && !LOOK_POSES.some((id) => /blink|wink|cross|daze|skeptic|squint|sleepy/.test(id)), "variety comes from head turns, not 2D expressions");
-  for (const id of LOOK_POSES) { const { yaw, pitch } = (BOT_POSES as Record<string, { yaw: number; pitch: number }>)[id]; assert(Math.abs(yaw) <= 40 && Math.abs(pitch) <= 30); }
-  assert(LOOK_POSES.includes(MESSAGE_POSE) && BOT_POSES[MESSAGE_POSE].yaw >= 20 && BOT_POSES[MESSAGE_POSE].pitch >= 12, "message avatars turn up-right");
-  for (let i = 0; i < 200; i++) { const pose = nextPose("left", "up"); assert(pose !== "left" && pose !== "up" && LOOK_POSES.includes(pose)); }
-  // Random, not a fixed cycle: two independently generated sequences differ, and many poses get visited.
-  const walk = () => { const seq: string[] = []; let current = "center", previous; for (let i = 0; i < 30; i++) { const next = nextPose(current, previous); previous = current; current = next; seq.push(next); } return seq; };
-  const a = walk(), b = walk();
-  assert.notDeepEqual(a, b);
-  assert(new Set(a).size >= 8);
-  assert(a.every((pose, i) => !i || pose !== a[i - 1]), "never repeats the same pose back to back");
-  const holds = Array.from({ length: 200 }, () => holdDuration());
-  assert(Math.min(...holds) >= 280 && Math.max(...holds) <= 1900 && new Set(holds.map(Math.round)).size > 100);
-  const blinks = Array.from({ length: 400 }, () => blinkPlan());
-  assert(blinks.some(plan => plan.double) && blinks.some(plan => !plan.double));
+  assert.equal(animationSignatures.size, PIXEL_AVATAR_ROLES.length, "every citizen has a unique independent animation");
+
+  for (const value of [
+    "pixel:", "pixel:coder", "pixel:coder:", "pixel:unknown:red", "pixel:coder:unknown",
+    "pixel:coder:red:extra", "pixel:coder:#ff0000", "pixel:../x:red", "PIXEL:coder:red",
+    "bot:", "bot:round", "bot:unknown:red", "bot:round:#ff0000",
+  ]) assert.equal(isAvatarPreset(value), false, value);
+
+  // Legacy bot presets remain accepted and resolve cleanly to pixel citizens preserving their theme color.
+  for (const shape of BOT_AVATAR_SHAPES) {
+    const legacy = botAvatarPreset(shape.id, "teal");
+    assert(isAvatarPreset(legacy), legacy);
+    assert.deepEqual(parseBotAvatar(legacy), { shape: shape.id, color: "teal", hex: "#0fb4a3" });
+    const resolved = resolvePixelAvatar(legacy, "seed");
+    assert.equal(resolved.color, "teal");
+    assert.equal(resolved.hex, "#0fb4a3");
+    assert(PIXEL_AVATAR_ROLES.some(r => r.id === resolved.role));
+  }
+
+  assert.deepEqual(defaultPixelAvatar("employee-a"), defaultPixelAvatar("employee-a"), "the default pixel citizen is stable per employee");
+  assert(new Set(["a", "b", "c", "d", "e", "f", "g", "h"].map(seed => JSON.stringify(defaultPixelAvatar(seed)))).size > 4, "default citizens vary across employees");
+  assert.deepEqual(defaultBotAvatar("employee-a"), defaultBotAvatar("employee-a"));
+  assert.equal(shade("#000000", 0.5), "#808080");
+  assert.equal(shade("#ffffff", -1), "#000000");
 });
 
 test("preset selection, clearing and reopening preserve the employee's own avatar without accepting an arbitrary blob reference", async () => {
@@ -79,9 +131,11 @@ test("preset selection, clearing and reopening preserve the employee's own avata
     assert.equal((await (await reopened.for(employee.employeeId)).state()).avatar, "zodiac:pisces");
     await assert.rejects(employee.control({ action: "settings", avatar: "blob-" + "1".repeat(32) }), /avatar/);
     assert.equal((await employee.state()).avatar, "zodiac:pisces");
+    await updateEmployeeAvatar(employee, { preset: "pixel:doctor:teal" });
+    assert.equal((await employee.state()).avatar, "pixel:doctor:teal");
     await updateEmployeeAvatar(employee, { preset: "bot:cloud:teal" });
     assert.equal((await employee.state()).avatar, "bot:cloud:teal");
-    await assert.rejects(updateEmployeeAvatar(employee, { preset: "bot:cloud:#00ffaa" }));
+    await assert.rejects(updateEmployeeAvatar(employee, { preset: "pixel:doctor:#00ffaa" }));
     assert.equal((await employee.state()).avatar, "bot:cloud:teal");
     await updateEmployeeAvatar(employee, { preset: "" });
     assert.equal((await employee.state()).avatar, "");
@@ -89,29 +143,31 @@ test("preset selection, clearing and reopening preserve the employee's own avata
   } finally { root.close(); await store.close(); }
 });
 
-test("new employees automatically get an unused shape/color pair without changing existing avatars", async () => {
+test("new employees automatically get diverse unused pixel citizens without changing existing avatars", async () => {
   const { store, root } = await fixture();
   try {
-    const selected = await root.create({ name: "Selected", avatar: "bot:cloud:teal" }, "owner");
+    const selected = await root.create({ name: "Selected", avatar: "pixel:doctor:teal" }, "owner");
     const legacy = await root.create({ name: "Legacy" }, "owner");
     await (await root.for(legacy.id)).update((state) => { state.avatar = ""; });
     const before = await Promise.all((await root.all()).map(async (employee) => await employee.state()));
     const used = new Set(before.map((state) => {
-      const bot = parseBotAvatar(state.avatar) || defaultBotAvatar(state.id);
-      return botAvatarPreset(bot.shape, bot.color);
+      const pixel = resolvePixelAvatar(state.avatar, state.id);
+      return pixelAvatarPreset(pixel.role, pixel.color);
     }));
     const created = [];
     while ((await root.all()).length < 50) {
       const state = await root.create({ name: `Automatic ${created.length}`, ...(created.length % 2 ? { avatar: "" } : {}) }, "owner");
-      assert(parseBotAvatar(state.avatar), "persist an explicit preset, not a hash-only default");
+      assert(parsePixelAvatar(state.avatar), "persist an explicit pixel preset, not a hash-only default");
       assert(!used.has(state.avatar!), state.avatar);
       used.add(state.avatar!);
       created.push(state);
     }
+    const createdRoles = new Set(created.map(s => parsePixelAvatar(s.avatar)!.role));
+    assert(createdRoles.size >= 15, "auto-assignment spreads across diverse professions before repeating");
     for (const state of before) assert.equal((await (await root.for(state.id)).state()).avatar, state.avatar);
     const reopened = new Employee(store, root.vault, root.runtime);
     for (const state of created) assert.equal((await (await reopened.for(state.id)).state()).avatar, state.avatar);
-    assert.equal((await (await reopened.for(selected.id)).state()).avatar, "bot:cloud:teal");
+    assert.equal((await (await reopened.for(selected.id)).state()).avatar, "pixel:doctor:teal");
     await assert.rejects(async () => await root.create({ name: "Full" }, "owner"), /capacity/);
   } finally { root.close(); await store.close(); }
 });
@@ -168,29 +224,11 @@ test("my own message bubbles take the color of the employee I am talking to, one
     const [light, dark] = [luminance(fill), luminance(ink)].sort((a, b) => b - a);
     assert((light + 0.05) / (dark + 0.05) >= 4.5, `${color.id} bubble text is below WCAG AA`);
   }
-  // The bubble follows the avatar that employee actually shows: the chosen preset, else its stable default bot.
+  // The bubble follows the avatar that employee actually shows: pixel preset, legacy bot preset, else default pixel citizen.
+  assert.deepEqual(avatarBubble("pixel:doctor:teal", "any"), bubbleTint("#0fb4a3"));
   assert.deepEqual(avatarBubble("bot:cloud:teal", "any"), bubbleTint("#0fb4a3"));
-  assert.deepEqual(avatarBubble("bot:cloud:teal", "another"), avatarBubble("bot:cloud:teal", "any"));
-  for (const seed of ["e1", "e2", "e3"]) assert.deepEqual(avatarBubble("", seed), bubbleTint(defaultBotAvatar(seed).hex));
-  assert.notDeepEqual(avatarBubble("bot:cloud:teal", "e1"), avatarBubble("bot:round:red", "e1"));
+  assert.deepEqual(avatarBubble("pixel:doctor:teal", "another"), avatarBubble("pixel:doctor:teal", "any"));
+  for (const seed of ["e1", "e2", "e3"]) assert.deepEqual(avatarBubble("", seed), bubbleTint(defaultPixelAvatar(seed).hex));
+  assert.notDeepEqual(avatarBubble("pixel:doctor:teal", "e1"), avatarBubble("pixel:coder:red", "e1"));
   assert(new Set(Array.from({ length: 8 }, (_, n) => avatarBubble("", "employee-" + n).fill)).size > 1, "two employees do not share one color");
 });
-
-test("bot faces are projected onto a turning 3D head", () => {
-  const round = BOT_SHAPE_GEOMETRY.round, front = projectFace(round, 0, 0);
-  assert(Math.abs(front.left.rx - front.right.rx) < 1e-9 && Math.abs(front.left.cx + front.right.cx - 100) < 1e-6, "symmetric when facing front");
-  const right = projectFace(round, 30, 0), gap = (f: ReturnType<typeof projectFace>) => f.right.cx - f.left.cx;
-  assert(right.left.cx > front.left.cx + 8 && right.right.cx > front.right.cx + 4, "eyes travel with the turn");
-  assert(right.right.rx < right.left.rx * 0.85 && right.right.ry < right.left.ry, "far eye narrows and shrinks");
-  assert(right.left.ry > front.left.ry, "near eye grows");
-  assert(gap(right) < gap(front) * 0.9, "far eye moves toward the near eye");
-  const up = projectFace(round, 0, 24);
-  assert(up.left.cy < front.left.cy - 8 && up.left.ry < front.left.ry * 0.95, "vertical turns move and foreshorten the eyes");
-  const rest = projectFace(round, BOT_POSES[MESSAGE_POSE].yaw, BOT_POSES[MESSAGE_POSE].pitch);
-  assert(rest.left.rx > rest.right.rx * 1.15 && rest.light.x > front.light.x && rest.light.y < front.light.y, "up-right rest pose: near eye bigger, shading follows");
-  const closed = projectFace(round, 10, 5, 0.05);
-  assert(closed.left.ry < 1 && closed.right.ry < 1, "eyelids close vertically");
-  assert.equal(shade("#000000", 0.5), "#808080");
-  assert.equal(shade("#ffffff", -1), "#000000");
-});
-

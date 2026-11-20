@@ -435,6 +435,6 @@ label.check { display: inline-flex; flex-direction: row; align-items: center; ga
 .chat-message { --chat-avatar: 44px; --chat-gap: 10px; }
 @media (max-width: 767px) { .chat-message { --chat-avatar: 40px; --chat-gap: 8px; } }
 
-/* Bot avatars are silhouettes: drop the tinted square behind them wherever an avatar slot is used. */
-:is(.nav-avatar, .chat-avatar, .avatar-current, .identity-avatar):has(> .employee-picture.is-bot) { background: transparent; overflow: visible; }
+/* Pixel citizen avatars draw their own rounded pastel card: drop the extra tinted square behind them. */
+:is(.nav-avatar, .chat-avatar, .avatar-current, .identity-avatar, .member-avatar):has(> .employee-picture.is-pixel) { background: transparent; }
 .auth-splash { width: 100%; height: 100%; background: var(--bg); }

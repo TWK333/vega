@@ -8,7 +8,7 @@ export const ZODIAC_AVATARS = [
   { id: "aquarius", name: "水瓶座" }, { id: "pisces", name: "双鱼座" },
 ] as const;
 
-/** Bot avatar silhouettes. Geometry lives in web/src/bot-avatar.js; only ids are shared with the server. */
+/** Legacy bot shapes: no longer offered in the picker; stored `bot:<shape>:<color>` values map cleanly onto pixel citizens. */
 export const BOT_AVATAR_SHAPES = [
   { id: "round", name: "圆团" }, { id: "cloud", name: "云朵" }, { id: "tile", name: "方块" },
   { id: "sparkle", name: "星芒" }, { id: "clover", name: "四叶" }, { id: "chonk", name: "胖墩" },
@@ -16,6 +16,38 @@ export const BOT_AVATAR_SHAPES = [
   { id: "triangle", name: "三角" }, { id: "gem", name: "宝石" }, { id: "cog", name: "齿轮" },
   { id: "hexagon", name: "六边" }, { id: "apple", name: "苹果" }, { id: "star", name: "星星" },
   { id: "heart", name: "爱心" }, { id: "blob", name: "软糖" }, { id: "ghost", name: "幽灵" },
+] as const;
+
+export type PixelGender = "male" | "female";
+
+export const PIXEL_AVATAR_GENDERS = [
+  { id: "all", name: "全部" },
+  { id: "female", name: "女生" },
+  { id: "male", name: "男生" },
+] as const;
+
+/** Pixel citizen roles across genders and professions; sprites & per-role animations live in web/src/pixel-avatar.js. */
+export const PIXEL_AVATAR_ROLES = [
+  { id: "coder", name: "程序员", gender: "male" as PixelGender, action: "敲代码", defaultColor: "blue" },
+  { id: "doctor", name: "医生", gender: "female" as PixelGender, action: "听诊心跳", defaultColor: "teal" },
+  { id: "chef", name: "厨师", gender: "male" as PixelGender, action: "颠勺起锅", defaultColor: "orange" },
+  { id: "artist", name: "画家", gender: "female" as PixelGender, action: "挥毫泼彩", defaultColor: "pink" },
+  { id: "scientist", name: "科学家", gender: "female" as PixelGender, action: "调配实验", defaultColor: "purple" },
+  { id: "astronaut", name: "宇航员", gender: "male" as PixelGender, action: "失重漂浮", defaultColor: "sky" },
+  { id: "barista", name: "咖啡师", gender: "female" as PixelGender, action: "手冲拉花", defaultColor: "brown" },
+  { id: "detective", name: "侦探", gender: "male" as PixelGender, action: "勘查破案", defaultColor: "amber" },
+  { id: "musician", name: "音乐家", gender: "female" as PixelGender, action: "弹唱律动", defaultColor: "red" },
+  { id: "firefighter", name: "消防员", gender: "male" as PixelGender, action: "喷水救援", defaultColor: "red" },
+  { id: "teacher", name: "教师", gender: "female" as PixelGender, action: "讲台授课", defaultColor: "green" },
+  { id: "gardener", name: "园丁", gender: "male" as PixelGender, action: "浇水发芽", defaultColor: "green" },
+  { id: "photographer", name: "摄影师", gender: "female" as PixelGender, action: "抓拍闪光", defaultColor: "black" },
+  { id: "courier", name: "骑士", gender: "male" as PixelGender, action: "极速派送", defaultColor: "amber" },
+  { id: "wizard", name: "魔法师", gender: "female" as PixelGender, action: "施放星魔法", defaultColor: "purple" },
+  { id: "athlete", name: "运动员", gender: "male" as PixelGender, action: "运球冲刺", defaultColor: "orange" },
+  { id: "pilot", name: "机长", gender: "female" as PixelGender, action: "起飞巡航", defaultColor: "blue" },
+  { id: "mechanic", name: "工程师", gender: "male" as PixelGender, action: "拧紧维修", defaultColor: "gray" },
+  { id: "baker", name: "烘焙师", gender: "female" as PixelGender, action: "点缀甜点", defaultColor: "pink" },
+  { id: "ninja", name: "忍者", gender: "male" as PixelGender, action: "影分身瞬步", defaultColor: "red" },
 ] as const;
 
 export const BOT_AVATAR_COLORS = [
@@ -27,9 +59,40 @@ export const BOT_AVATAR_COLORS = [
   { id: "gray", name: "灰色", hex: "#7c7c84" }, { id: "sky", name: "天蓝", hex: "#30b4f0" },
 ] as const;
 
-export type BotAvatar = { shape: string; color: string; hex: string };
+export const PIXEL_AVATAR_COLORS = BOT_AVATAR_COLORS;
 
-/** `bot:<shape>:<color>` → parts, or undefined for anything else. */
+export type BotAvatar = { shape: string; color: string; hex: string };
+export type PixelAvatar = { role: string; color: string; hex: string; gender: PixelGender };
+
+function fnv1a(seed: string) {
+  let hash = 2166136261;
+  for (const char of seed) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
+  return hash;
+}
+
+/** `pixel:<role>:<color>` → parts, or undefined for anything else. */
+export function parsePixelAvatar(value: unknown): PixelAvatar | undefined {
+  if (typeof value !== "string") return undefined;
+  const match = /^pixel:([a-z]+):([a-z]+)$/.exec(value);
+  if (!match) return undefined;
+  const role = PIXEL_AVATAR_ROLES.find((item) => item.id === match[1]);
+  const color = PIXEL_AVATAR_COLORS.find((item) => item.id === match[2]);
+  return role && color ? { role: role.id, color: color.id, hex: color.hex, gender: role.gender } : undefined;
+}
+
+export function pixelAvatarPreset(role: string, color: string) {
+  return `pixel:${role}:${color}`;
+}
+
+/** Stable pixel citizen used when an employee has no explicit preset. */
+export function defaultPixelAvatar(seed = ""): PixelAvatar {
+  const hash = fnv1a(seed);
+  const role = PIXEL_AVATAR_ROLES[hash % PIXEL_AVATAR_ROLES.length];
+  const color = PIXEL_AVATAR_COLORS[(hash >>> 8) % PIXEL_AVATAR_COLORS.length];
+  return { role: role.id, color: color.id, hex: color.hex, gender: role.gender };
+}
+
+/** `bot:<shape>:<color>` → legacy parts, or undefined for anything else. */
 export function parseBotAvatar(value: unknown): BotAvatar | undefined {
   if (typeof value !== "string") return undefined;
   const match = /^bot:([a-z]+):([a-z]+)$/.exec(value);
@@ -42,20 +105,36 @@ export function botAvatarPreset(shape: string, color: string) {
   return `bot:${shape}:${color}`;
 }
 
-/** Stable bot used when an employee has no avatar, so every employee gets a face (and typing animation). */
 export function defaultBotAvatar(seed = ""): BotAvatar {
-  let hash = 2166136261;
-  for (const char of seed) hash = Math.imul(hash ^ char.charCodeAt(0), 16777619) >>> 0;
+  const hash = fnv1a(seed);
   const shape = BOT_AVATAR_SHAPES[hash % BOT_AVATAR_SHAPES.length].id;
   const color = BOT_AVATAR_COLORS[(hash >>> 8) % BOT_AVATAR_COLORS.length];
   return { shape, color: color.id, hex: color.hex };
 }
 
-export function isAvatarPreset(value: unknown): value is string {
-  return typeof value === "string" && (value === "" || ZODIAC_AVATARS.some(avatar => value === "zodiac:" + avatar.id) || !!parseBotAvatar(value));
+/** Resolve any stored avatar (pixel preset, legacy bot preset, or empty default) to a pixel citizen. */
+export function resolvePixelAvatar(value: unknown, seed = ""): PixelAvatar {
+  const pixel = parsePixelAvatar(value);
+  if (pixel) return pixel;
+  const legacy = parseBotAvatar(value);
+  if (legacy) {
+    const index = BOT_AVATAR_SHAPES.findIndex((shape) => shape.id === legacy.shape);
+    const role = PIXEL_AVATAR_ROLES[Math.max(0, index) % PIXEL_AVATAR_ROLES.length];
+    return { role: role.id, color: legacy.color, hex: legacy.hex, gender: role.gender };
+  }
+  return defaultPixelAvatar(seed);
 }
 
-/** Image URL for raster avatars; empty for the default and bot avatars, which render as inline SVG. */
+export function isAvatarPreset(value: unknown): value is string {
+  return typeof value === "string" && (
+    value === "" ||
+    ZODIAC_AVATARS.some(avatar => value === "zodiac:" + avatar.id) ||
+    !!parseBotAvatar(value) ||
+    !!parsePixelAvatar(value)
+  );
+}
+
+/** Image URL for raster avatars; empty for default, pixel and legacy bot avatars, which render as inline SVG. */
 export function employeeAvatarURL(employeeId?: string, avatar?: string) {
   if (!avatar) return "";
   if (avatar.startsWith("zodiac:") && isAvatarPreset(avatar)) return "/avatars/zodiac/" + avatar.slice(7) + ".webp";
@@ -87,5 +166,5 @@ export function bubbleTint(hex: string) {
 
 /** The fill and ink of my own message bubbles inside one employee's chat: that employee's avatar color, deepened only enough for white text. */
 export function avatarBubble(avatar: unknown, seed = "") {
-  return bubbleTint((parseBotAvatar(avatar) || defaultBotAvatar(seed)).hex);
+  return bubbleTint(resolvePixelAvatar(avatar, seed).hex);
 }

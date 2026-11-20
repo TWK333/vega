@@ -3,7 +3,7 @@ import {
   beijingTimestamp,
   beijingDateTime,
 } from "../../shared/time";
-import { BOT_AVATAR_COLORS, BOT_AVATAR_SHAPES, botAvatarPreset, defaultBotAvatar, isAvatarPreset, parseBotAvatar } from "../../shared/employee-avatars";
+import { PIXEL_AVATAR_COLORS, PIXEL_AVATAR_ROLES, isAvatarPreset, pixelAvatarPreset, resolvePixelAvatar } from "../../shared/employee-avatars";
 import { systemPresence, type Presence } from "./presence";
 import type { Store, Session, Message } from "./store";
 import { outsideTransaction } from "./db";
@@ -487,11 +487,19 @@ export class Employee {
     assert(employees.length < 50, "Employee capacity reached");
     let avatar = a.avatar || "";
     if (!avatar) {
-      const used = new Set(await Promise.all(employees.map(async (employee) => {
-        const state = await employee.profile(), bot = parseBotAvatar(state.avatar) || defaultBotAvatar(state.id);
-        return botAvatarPreset(bot.shape, bot.color);
-      })));
-      const available = BOT_AVATAR_SHAPES.flatMap((shape) => BOT_AVATAR_COLORS.map((color) => botAvatarPreset(shape.id, color.id))).filter((preset) => !used.has(preset));
+      const existing = await Promise.all(employees.map(async (employee) => {
+        const state = await employee.profile();
+        return resolvePixelAvatar(state.avatar, state.id);
+      }));
+      const usedPresets = new Set(existing.map((pixel) => pixelAvatarPreset(pixel.role, pixel.color)));
+      const usedRoles = new Set(existing.map((pixel) => pixel.role));
+      const freshRolePresets = PIXEL_AVATAR_ROLES
+        .filter((role) => !usedRoles.has(role.id))
+        .map((role) => pixelAvatarPreset(role.id, role.defaultColor))
+        .filter((preset) => !usedPresets.has(preset));
+      const available = freshRolePresets.length
+        ? freshRolePresets
+        : PIXEL_AVATAR_ROLES.flatMap((role) => PIXEL_AVATAR_COLORS.map((color) => pixelAvatarPreset(role.id, color.id))).filter((preset) => !usedPresets.has(preset));
       assert(available.length, "No unused avatar combination available");
       avatar = available[Math.floor(Math.random() * available.length)];
     }

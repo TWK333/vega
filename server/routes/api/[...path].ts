@@ -851,7 +851,7 @@ async function clientChat(op: string, a: Obj, userId: string, clientId?: string)
     }
     const group = await engine.groups.mine(user, id);
     if (receiptFor !== undefined) return receipt(group.session, receiptFor);
-    // 群聊作者头像是预设字符串（bot:shape:color），给面板解析成 BotAvatar；key 为 kind:id。
+    // 群聊作者头像是预设字符串（pixel:role:color 或旧 bot:shape:color），给面板解析成像素小人；key 为 kind:id。
     const view = await engine.groups.view(group, user);
     const authors = Object.fromEntries([
       ...(view.employees || []).map((p) => ["employee:" + p.id, { avatar: p.avatar || "" }]),

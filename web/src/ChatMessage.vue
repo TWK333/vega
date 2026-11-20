@@ -10,7 +10,6 @@ import StepOutput from "./StepOutput.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
 import { cleanTaskTitle } from "./conversation";
-import { MESSAGE_POSE } from "./bot-avatar.js";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
@@ -96,8 +95,8 @@ async function runExport(format) {
   <article class="chat-message" :class="[mine ? 'user' : 'assistant', { continued, authored: !!message.author }]" :data-message-seq="message.seq" tabindex="-1">
     <span v-if="!mine && continued" class="chat-avatar spacer" aria-hidden="true"></span>
     <span v-else-if="!mine" class="chat-avatar-wrap">
-      <button v-if="openAuthor" type="button" class="chat-avatar author-link" :aria-label="'打开和 ' + sender.name + ' 的聊天'" :title="'打开和 ' + sender.name + ' 的聊天'" @click="emit('author', sender.id)"><PressMention :name="sender.name" :disabled="!pressable" @press="emit('mention', $event)"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></PressMention></button>
-      <span v-else class="chat-avatar" aria-hidden="true"><UserAvatar v-if="sender.kind === 'user'" :user-id="sender.id" :name="sender.name" :avatar="sender.avatar" /><PressMention v-else :name="sender.name" :disabled="!pressable" @press="emit('mention', $event)"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" :pose="MESSAGE_POSE" /></PressMention></span>
+      <button v-if="openAuthor" type="button" class="chat-avatar author-link" :aria-label="'打开和 ' + sender.name + ' 的聊天'" :title="'打开和 ' + sender.name + ' 的聊天'" @click="emit('author', sender.id)"><PressMention :name="sender.name" :disabled="!pressable" @press="emit('mention', $event)"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" /></PressMention></button>
+      <span v-else class="chat-avatar" aria-hidden="true"><UserAvatar v-if="sender.kind === 'user'" :user-id="sender.id" :name="sender.name" :avatar="sender.avatar" /><PressMention v-else :name="sender.name" :disabled="!pressable" @press="emit('mention', $event)"><EmployeeAvatar :employee-id="sender.id" :name="sender.name" :avatar="sender.avatar" /></PressMention></span>
       <MoodWeather v-if="moodWeather && sender.kind === 'employee'" :weather="moodWeather" class="avatar-weather" />
     </span>
     <div class="chat-content">

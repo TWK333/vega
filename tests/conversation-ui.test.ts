@@ -464,6 +464,6 @@ test("chat avatars never animate; sidebar and header avatars animate only while 
   assert(app.includes("runningTasks: event.data.runningTasks"), "the sidebar row follows live task changes");
   const route = readFileSync("server/routes/api/[...path].ts", "utf8");
   assert(route.includes('runningTasks: s.tasks.filter((t) => t.status === "running").length'));
-  const avatar = readFileSync("web/src/BotAvatar.vue", "utf8");
+  const avatar = readFileSync("web/src/PixelAvatar.vue", "utf8");
   assert(avatar.includes("IntersectionObserver"), "off-screen avatars pause");
 });
