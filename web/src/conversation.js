@@ -29,10 +29,11 @@ export function employeeChatMessages(messages) {
     (message.role === "assistant" && !!(message.text?.trim() || message.images?.length)));
 }
 
-/** A bubble continues the previous one (no repeated avatar/name) inside one reply run of one author; deliveries, progress and group notices stand alone. */
+/** Consecutive non-notice messages from the same sender group visually without repeating avatar and name. */
 export function continuesPrevious(previous, message) {
-  const standalone = (m) => m.delivery || m.progress || m.notice;
-  return !!previous && previous.role !== "user" && message.role !== "user" && !standalone(previous) && !standalone(message) && previous.author?.id === message.author?.id;
+  if (!previous || !message || previous.notice || message.notice) return false;
+  if (previous.role !== message.role) return false;
+  return previous.author?.id === message.author?.id && previous.author?.kind === message.author?.kind;
 }
 
 export function chatCardVisibility(messages, taskStatus) {

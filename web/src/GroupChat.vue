@@ -48,7 +48,12 @@ const shown = computed(() => {
   const rows = mergeMessages(history.value?.olderReferences || [], messages.value).filter((m) => m.notice || m.text?.trim() || m.tasks?.length || m.images?.length || m.files?.length)
     .map((m) => m.author ? { ...m, author: { ...m.author, avatar: avatars.value.get(m.author.id) || "" } } : m);
   const cards = chatCardVisibility(rows, taskStatus.value);
-  return rows.map((message, index) => ({ message, continued: rows[index - 1]?.seq === message.seq - 1 && continuesPrevious(rows[index - 1], message), cards: cards[index] }));
+  const firstWindowSeq = messages.value[0]?.seq ?? Infinity;
+  return rows.map((message, index) => {
+    const previous = rows[index - 1];
+    const jumpedGap = previous && previous.seq < firstWindowSeq && message.seq >= firstWindowSeq && previous.seq !== message.seq - 1;
+    return { message, continued: !jumpedGap && continuesPrevious(previous, message), cards: cards[index] };
+  });
 });
 // 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
 const newFrom = ref(seenSeq(props.user?.id, props.groupId)), markGone = ref(false);
@@ -356,7 +361,7 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
               <template v-for="({ message, continued, cards }, index) in shown" :key="message.seq">
                 <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice" :data-message-seq="message.seq">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
+                <ChatMessage v-else :message="message" :continued="continued && !(newAt > 0 && index === newAt)" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
                 <span class="chat-avatar" aria-hidden="true"><PressMention :name="e.name" :disabled="readonly" @press="mentionMember"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></PressMention></span>

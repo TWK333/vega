@@ -86,7 +86,7 @@ async function runExport(format) {
       <div class="chat-heading">
         <button v-if="!mine && !continued && openAuthor" type="button" class="author-name" @click="emit('author', sender.id)">{{ sender.name }}</button>
         <strong v-else-if="!mine && !continued">{{ sender.name }}</strong>
-        <span v-if="!mine && sender.kind === 'user' && message.author" class="author-tag">用户</span>
+        <span v-if="!mine && !continued && sender.kind === 'user' && message.author" class="author-tag">用户</span>
         <time v-if="message.at">{{ shortTime(message.at) }}</time>
         <button v-if="source" type="button" class="chat-reply" :aria-label="replyLabel + '这条消息'" :title="replyLabel" @click="emit('quote', source)"><Icon name="reply" :size="13" /><span class="reply-label">{{ replyLabel }}</span></button>
         <button v-if="rememberable && !mine && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
@@ -126,23 +126,28 @@ async function runExport(format) {
         <p v-if="exportError" class="chat-export-error" role="alert">{{ exportError }}</p>
       </div>
     </div>
-    <span v-if="mine && message.author" class="chat-avatar" aria-hidden="true"><UserAvatar :user-id="message.author.id" :name="message.author.name" :avatar="message.author.avatar" /></span>
+    <span v-if="mine && message.author && continued" class="chat-avatar spacer" aria-hidden="true"></span>
+    <span v-else-if="mine && message.author" class="chat-avatar" aria-hidden="true"><UserAvatar :user-id="message.author.id" :name="message.author.name" :avatar="message.author.avatar" /></span>
   </article>
 </template>
 <style scoped>
-.chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; outline: none; }
+.chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 18px; min-width: 0; outline: none; }
 .chat-message.user { justify-content: flex-end; }
-/* Follow-up bubbles of one reply run sit tight under the first, without repeating avatar and name. */
-.chat-message.continued { margin-top: -10px; }
+/* Consecutive messages from the same sender pack tightly into one visual block while staying individual bubbles. */
+.chat-message.continued { margin-top: -12px; }
 .chat-avatar.spacer { height: 0; background: none; }
 .chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); overflow: hidden; border-radius: 12px; background: var(--accent-soft); color: var(--accent-text); font-size: 16px; font-weight: 600; }
 /* One shrinkable column: grid items default to an automatic minimum of their min-content width, so a single
    nowrap child (a long task title, URL or code line) would otherwise widen the track past the screen. */
-.chat-content { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; max-width: min(100% - var(--chat-avatar) - var(--chat-gap), 680px); }
+.chat-content { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; min-width: 0; max-width: min(100% - var(--chat-avatar) - var(--chat-gap), 680px); }
 .chat-content > * { min-width: 0; }
 .user .chat-content { justify-items: end; max-width: min(85%, 620px); }
 .user .chat-content > * { max-width: 100%; }
 .chat-heading { display: flex; align-items: center; gap: 8px; min-height: 20px; color: var(--muted); font-size: 11px; }
+.chat-message.continued .chat-heading { position: absolute; top: -13px; left: 8px; z-index: 2; min-height: 0; padding: 0 6px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); box-shadow: var(--sh-sm); line-height: 18px; white-space: nowrap; opacity: 0; pointer-events: none; transition: opacity .12s; }
+.chat-message.user.continued .chat-heading { left: auto; right: 8px; }
+.chat-message.continued:hover .chat-heading, .chat-message.continued:focus-within .chat-heading { opacity: 1; pointer-events: auto; }
+.chat-message.continued .chat-heading:empty { display: none; }
 .chat-heading strong { color: var(--text-2); font-size: 12px; font-weight: 600; }
 .author-tag { padding: 0 6px; border-radius: 999px; background: var(--surface-3); color: var(--muted); font-size: 11px; }
 .chat-send-status { color: var(--muted); font-size: 11px; }
@@ -150,11 +155,13 @@ async function runExport(format) {
 .chat-send-status .spinner { width: 11px; height: 11px; }
 .chat-send-status button { min-height: 28px; padding: 2px 4px; border: 0; background: transparent; color: var(--danger); font-size: 12px; }
 .chat-reply { gap: 3px; min-height: 20px; padding: 0 4px; border: 0; background: transparent; color: var(--muted); font-size: 11px; font-weight: 400; opacity: 0; }
-.chat-message:hover .chat-reply, .chat-reply:focus-visible { opacity: 1; }
+.chat-message:hover .chat-reply, .chat-message:focus-within .chat-reply, .chat-reply:focus-visible { opacity: 1; }
 .chat-reply:hover:not(:disabled) { background: var(--surface-2); color: var(--accent); }
 .chat-bubble { justify-self: start; min-width: 0; max-width: 100%; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
+.chat-message.continued .chat-bubble { border-radius: 8px 14px 14px 14px; }
 .user .chat-bubble { justify-self: end; }
 .user .chat-bubble { border-radius: 14px 4px 14px 14px; background: var(--accent-soft); color: #13254f; }
+.chat-message.user.continued .chat-bubble { border-radius: 14px 8px 14px 14px; }
 /* A colored bubble keeps its links and mentions readable instead of accent-blue on the same color. */
 .chat-bubble.tinted :deep(a), .chat-bubble.tinted :deep(.mention) { color: inherit; text-decoration: underline; }
 .chat-bubble.failed { background: var(--danger-soft); box-shadow: inset 3px 0 var(--danger); }
@@ -194,7 +201,8 @@ async function runExport(format) {
 .chat-bubble :deep(.markdown-body img) { max-width: 100%; max-height: 360px; height: auto; }
 @media (hover: none) { .chat-reply { opacity: .7; } .reply-label { display: none; } }
 @media (max-width: 767px) {
-  .chat-message { margin-bottom: 14px; }
+  .chat-message { margin-bottom: 16px; }
+  .chat-message.continued { margin-top: -10px; }
   .user .chat-content { max-width: 88%; }
   .chat-reply { min-height: 28px; padding: 0 6px; }
 }

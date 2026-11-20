@@ -258,7 +258,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         <template v-for="({ message, continued, cards }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
         <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
-        <ChatMessage v-else :message="message" :continued="continued" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :load-step-output="(seq, message) => loadStepOutput(api, `/employees/${employeeId}/chat`, seq, artifactSession, message)" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <ChatMessage v-else :message="message" :continued="continued && !(newAt > 0 && index === newAt)" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :load-step-output="(seq, message) => loadStepOutput(api, `/employees/${employeeId}/chat`, seq, artifactSession, message)" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         </template>
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>
@@ -298,8 +298,8 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
 .chat-older { display: grid; place-items: center; height: 32px; color: var(--faint); font-size: 11px; }
 .chat-older .spinner { width: 14px; height: 14px; }
 /* The typing row mirrors ChatMessage's assistant row (same avatar slot, heading and bubble) so the reply replaces it in place. */
-.chat-typing { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 16px; min-width: 0; }
-.chat-typing.continued { margin-top: -10px; }
+.chat-typing { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 18px; min-width: 0; }
+.chat-typing.continued { margin-top: -12px; }
 .chat-typing .chat-avatar.spacer { height: 0; background: none; }
 .chat-typing .chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); border-radius: 12px; background: var(--accent-soft); }
 .chat-typing .chat-content { display: grid; gap: 4px; min-width: 0; max-width: min(100% - var(--chat-avatar) - var(--chat-gap), 680px); }

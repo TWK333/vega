@@ -215,17 +215,28 @@ test("a reply appears when the persisted message is merged", async () => {
   assert.equal(state.running.value, false);
 });
 
-test("consecutive bubbles of one reply run do not repeat avatar and name; deliveries stand alone", async () => {
+test("consecutive messages from the same sender only show avatar and name once; sender changes and notices break the block", async () => {
   const state = mount(async () => ({ session: { id: "s" }, running: false, messages: [
     { seq: 1, role: "user", text: "work" },
-    { seq: 2, role: "assistant", text: "收到，先核对", calls: [{ id: "a", name: "employee_status" }] },
-    { seq: 3, role: "tool", callId: "a", text: "{}" },
-    { seq: 4, role: "assistant", text: "已安排" },
-    { seq: 5, role: "assistant", text: "**已交付**", delivery: true },
-    { seq: 6, role: "assistant", text: "进展", progress: true },
+    { seq: 2, role: "user", text: "more detail" },
+    { seq: 3, role: "assistant", text: "收到，先核对", calls: [{ id: "a", name: "employee_status" }] },
+    { seq: 4, role: "tool", callId: "a", text: "{}" },
+    { seq: 5, role: "assistant", text: "已安排" },
+    { seq: 6, role: "assistant", text: "进展 1", progress: true },
+    { seq: 7, role: "assistant", text: "**已交付**", delivery: true },
+    { seq: 8, role: "assistant", notice: true, text: "已开启新任务" },
+    { seq: 9, role: "assistant", text: "新进展", progress: true },
   ] }));
   await state.refresh();
-  assert.deepEqual(Array.from(state.displayed.value, (row: any) => [row.message.seq, row.continued]), [[1, false], [2, false], [4, true], [5, false], [6, false]]);
+  assert.deepEqual(Array.from(state.displayed.value, (row: any) => [row.message.seq, row.continued]), [
+    [1, false], [2, true], [3, false], [5, true], [6, true], [7, true], [8, false], [9, false],
+  ]);
+  const e1 = { kind: "employee", id: "e1", name: "情报开发" }, e2 = { kind: "employee", id: "e2", name: "测试" };
+  const u1 = { kind: "user", id: "u1", name: "张三" }, u2 = { kind: "user", id: "u2", name: "李四" };
+  assert.equal(continuesPrevious({ role: "assistant", author: e1, progress: true }, { role: "assistant", author: e1, progress: true }), true);
+  assert.equal(continuesPrevious({ role: "assistant", author: e1, progress: true }, { role: "assistant", author: e2, progress: true }), false);
+  assert.equal(continuesPrevious({ role: "user", author: u1 }, { role: "user", author: u1 }), true);
+  assert.equal(continuesPrevious({ role: "user", author: u1 }, { role: "user", author: u2 }), false);
 });
 
 test("a delayed history response cannot clear a newer typing state", async () => {
