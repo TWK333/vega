@@ -3,6 +3,8 @@ import type { Tool } from "./provider";
 import type { Obj } from "./util";
 import { omittable } from "./tool-args";
 
+export const STEP_OUTPUT_RULE = "只有已有可独立使用的成果，或用户明确要求单独导出该内容时，才填写 stepOutput。验证类产物须有具体结论和可核对的证据（截图、实测数据或测试输出等），不只说‘已验证’。续做记录、处理范围、分支状态和排查进度等过程信息默认只写 message，省略 stepOutput；完成步骤不等于要交产物，不逐步凑数。";
+
 /**
  * Model-facing tools are narrow, per-purpose schemas. Each one maps onto the existing internal
  * chrome / employee executors (the employee executor also owns each employee's vault), so runtime behaviour (observations, receipts, permissions,
@@ -160,7 +162,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
   }
   if (task) {
     out.push(tool("task_progress",
-      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；同一步骤推进时保持 content 原文不变、只改 status，执行细节写 message（改写已有步骤 content 会触发交付前全量 outlineReview）。计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、工作原则和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。步骤需要交付成果时用 stepOutput 保存为独立产物，正文和文件不混入对话消息；不新建任务或会话、不结束本轮，最终仍需 task_complete。回执 outlineReviewRequired=true 时，首次交付就逐项复核 changedSteps，不要空提等驳回。",
+      "保存当前任务的进度：message 是一句进度（≤200 字），plan 是完整计划（1–50 步，每步 content + status，总计 ≤8000 字，整体替换旧计划）。首次执行前提交完整计划并写明交付类型；同一步骤推进时保持 content 原文不变、只改 status，执行细节写 message（改写已有步骤 content 会触发交付前全量 outlineReview）。计划可以拆分、合并、改写或删除中间步骤，但必须覆盖原始任务、工作原则和用户最新明确要求。只有真实验证成功才标 completed，受阻标 blocked；用户明确放弃的要求标 cancelled。不要把 task_complete 本身列入计划。stepOutput 仅用于独立交付，不能代替进度记录；正文和文件不混入对话消息。不新建任务或会话、不结束本轮，最终仍需 task_complete。回执 outlineReviewRequired=true 时，首次交付就逐项复核 changedSteps，不要空提等驳回。",
       { message: str("当前进度，1–200 字", { minLength: 1, maxLength: 200 }),
         plan: { type: "array", minItems: 1, maxItems: 50, description: "完整计划，包括未来步骤", items: obj({
           content: str("步骤描述，1–500 字", { minLength: 1, maxLength: 500 }),
@@ -172,7 +174,7 @@ export function employeeTools(ctx: ToolContext): Tool[] {
           text: str("可选：产物的完整 Markdown 内容，不写进对话正文", { minLength: 1, maxLength: 64000 }),
           ref: int("可选：已写出的产物正文消息编号，或包含 textRef 的工具回执编号；与 text 二选一", { minimum: 1 }),
           paths: { type: "array", minItems: 1, maxItems: 16, items: str("当前工作区内的产物文件路径", { minLength: 1, maxLength: 4096 }), description: "可选：本步骤生成的文件，系统读取并保存快照供用户下载；只接受当前执行端工作区内的普通文件，单个不超过 25MiB、合计不超过 64MiB。不要包含凭据。" },
-        }, ["step"], "只有要交独立步骤产物才填写；仅更新进度或已有最终报告时省略。文本填 text，文件填 paths，已有正文用 ref；相同产物不重复发送。系统单独展示并允许导出，每任务最多 50 条。草稿、未执行或未验证项须如实说明。") },
+        }, ["step"], `${STEP_OUTPUT_RULE} 明确填写 text、paths 或正文 ref；系统单独展示并允许导出。已交付的产物不重复发送，已有最终报告覆盖的内容除非明确要求单独导出，否则省略。每任务最多 50 条。草稿、未执行或未验证项须如实说明。`) },
       ["message"]));
     out.push(tool("task_reschedule",
       "把当前任务整体改到以后再继续（例如用户要求晚点或明天再处理、要等的时间点还没到）：runAt 或 delayMinutes 二选一。任务转为延后并立即结束本轮，到时在原会话续做。只改本任务自己；在等已提交的外部作业结果、需要记下恢复点时用 task_wait。用户说清的时刻或周期由系统记在同一条任务上。",

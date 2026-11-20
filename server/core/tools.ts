@@ -521,6 +521,14 @@ export class Tools {
     if (split) {
       const { _after, ...publicArgs } = call.arguments || {};
       rest = publicArgs;
+      if (call.name === "task_progress" && rest.stepOutput) {
+        const output = rest.stepOutput;
+        // Unused provider placeholders must not turn same-reply progress prose into an artifact.
+        if (Number.isInteger(output.step) && output.step >= 0 && output.step <= 50 &&
+            Object.keys(output).every(k => ["step", "text", "paths", "ref"].includes(k)) &&
+            (output.text == null || (typeof output.text === "string" && output.text.length <= 64000 && !output.text.trim())) &&
+            (output.ref == null || output.ref === 0) && (output.paths == null || (Array.isArray(output.paths) && !output.paths.length))) delete rest.stepOutput;
+      }
       // 桌面动作先归一弱模型的等价写法（别名/字符串坐标），再拿窄 schema 严格校验其余部分。
       const incoming = APPUSE_TOOLS.has(call.name) && Array.isArray(rest.actions)
         ? { ...rest, actions: rest.actions.map(normalizeDesktopAction) }
