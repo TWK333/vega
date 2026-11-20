@@ -121,6 +121,91 @@ test("MCP revalidation ignores nested object key order but preserves array order
   assert.equal(requests.filter((q) => q.method === "tools/call").length, 1);
 });
 
+test("MCP ignores only TAPD catalog order, not its contents or the rest of the definition", async (t) => {
+  const a = "  - stories_get: 查询需求", b = "  - comments_get: 查询评论  ";
+  const description = (rows: string[], footer = "返回参数结构。") =>
+    ["请先确认所需工具。", "", "**所有可用工具：**", ...rows, "", `**返回内容**：${footer}`].join("\n");
+  const describe = { op: "describe", server: "svc", tool: "lookup_tool_param_schema" }, call = { ...describe, op: "call" };
+  const original = { ...tool, name: describe.tool, description: description([a, b]) };
+  let remote = original;
+  const { mcp, requests } = await fixture(t, (q) => {
+    if (q.method === "tools/list") return { tools: [remote] };
+    if (q.method === "tools/call") return { content: [{ type: "text", text: "ok" }] };
+  });
+  assert.equal((await mcp.execute(describe)).description, original.description);
+  remote = { ...original, description: description([b, a]) };
+  assert.equal((await mcp.execute(call)).content[0].text, "ok");
+  for (const def of [
+    { ...original, description: description([b, a + "和缺陷"]) },
+    { ...original, description: description([b]) },
+    { ...original, description: description([b, a], "返回完整数据。") },
+    { ...original, description: description([b, a]), inputSchema: { ...tool.inputSchema, required: ["id"] } },
+  ]) {
+    remote = def;
+    await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
+  }
+  const dup = a + "列表";
+  remote = { ...original, description: description([a, dup]) };
+  await mcp.execute(describe);
+  remote = { ...original, description: description([dup, a]) };
+  await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
+  assert.equal(requests.filter((q) => q.method === "tools/call").length, 1);
+});
+
+test("MCP discovery to call needs no describe; refs bind the reviewed tool, definition and connection", async (t) => {
+  let note = "Look up a book";
+  const respond = (q: any) => {
+    if (q.method === "tools/list") return { tools: [{ ...tool, description: note }, { ...tool, name: "other" }] };
+    if (q.method === "tools/call") return { content: [{ type: "text", text: "ok" }] };
+  };
+  const { mcp, requests } = await fixture(t, respond);
+  const list = { op: "list", server: "svc" }, call = { op: "call", server: "svc", tool: "lookup" };
+  const [row] = (await mcp.execute(list)).tools;
+  assert.deepEqual(row.definition.inputSchema, tool.inputSchema);
+  assert.equal(row.definition.description, note);
+  await assert.rejects(mcp.execute(call), /requires successful describe/); // Guessing without seeing the result is not enough.
+  const reviewed = { ...call, definitionRef: row.definitionRef, arguments: { search: "novel" } };
+  assert.equal((await mcp.execute(reviewed)).content[0].text, "ok");
+  assert.deepEqual(requests.filter((q) => q.method.startsWith("tools/")).map((q) => q.method), ["tools/list", "tools/list", "tools/call"]);
+  assert.deepEqual(requests.at(-1).params.arguments, { search: "novel" });
+  await assert.rejects(mcp.execute(reviewed, true), /allowlist/);
+  await assert.rejects(mcp.execute({ ...reviewed, tool: "other" }), preflightBlocked("definition_changed"));
+  const other = await fixture(t, respond);
+  await other.mcp.execute(list);
+  await assert.rejects(other.mcp.execute(reviewed), preflightBlocked("definition_changed"));
+  assert(!other.requests.some((q) => q.method === "tools/call"));
+  note = `New scope ${credential}`;
+  let nextRef: string | undefined;
+  await assert.rejects(mcp.execute(reviewed), (error: unknown) => {
+    preflightBlocked("definition_changed")(error);
+    assert(error instanceof MCPFailure);
+    assert(!JSON.stringify(error.diagnostic).includes(credential));
+    assert.match(error.diagnostic.definition.description, /credential redacted/);
+    nextRef = error.diagnostic.definitionRef;
+    assert(nextRef && nextRef !== reviewed.definitionRef);
+    return true;
+  });
+  assert.equal(requests.filter((q) => q.method === "tools/call").length, 1);
+  await mcp.execute({ ...reviewed, definitionRef: nextRef });
+  assert.equal(requests.filter((q) => q.method === "tools/call").length, 2);
+});
+
+test("MCP discovery keeps oversized rows as summaries and returns paged refs only with full definitions", async (t) => {
+  const { mcp } = await fixture(t, (q) => q.method === "tools/list"
+    ? { tools: [{ ...tool, name: "big", description: "x".repeat(16000) }, tool] }
+    : q.method === "tools/call" ? { content: [] } : undefined);
+  const list = { op: "list", server: "svc", limit: 1 }, first = await mcp.execute(list);
+  assert(first.nextCursor && first.tools[0].name === "big");
+  assert.equal(first.tools[0].definitionRef, undefined);
+  assert.equal(first.tools[0].definition, undefined);
+  await assert.rejects(mcp.execute({ op: "call", server: "svc", tool: "big" }), /requires successful describe/);
+  const second = await mcp.execute({ ...list, cursor: first.nextCursor });
+  assert.equal(second.moreAvailable, false);
+  const row = second.tools[0];
+  assert.equal(row.definition.name, "lookup");
+  await mcp.execute({ op: "call", server: "svc", tool: row.name, definitionRef: row.definitionRef });
+});
+
 test("MCP tells missing tools apart from stale describe records and changed connections", async (t) => {
   let tools = [tool];
   let duringList: (() => void) | undefined;

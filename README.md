@@ -201,7 +201,7 @@ WS连接先通过带CSRF校验的POST取得15秒有效、一次性且绑定当�
 
 ### MCP 和技能
 
-- MCP 配置为 `{"server": {"command":"node", "args":["server.js"], "env":{}}}` 或 `{"server":{"url":"https://example/mcp","headers":{}}}`。先 list → describe → call；定义变化须重新 describe。只读模式须由用户配置本地 `readOnlyTools` 允许列表，远端 `readOnlyHint` 不是授权。
+- MCP 配置为 `{"server": {"command":"node", "args":["server.js"], "env":{}}}` 或 `{"server":{"url":"https://example/mcp","headers":{}}}`。已知服务名时直接 `list(server)`；核对条目中的完整 `definition` 后，用其 `definitionRef` 和工具名 `call`。没有完整定义时仍走 `describe → call`。每次调用前复核原始定义；变化时不执行，须核对回执中的新定义，或重新 `describe`。只读模式须由用户配置本地 `readOnlyTools` 允许列表，远端 `readOnlyHint` 不是授权。
 - 不提供独立图片生成/改图服务。聊天附图、视觉模型、read图片和Chrome截图不受影响；旧图片服务配置不再使用，历史图片保留。
 - 技能在设置页选择本地ZIP上传，不需要填写服务器目录；**正文和附属脚本/参考资源一起存入SQLite**，同名覆盖须确认。运行时按内容摘要物化可再生缓存，不自动运行导入脚本；拒绝目录穿越、链接和超限资源。原服务端目录/ZIP/SKILL.md导入API与`VEGA_SKILLS_DIR`仍保留供已有部署兼容，不在界面暴露目录配置。先展示元数据，按需读取正文，支持`/skill:name`。
 用户点名的定时和任务的 `nextAt` 统一按**北京时间 Asia/Shanghai**解释，列表日期也按北京时间显示；牛马自身无工作时段限制。旧职责配置不再保留，也不会再触发；旧星轨数据保留，但不再因此开工。

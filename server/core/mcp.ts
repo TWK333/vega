@@ -1,3 +1,4 @@
+import { createHmac, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -8,9 +9,22 @@ import type { CloudRuntime } from "./cloud";
 type Operation = "list" | "describe" | "call";
 type Step = { stage: "initialize" | "revalidate" | Operation; cursor?: boolean; sent?: boolean };
 
-// Compare the original wire definition, ignoring only JSON object key order (not array order).
-const definitionFingerprint = (definition: Obj) => JSON.stringify(definition, (_, value) =>
-  value && typeof value === "object" && !Array.isArray(value)
+// TAPD emits this catalog in varying order; compare its entries, not their positions.
+const normalizeTapdCatalog = (description: string) => description.replace(
+  /^(\*\*所有可用工具：\*\*\n)((?:  - [a-z0-9_]+: [^\r\n]+\n)+)(?=\n\*\*返回内容\*\*：)/m,
+  (section, heading: string, catalog: string) => {
+    const rows = catalog.slice(0, -1).split("\n");
+    if (new Set(rows.map((row) => row.slice(4, row.indexOf(":")))).size !== rows.length) return section;
+    return heading + rows.sort().join("\n") + "\n";
+  },
+);
+
+// Compare the original wire definition, preserving array order and all other description text.
+const definitionFingerprint = (definition: Obj) => JSON.stringify(
+  definition.name === "lookup_tool_param_schema" && typeof definition.description === "string"
+    ? { ...definition, description: normalizeTapdCatalog(definition.description) }
+    : definition,
+  (_, value) => value && typeof value === "object" && !Array.isArray(value)
     ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]))
     : value,
 );
@@ -38,6 +52,18 @@ export class MCP {
   private readonly connecting = new Map<string, Promise<Client>>();
   readonly described = new Map<string, Map<string, string>>();
   private readonly pages = new Map<string, Page>();
+  private readonly reviewKeys = new WeakMap<Client, Buffer>();
+  // A ref proves this exact definition was returned on this connection; listing and guessing a call in the same batch is not enough.
+  private definitionRef(client: Client, fingerprint: string) {
+    let key = this.reviewKeys.get(client);
+    if (!key) this.reviewKeys.set(client, key = randomBytes(32));
+    return createHmac("sha256", key).update(fingerprint).digest("base64url");
+  }
+  private review(client: Client, def: Obj, budget: number) {
+    if (Buffer.byteLength(JSON.stringify(def)) > budget) return;
+    const review = { definition: this.safe(def), definitionRef: this.definitionRef(client, definitionFingerprint(def)) };
+    if (Buffer.byteLength(JSON.stringify(review)) <= budget) return review;
+  }
   private readonly lifetime = new AbortController();
   private readonly mask?: RegExp;
   constructor(
@@ -224,7 +250,9 @@ export class MCP {
     if (a.op === "call") {
       assert(typeof a.tool === "string" && a.tool, "MCP tool name required");
       const grant = this.described.get(name)?.get(a.tool), connected = this.connections.get(name);
-      assert(grant && connected, "MCP call requires successful describe on the current configuration and connection");
+      const ref = a.definitionRef;
+      assert(ref === undefined || (typeof ref === "string" && /^[A-Za-z0-9_-]{43}$/.test(ref)), "Invalid MCP definitionRef; copy it from the current discovery result");
+      assert(connected && (ref || grant), "MCP call requires successful describe or a definitionRef from list on the current configuration and connection; call was not executed");
       const allowlist = this.config[name].readOnlyTools;
       assert(!readOnly || (Array.isArray(allowlist) && allowlist.includes(a.tool)), "Tool not in local read-only allowlist; annotations are not authorization");
       const started = Date.now();
@@ -237,11 +265,20 @@ export class MCP {
         const { def, budgetExhausted } = await this.definition(client, a.tool, options, step);
         options.signal.throwIfAborted();
         if (this.connections.get(name) !== client) throw blocked("connection_changed", "connection changed");
-        if (this.described.get(name)?.get(a.tool) !== grant) throw blocked("describe_changed", "describe record changed");
+        if (!ref && this.described.get(name)?.get(a.tool) !== grant) throw blocked("describe_changed", "describe record changed");
         if (!def) throw budgetExhausted
           ? blocked("discovery_budget_exhausted", "tool not found within 32-page revalidation budget")
           : blocked("tool_not_found", "tool no longer listed by the server");
-        if (definitionFingerprint(def) !== grant) throw blocked("definition_changed", "tool definition changed");
+        const fingerprint = definitionFingerprint(def);
+        if (ref ? this.definitionRef(client, fingerprint) !== ref : fingerprint !== grant) {
+          const error = blocked("definition_changed", "tool definition or its review reference changed");
+          const review = this.review(client, def, 12 * 1024);
+          if (review) {
+            Object.assign(error.diagnostic, review);
+            error.message = "MCP definition does not match the reviewed version; call was not executed. Review diagnostic.definition before any new call with diagnostic.definitionRef.";
+          }
+          throw error;
+        }
         step.stage = "call";
         step.sent = true;
         return await client.callTool({ name: a.tool, arguments: object(a.arguments) }, undefined, options);
@@ -259,8 +296,14 @@ export class MCP {
       if (!page.rows.length) {
         const result = await client.listTools({ cursor: page.remote }, options);
         page.remote = result.nextCursor;
+        // Bound inline schemas per remote page, including the rows held for local pagination.
+        let budget = 16 * 1024;
         page.rows = result.tools.filter((tool) => !query || (tool.name + " " + tool.description).toLowerCase().includes(query))
-          .map((tool) => ({ name: tool.name, description: clip(this.text(tool.description || ""), 300) }));
+          .map((tool) => {
+            const review = this.review(client, tool, Math.min(budget, 12 * 1024));
+            if (review) budget -= Buffer.byteLength(JSON.stringify(review));
+            return { name: this.text(tool.name), description: clip(this.text(tool.description || ""), 300), ...review };
+          });
       }
       return page;
     }, saved?.client);
@@ -272,6 +315,6 @@ export class MCP {
       if (this.pages.size >= 128) this.pages.delete(this.pages.keys().next().value!);
       this.pages.set(nextCursor, page);
     }
-    return { tools: tools.map((tool) => ({ ...tool, name: this.text(tool.name) })), nextCursor, moreAvailable: !!nextCursor };
+    return { tools, nextCursor, moreAvailable: !!nextCursor };
   }
 }
