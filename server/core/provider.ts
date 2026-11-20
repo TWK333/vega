@@ -523,7 +523,7 @@ export class Providers {
   checkpoints = new Map<string, Checkpoint>();
   // Retain only runtime insertions, not canonical history or tool results; resets also refresh the current snapshot.
   private dynamics = new Map<string, { at: number; snapshots: Map<string, Message[]> }>();
-  dynamicPrompt(session: string, messages: Message[], text: string, notice = "") {
+  dynamicPrompt(session: string, messages: Message[], text: string, notice = "", mcpCatalog?: string) {
     const now = performance.now();
     for (const [key, value] of this.dynamics) if (now - value.at > 1800000) this.dynamics.delete(key);
     let current = this.dynamics.get(session);
@@ -532,7 +532,7 @@ export class Providers {
       if (this.dynamics.size > 64) this.dynamics.delete(this.dynamics.keys().next().value!);
     }
     current.at = now;
-    return attachDynamic(messages, text, current.snapshots, notice);
+    return attachDynamic(messages, text, current.snapshots, notice, mcpCatalog);
   }
   // Injected by the engine: resolves {mime,blobId|path} -> {mime,data:base64} lazily,
   // only for images that survived history trimming.

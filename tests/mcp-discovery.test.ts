@@ -8,7 +8,7 @@ const tool = { name: "lookup", inputSchema: { type: "object" } };
 const credential = "test-only-literal-auth";
 const querySecret = "test-only-url-param";
 const envSecret = "test-only-expanded-env";
-async function fixture(t: import("node:test").TestContext, respond: (q: any) => any, envHeader = false) {
+async function fixture(t: import("node:test").TestContext, respond: (q: any) => any, envHeader = false, readOnlyTools: string[] = []) {
   const requests: any[] = [];
   const server = createServer(async (req, res) => {
     if (req.method !== "POST") { res.writeHead(405).end(); return; }
@@ -27,7 +27,7 @@ async function fixture(t: import("node:test").TestContext, respond: (q: any) => 
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp?token=${querySecret}`;
-  const mcp = new MCP({ svc: { url, headers: { Authorization: `Bearer ${credential}`, ...(envHeader ? { "x-extra": "prefix-{env:VEGA_TEST_MCP_TOKEN}" } : {}) }, requestTimeoutMs: 1500 } }, process.cwd());
+  const mcp = new MCP({ svc: { url, readOnlyTools, headers: { Authorization: `Bearer ${credential}`, ...(envHeader ? { "x-extra": "prefix-{env:VEGA_TEST_MCP_TOKEN}" } : {}) }, requestTimeoutMs: 1500 } }, process.cwd());
   t.after(async () => { await mcp.close(); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); });
   return { mcp, requests };
 }
@@ -63,6 +63,7 @@ test("MCP never replays pagination, the call preflight, or a call with an unknow
   fail = undefined;
   await mcp.execute(describe);
   fail = "preflight";
+  await notifyChange(mcp);
   await assert.rejects(mcp.execute(call), (e: MCPFailure) => e.diagnostic?.attempts === 1 && !e.diagnostic.sideEffectsPossible);
   assert(!requests.some((q) => q.method === "tools/call"));
   fail = undefined;
@@ -89,9 +90,15 @@ test("MCP redacts literal and expanded secrets, but revalidates the original sch
     assert.match(json, /credential redacted/);
   }
   echo = `Bearer ${credential}`; // Same public masked description, different raw definition.
+  await notifyChange(mcp);
   await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
   assert.equal(requests.filter((q) => q.method === "tools/call").length, 1);
 });
+
+async function notifyChange(mcp: MCP) {
+  mcp.connections.get("svc")!.transport!.onmessage!({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+  await new Promise<void>(resolve => setImmediate(resolve));
+}
 
 const preflightBlocked = (kind: string) => (error: unknown) => {
   assert(error instanceof MCPFailure);
@@ -115,8 +122,10 @@ test("MCP revalidation ignores nested object key order but preserves array order
   const describe = { op: "describe", server: "svc", tool: "lookup" }, call = { ...describe, op: "call" };
   await mcp.execute(describe);
   reordered = true;
+  await notifyChange(mcp);
   assert.equal((await mcp.execute(call)).content[0].text, "ok");
   choices.reverse();
+  await notifyChange(mcp);
   await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
   assert.equal(requests.filter((q) => q.method === "tools/call").length, 1);
 });
@@ -134,6 +143,7 @@ test("MCP ignores only TAPD catalog order, not its contents or the rest of the d
   });
   assert.equal((await mcp.execute(describe)).description, original.description);
   remote = { ...original, description: description([b, a]) };
+  await notifyChange(mcp);
   assert.equal((await mcp.execute(call)).content[0].text, "ok");
   for (const def of [
     { ...original, description: description([b, a + "和缺陷"]) },
@@ -142,12 +152,15 @@ test("MCP ignores only TAPD catalog order, not its contents or the rest of the d
     { ...original, description: description([b, a]), inputSchema: { ...tool.inputSchema, required: ["id"] } },
   ]) {
     remote = def;
+    await notifyChange(mcp);
     await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
   }
   const dup = a + "列表";
   remote = { ...original, description: description([a, dup]) };
+  await notifyChange(mcp);
   await mcp.execute(describe);
   remote = { ...original, description: description([dup, a]) };
+  await notifyChange(mcp);
   await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
   assert.equal(requests.filter((q) => q.method === "tools/call").length, 1);
 });
@@ -166,7 +179,7 @@ test("MCP discovery to call needs no describe; refs bind the reviewed tool, defi
   await assert.rejects(mcp.execute(call), /requires successful describe/); // Guessing without seeing the result is not enough.
   const reviewed = { ...call, definitionRef: row.definitionRef, arguments: { search: "novel" } };
   assert.equal((await mcp.execute(reviewed)).content[0].text, "ok");
-  assert.deepEqual(requests.filter((q) => q.method.startsWith("tools/")).map((q) => q.method), ["tools/list", "tools/list", "tools/call"]);
+  assert.deepEqual(requests.filter((q) => q.method.startsWith("tools/")).map((q) => q.method), ["tools/list", "tools/call"]);
   assert.deepEqual(requests.at(-1).params.arguments, { search: "novel" });
   await assert.rejects(mcp.execute(reviewed, true), /allowlist/);
   await assert.rejects(mcp.execute({ ...reviewed, tool: "other" }), preflightBlocked("definition_changed"));
@@ -175,6 +188,7 @@ test("MCP discovery to call needs no describe; refs bind the reviewed tool, defi
   await assert.rejects(other.mcp.execute(reviewed), preflightBlocked("definition_changed"));
   assert(!other.requests.some((q) => q.method === "tools/call"));
   note = `New scope ${credential}`;
+  await notifyChange(mcp);
   let nextRef: string | undefined;
   await assert.rejects(mcp.execute(reviewed), (error: unknown) => {
     preflightBlocked("definition_changed")(error);
@@ -206,6 +220,49 @@ test("MCP discovery keeps oversized rows as summaries and returns paged refs onl
   await mcp.execute({ op: "call", server: "svc", tool: row.name, definitionRef: row.definitionRef });
 });
 
+test("MCP discovery budget favors compact definitions without changing list order", async (t) => {
+  const reference = { ...tool, name: "syntax_reference", description: "x".repeat(11000) };
+  const schema = { ...tool, name: "lookup_tool_param_schema", description: "x".repeat(6200) };
+  const proxy = { ...tool, name: "proxy_execute_tool", description: "x".repeat(1200) };
+  const { mcp, requests } = await fixture(t, (q) => q.method === "tools/list"
+    ? { tools: [reference, schema, proxy] }
+    : q.method === "tools/call" ? { content: [] } : undefined);
+  const list = { op: "list", server: "svc" };
+  const { tools } = await mcp.execute(list);
+  assert.deepEqual(tools.map((row: any) => row.name), [reference.name, schema.name, proxy.name]);
+  assert.equal(tools[0].definitionRef, undefined);
+  for (const [i, def] of [schema, proxy].entries()) {
+    const row = tools[i + 1];
+    assert.deepEqual(row.definition, def);
+    await mcp.execute({ op: "call", server: "svc", tool: row.name, definitionRef: row.definitionRef });
+  }
+  assert.deepEqual(requests.filter((q) => q.method.startsWith("tools/")).map((q) => q.method),
+    ["tools/list", "tools/call", "tools/call"]);
+  const first = await mcp.execute({ ...list, limit: 1 });
+  assert.deepEqual(first.tools[0].definition, reference);
+});
+
+test("a named MCP server warms once; reviewed reads skip remote preflight until list_changed", async (t) => {
+  let note = "original";
+  const { mcp, requests } = await fixture(t, q => q.method === "tools/list"
+    ? { tools: [{ ...tool, description: note + credential }] }
+    : q.method === "tools/call" ? { content: [] } : undefined, false, [tool.name]);
+  await mcp.warmMentioned("unrelated task");
+  assert.equal(requests.length, 0);
+  await Promise.all([mcp.warmMentioned("use svc MCP"), mcp.warmMentioned("use svc MCP")]);
+  const [row] = mcp.catalogPreview(true);
+  assert(!JSON.stringify(row).includes(credential));
+  const call = { op: "call", server: "svc", tool: tool.name, definitionRef: row.definitionRef };
+  await mcp.execute(call, true);
+  await mcp.execute(call, true);
+  assert.equal(requests.filter(q => q.method === "tools/list").length, 1);
+  note = "changed";
+  await notifyChange(mcp);
+  assert.deepEqual(mcp.catalogPreview(true), []);
+  await assert.rejects(mcp.execute(call, true), preflightBlocked("definition_changed"));
+  assert.equal(requests.filter(q => q.method === "tools/call").length, 2);
+});
+
 test("MCP tells missing tools apart from stale describe records and changed connections", async (t) => {
   let tools = [tool];
   let duringList: (() => void) | undefined;
@@ -219,13 +276,16 @@ test("MCP tells missing tools apart from stale describe records and changed conn
   await assert.rejects(mcp.execute({ ...describe, tool: "missing" }), /not found on this server.*op="list"/);
   await mcp.execute(describe);
   tools = [];
+  await notifyChange(mcp);
   await assert.rejects(mcp.execute(call), preflightBlocked("tool_not_found"));
   tools = [tool];
+  await notifyChange(mcp);
   duringList = () => { mcp.described.delete("svc"); };
   await assert.rejects(mcp.execute(call), preflightBlocked("describe_changed"));
   duringList = undefined;
   await mcp.execute(describe);
   const client = mcp.connections.get("svc")!;
+  await notifyChange(mcp);
   duringList = () => { mcp.connections.delete("svc"); };
   try {
     await assert.rejects(mcp.execute(call), preflightBlocked("connection_changed"));

@@ -72,6 +72,19 @@ test("runtime snapshots stay isolated per session and refresh when continuation 
   assert.equal(provider.dynamicPrompt("bob", rows, "CHANGED").at(-1)?.text, "BOB");
 });
 
+test("MCP catalog changes are appended once after tool results without rewriting the sent prefix", () => {
+  const provider = new Providers(), user: Message = { seq: 1, role: "user", text: "/skill:demo" };
+  const first = provider.dynamicPrompt("s", [user], "selected skill body", "", "catalog A");
+  const call: Message = { seq: 2, role: "assistant", calls: [{ id: "x", name: "mcp", arguments: {} }] };
+  const result: Message = { seq: 3, role: "tool", callId: "x", text: "ok" };
+  const rows = [user, call, result];
+  const next = provider.dynamicPrompt("s", rows, "changed skill body", "", "catalog B");
+  assert.deepEqual(next.slice(0, first.length + 2), [...first, call, result]);
+  assert.equal(next.at(-1)?.text, "catalog B");
+  assert.deepEqual(provider.dynamicPrompt("s", rows, "ignored", "", "catalog B"), next);
+  assert.match(provider.dynamicPrompt("s", rows, "ignored", "", "").at(-1)!.text!, /没有可复用/);
+});
+
 test("cwd, skills, memories and execution location stay out of the stable system prefix", async () => {
   const store = await Store.open(":memory:");
   try {

@@ -61,16 +61,8 @@ async function regular(path: string, max: number, cloud?: CloudRuntime) {
 }
 export async function loadSkills(config: Config, store: Store, cwd: string, cloud?: CloudRuntime) {
   const skills: Obj[] = [];
-  for (const skill of await store.objects<any>(skillKind(config.employeeId))) {
-    const entry = await materializeSkill(store, skill, cloud);
-    skills.push({
-      id: skill.id,
-      name: skill.name,
-      description: skill.description,
-      ...entry,
-      path: config.employeeId ? "sqlite:skill/" + skill.id : entry.path,
-    });
-  }
+  for (const { id, name, description } of await store.objects<Obj>(skillKind(config.employeeId)))
+    skills.push({ id, name, description, path: "sqlite:skill/" + id });
   for (const item of config.skills || []) {
     if (item.path) {
       const path = resolve(cwd, item.path),
@@ -106,15 +98,31 @@ export async function loadSkills(config: Config, store: Store, cwd: string, clou
     ...new Map(skills.reverse().map((skill) => [skill.name, skill])).values(),
   ].sort((a, b) => a.name.localeCompare(b.name));
 }
-export function expandSkillCommand(text: string, skills: Obj[]) {
-  const tag = /^\[m\d+\]\s*/.exec(text)?.[0] || "";
-  const match = /^\s*\/skill:([^\s]+)\s*([\s\S]*)$/.exec(
-    text.slice(tag.length),
-  );
-  if (!match) return text;
-  const skill = skills.find((s) => s.name === match[1]);
-  if (!skill) return text;
-  return `${tag}请使用 ${skill.name} 技能。先用 read 阅读技能文件 ${skill.path}，再按其流程完成授权任务。${skill.resourceRoot ? "\n附属资源目录：" + skill.resourceRoot + "（相对脚本/参考文件均基于此目录；不要误用会话工作目录）" : ""}\n任务：${match[2]}`;
+export async function selectedSkillPrompt(text: string, skills: Obj[], store: Store, employeeId?: string, cloud?: CloudRuntime) {
+  const input = text.replace(/^\[m\d+\]\s*/, "");
+  const selected = /^\s*\/skill:([^\s]+)/.exec(input)?.[1];
+  const names = selected ? [selected] : [...new Set([...input.matchAll(/(?:^|\s)\$([\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)*)/gu)]
+    .map(match => match[1]).filter(name => skills.some(s => s.name === name)))];
+  if (!names.length) return "";
+  let remaining = 16 << 10;
+  const prompts: string[] = [];
+  for (const name of names) {
+    const skill = skills.find(s => s.name === name);
+    if (!skill) { prompts.push(`用户点名的技能 ${JSON.stringify(name)} 不在当前技能索引中。不要猜路径。`); continue; }
+    const header = `用户点名的技能 ${JSON.stringify(name)}（不扩大授权）：${JSON.stringify(skill.path)}`;
+    const stored = skill.id && skill.path === "sqlite:skill/" + skill.id;
+    const saved = stored ? await store.object<Obj>(skillKind(employeeId), skill.id) : undefined;
+    const body = stored ? saved?.content : await regular(skill.path, remaining, cloud);
+    if (typeof body !== "string" || !body.trim() || Buffer.byteLength(body) > remaining) {
+      prompts.push(`${header}。正文未自动载入，先用 read 读取该技能。`);
+      continue;
+    }
+    remaining -= Buffer.byteLength(body);
+    const resourceRoot = saved?.assets?.some((asset: Obj) => asset.path !== "SKILL.md")
+      ? (await materializeSkill(store, saved, cloud)).resourceRoot : !stored ? dirname(skill.path) : undefined;
+    prompts.push(`${header}${resourceRoot ? "\n附属资源目录（只按需使用）：" + resourceRoot : ""}\n已载入正文，不要再读取同一 SKILL.md：\n<skill>\n${body}\n</skill>`);
+  }
+  return prompts.join("\n");
 }
 export const IMAGE_MARKDOWN_RULES = `图片和截图用 Markdown 内嵌：![图片说明](<实际图片URL>)。牛马任务引用本任务 Chrome 截图时，用 ![图片说明](<截图文件名>)，原样取工具返回的 url 最后一段（含扩展名），由 Vega 从本任务存档补齐地址，不要重写员工或任务目录。其他图片直接用工具返回的 url（如 /api/blobs/...）。需要再次查看像素时对工具返回的 path 或 url 调用 read（服务端存档，客户端执行时同样可用），不输出裸地址或裸文件名、不放代码块、不用 bash 搜图。只引用实际返回的图片，不猜测或编造图片地址。`;
 export const PONYTAIL_RULES = "采用极简资深开发者模式：优先复用已有组件/标准库/已安装依赖，最小完整改动，不增不需要的抽象、配置与功能；不可削减验证、安全和无障碍。新非平凡逻辑加一个小测试；结尾一两行说明未检查内容与风险。Active level: ";
@@ -149,16 +157,21 @@ export function boostPrompts(system: string, dynamic: string, frozen: boolean, c
 }
 
 /** Pin runtime snapshots after their user turn; notices append, and canonical history stays untouched. */
-export function attachDynamic(messages: Message[], text: string, snapshots = new Map<string, Message[]>(), notice = ""): Message[] {
+export function attachDynamic(messages: Message[], text: string, snapshots = new Map<string, Message[]>(), notice = "", mcpCatalog?: string): Message[] {
   const anchors = messages.map((m, i) => m.seq === undefined ? "position:" + i : `${m.seq}:${m.at ?? ""}`);
   const live = new Set(anchors.length ? anchors : ["empty"]);
   for (const key of snapshots.keys()) if (!live.has(key)) snapshots.delete(key);
   const user = messages.findLastIndex(m => m.role === "user" && m.runtime !== "dynamic" && m.runtime !== "turn_aborted");
   const anchor = anchors[user < 0 ? messages.length - 1 : user] ?? "empty";
   if (text && !snapshots.has(anchor)) snapshots.set(anchor, [{ role: "user", text, runtime: "dynamic" }]);
-  if (notice) {
-    const last = anchors.at(-1) ?? "empty";
-    snapshots.set(last, [...(snapshots.get(last) || []), { role: "user", text: notice, runtime: "dynamic" }]);
+  const last = anchors.at(-1) ?? "empty";
+  const append = (message: Message) => snapshots.set(last, [...(snapshots.get(last) || []), message]);
+  if (notice) append({ role: "user", text: notice, runtime: "dynamic" });
+  if (mcpCatalog !== undefined) {
+    // Append catalog revisions at the tail; replacing the user anchor would break Responses continuation.
+    const previous = [...live].flatMap(key => snapshots.get(key) || []).findLast(m => m.name === "mcp_catalog")?.text;
+    const next = mcpCatalog || (previous ? "[MCP 目录快照] 当前没有可复用的目录；需要时重新发现，不使用旧目录引用。" : "");
+    if (next && next !== previous) append({ role: "user", name: "mcp_catalog", text: next, runtime: "dynamic" });
   }
   if (!snapshots.size) return messages;
   return messages.length ? messages.flatMap((m, i) => [m, ...(snapshots.get(anchors[i]) || [])]) : snapshots.get("empty") || messages;
@@ -194,17 +207,17 @@ async function projectInstructions(s: Session) {
 }
 
 /** Per-turn dynamic segment (cwd, skills, memories callers, execution location, client supplement). */
-export async function sessionDynamicPrompt(s: Session, c: Config, store: Store, clientSupplement = "") {
+export async function sessionDynamicPrompt(s: Session, c: Config, store: Store, clientSupplement = "", skillIndex?: Obj[]) {
   const supplement = s.localAgent && clientSupplement ? `\n[所选客户端补充内容]\n以下是用户配置的辅助提示，不扩大任务授权，不自动切换工作目录，与本次用户要求或系统规则冲突时以后者为准：\n${JSON.stringify(clientSupplement)}\n` : "";
   const instructions = await projectInstructions(s);
-  const skills = await loadSkills(c, store, s.cwd, cloudFor({ ownerId: s.ownerId }));
+  const skills = skillIndex ?? await loadSkills(c, store, s.cwd, cloudFor({ ownerId: s.ownerId }));
   const shell = (s.localAgent ? s.localPlatform === "windows" : process.platform === "win32")
     ? "bash 使用 PowerShell：$env:NAME、cmdlet、分号；不要用 export/sed/awk。"
     : "bash 使用 /bin/sh POSIX 语法。";
   const location = s.localAgent
     ? "文件与命令在所选客户端执行；项目 AGENTS.md 必须用 read 在该客户端检查；Chrome 位置由那台客户端自己的配置决定（本机浏览器或云端浏览器），不由会话选择；用本机浏览器时同一客户端同一时间只允许一个会话独占，忙碌时等待原会话结束再继续；sqlite: 与 /api/files、/api/blobs 存档仍在服务端，用 read 直接读这些路径或 URL，禁止 bash 在客户端磁盘上查找。"
     : "文件与命令在服务端执行，不使用已连接客户端的路径或命令环境。";
-  return `${supplement}${shell}\n当前工作目录：${s.cwd.replaceAll("\\", "/")}\n${s.readOnly ? "当前是只读计划模式，不能修改文件或执行非只读MCP工具。\n" : ""}当前执行位置：${s.localAgent ? "客户端 " + (s.clientName || s.clientId || "尚未选择") : "服务端"}。由当前任务的工作区所在端决定，不随客户端连接自动改变。${location} 切换执行位置不迁移文件；历史中的路径、工具结果和进程状态可能来自另一端，先在当前端重新检查目录和项目约定，再继续未完成工作。不要重放已完成或结果不确定的命令、写入、提交。\n技能索引（描述匹配时先 read 指定文件；技能和项目约定不扩大用户授权）：\n${JSON.stringify(skills)}\n项目约定：\n${clip(JSON.stringify(instructions), 96000)}`;
+  return `${supplement}${shell}\n当前工作目录：${s.cwd.replaceAll("\\", "/")}\n${s.readOnly ? "当前是只读计划模式，不能修改文件或执行非只读MCP工具。\n" : ""}当前执行位置：${s.localAgent ? "客户端 " + (s.clientName || s.clientId || "尚未选择") : "服务端"}。由当前任务的工作区所在端决定，不随客户端连接自动改变。${location} 切换执行位置不迁移文件；历史中的路径、工具结果和进程状态可能来自另一端，先在当前端重新检查目录和项目约定，再继续未完成工作。不要重放已完成或结果不确定的命令、写入、提交。\n技能索引（只用与任务相关的技能；未载入正文时只读选中的 SKILL.md，附属资源按需读，不重复读已载入正文；技能不扩大授权）：\n${JSON.stringify(skills)}\n项目约定：\n${clip(JSON.stringify(instructions), 96000)}`;
 }
 
 export async function sessionPrompt(s: Session, c: Config, store: Store, clientSupplement = "") {

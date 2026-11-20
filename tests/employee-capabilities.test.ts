@@ -67,10 +67,14 @@ test("same-named skills and MCP configurations are independent and execution nev
     assert.equal(cb.mcp!.service.url, "https://beta.example/mcp");
     const installedA = await loadSkills(ca, store, directory), installedB = await loadSkills(cb, store, directory);
     assert.equal(installedA.length, 1); assert.equal(installedB.length, 1);
-    assert.notEqual(installedA[0].resourceRoot, installedB[0].resourceRoot);
+    assert.equal(installedA[0].resourceRoot, undefined);
+    assert.equal(installedB[0].resourceRoot, undefined);
     assert.equal(installedA[0].path, "sqlite:skill/same-name");
     const toolsA = await Tools.create(engine, sa, ca, new AbortController().signal, () => {});
     const read = await toolsA.read({ path: "sqlite:skill/same-name" });
+    const toolsB = await Tools.create(engine, sb, cb, new AbortController().signal, () => {});
+    const otherRead = await toolsB.read({ path: "sqlite:skill/same-name" });
+    assert.notEqual(JSON.parse(read.secret!).resourceRoot, JSON.parse(otherRead.secret!).resourceRoot);
     assert.match(JSON.parse(read.secret!).content, /alpha/);
     assert(!JSON.stringify(read.value).includes("alpha"), "shared tool records must not reveal private skill content");
     await assert.rejects(toolsA.read({ path: `sqlite:skill/${b.employeeId}:same-name` }), /Skill not found/);
@@ -153,21 +157,27 @@ test("a task dispatched from an existing chat uses the newly saved MCP endpoint 
     await engine.mcpFor(chat, await engine.config(chat)); // Already-open chat has a prior MCP configuration.
     await employeeCapabilities(a, alice, "PUT", ["mcp"], { mcp: { current: { url: base + "/new", headers: { Authorization: "Bearer " + secret } } } });
     const issued = new Map<string, number>();
+    let staticPrefix: string | undefined;
     engine.providers.chat = async (_model, _system, messages, tools, _signal, _emit, session = "") => {
       const step = (issued.get(session) || 0) + 1;
       issued.set(session, step);
       const found = (name: string) => tools.some((tool) => tool.name === name);
       if (session === chat.id) {
         assert(!found("mcp"), "chat dispatches work; it does not use the credential itself");
-        return step === 1 ? { role: "assistant", calls: [{ id: "dispatch", name: "employee_task_create", arguments: { instructions: "用 current 服务核对记录" } }] }
+        return step === 1 ? { role: "assistant", calls: [{ id: "dispatch", name: "employee_task_create", arguments: { instructions: "用 current MCP 服务核对记录" } }] }
           : { role: "assistant", text: "已派发" };
       }
       const dynamic = messages.filter((message) => message.runtime === "dynamic").map((message) => message.text || "").join("\n");
       assert.match(dynamic, /当前牛马已启用的服务名.*\["current"\]/);
       assert(!dynamic.includes(secret));
       assert(found("mcp"));
-      const op = ["list", "describe", "call"][step - 1];
-      return op ? { role: "assistant", calls: [{ id: op, name: "mcp", arguments: { op, server: "current", tool: "check" } }] }
+      const prefix = JSON.stringify([_system, tools]);
+      assert.equal(prefix, staticPrefix ??= prefix);
+      const catalog = messages.findLast(message => message.name === "mcp_catalog")?.text;
+      assert(catalog && !prefix.includes("[MCP 目录快照"));
+      const [row] = JSON.parse(catalog.slice(catalog.indexOf("\n") + 1));
+      assert.equal(row.definitionRef, undefined, "runtime binds the presented catalog, not the model");
+      return step === 1 ? { role: "assistant", calls: [{ id: "call", name: "mcp", arguments: { op: "call", server: row.server, tool: row.tool } }] }
         : { role: "assistant", text: "MCP 已核对" };
     };
     await engine.run(chat.id, { role: "user", actorId: alice.id, text: "用 current 服务核对记录" });
@@ -182,6 +192,7 @@ test("a task dispatched from an existing chat uses the newly saved MCP endpoint 
     const work = await store.session((await a.findTask(task.id))!.workSession);
     assert.equal(work.employeeId, a.employeeId);
     assert(hits.every((hit) => hit.startsWith("/new ") && hit.endsWith(" new header")));
+    assert.equal(hits.filter((hit) => hit.includes("tools/list")).length, 1);
     assert.equal(hits.filter((hit) => hit.includes("tools/call")).length, 1);
     const result = events.find((event) => event.type === "tool_end" && event.data.call.id === "call");
     assert.match(JSON.stringify(result), /new endpoint answered: \[credential redacted\]/);

@@ -9,7 +9,7 @@ import presets from "../shared/provider-presets.json";
 import {
   loadSkills,
   skillMetadata,
-  expandSkillCommand,
+  selectedSkillPrompt,
   sessionPrompt,
 } from "../server/core/prompt";
 import { nativeArguments } from "../server/core/util";
@@ -30,8 +30,8 @@ test("skills index/frontmatter and explicit /skill invocation remain readable wi
     assert.equal(skills[0].name, "example");
     assert.equal(skills[0].description, "Example task trigger");
     assert.match(
-      expandSkillCommand("/skill:example do it", skills),
-      /先用 read/,
+      await selectedSkillPrompt("/skill:example do it", skills, s),
+      /<skill>[\s\S]*Do this\./,
     );
     const session = await s.newSession({ cwd: dir }),
       prompt = await sessionPrompt(session, cfg, s);

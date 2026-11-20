@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import { MCP } from "./mcp";
 import { units, refName, archivedResult } from "./history";
 import { CHROME_TOOLS, STANDALONE_TOOLS } from "./public-tools";
-import { EMPLOYEE_CHAT_RULES, EMPLOYEE_CONTINUITY_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, expandSkillCommand, steerPrompt, clampPromptCacheKey, BOOST } from "./prompt";
+import { EMPLOYEE_CHAT_RULES, EMPLOYEE_CONTINUITY_RULES, EMPLOYEE_MEMORY_RULES, EMPLOYEE_SCENE_RULES, sessionPrompt, sessionStablePrompt, sessionDynamicPrompt, loadSkills, selectedSkillPrompt, steerPrompt, clampPromptCacheKey, BOOST } from "./prompt";
 import { SUBAGENT_GUIDE, CHILD_DYNAMIC_TAIL, isAgentTool, formatAgentHandoff, inheritView, withoutOpenTail, reserveAgent, beginAgent, finishAgent, interruptAgent, cancelSessionAgents, resumeSessionAgents, takeReadyAgents, hasPendingAgents, awaitPendingAgents, waitUntilAgentReady, type AgentChild } from "./spawn-agent";
 import { awaitPendingBash, backgroundBashResult, bashExecutionSessions, bashRunning, bashWorkspaceIdle, cancelSessionBash, hasPendingBash, pendingBash, pendingBashFinished } from "./bash-jobs";
 import { BACKGROUND_GRACE_MS, backgroundResultText, type BackgroundResult, type TaskSuspension } from "./background-result";
@@ -845,7 +845,7 @@ export class Engine {
   }
   async compact(tools: Tools, model: Model, system: string, force = false, dynamic = "") {
     const ctx = tools.context,
-      runtime = this.providers.dynamicPrompt(tools.session.id, await ctx.promptView(), dynamic);
+      runtime = this.providers.dynamicPrompt(tools.session.id, await ctx.promptView(), dynamic, "", tools.mcpPrompt);
     await ctx.configure(
             model.contextWindow,
             Math.min(model.maxOutputTokens, model.contextWindow / 4),
@@ -1156,6 +1156,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const blocked = target ? "" : `[运行提示：无法返回「${f.scene}」（${why}），留在当前「${from}」场景完成下面的调用方工作，不要反复切换场景。]\n`;
         await this.store.append(key, redactMessage({ role: "user", text: blocked + note }, redact));
       };
+      let skillAnchor: number | undefined, skillCwd: string | undefined, skillIndex: Obj[] = [], skillInstructions = "";
       let overflowRecovered = false,
         trimRecovered = false;
       const worker = workspaceOwner = session.employeeId ? await this.employeeFor(session) : undefined;
@@ -1226,10 +1227,21 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           await reinforceMemory();
           emit("steer", m);
         }
-        const skills = await loadSkills(config, this.store, session.cwd, cloudFor({ ownerId: session.ownerId }));
+        const latest = await this.config(session);
+        const latestUser = await this.store.lastMessage(key, "user");
         const employeeState = await worker?.state();
+        const assigned = employeeState?.tasks.find(task => task.id === session!.taskId);
+        if (skillAnchor !== latestUser?.seq || skillCwd !== session.cwd) {
+          const skillCloud = cloudFor({ ownerId: session.ownerId });
+          skillIndex = await loadSkills(latest, this.store, session.cwd, skillCloud);
+          skillInstructions = !session.groupId && !latestUser?.group && latestUser?.runtime !== "turn_aborted"
+            ? await selectedSkillPrompt(assigned && latestUser?.taskInput ? assigned.text : latestUser?.text || "", skillIndex, this.store, session.employeeId, skillCloud)
+            : "";
+          skillAnchor = latestUser?.seq;
+          skillCwd = session.cwd;
+        }
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
-        const latestChat = worker && !session.taskId ? await this.store.lastMessage(key, "user") : undefined;
+        const latestChat = worker && !session.taskId ? latestUser : undefined;
         const groupId = session.groupId;
         const sourceGroup = groupId && latestChat?.group?.groupId === groupId ? await this.groups.get(groupId) : undefined;
         const groupMessage = sourceGroup && latestChat?.group ? await this.store.message(sourceGroup.session, latestChat.group.seq) : undefined;
@@ -1252,9 +1264,10 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const supplement = session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : "";
         const nativePlacement = latestChat?.chatClientId && !groupId
           ? "\n[本轮工作位置] 用户明确要求在已选定的客户端执行。沟通仍在服务端；新任务会自动绑定该电脑，不要因为沟通会话在服务端而说看不到本机。离线时如实报告，不改用其他位置；已有任务不自动迁移，位置不符时先说明，不在原位置继续。\n" : "";
-        let dynamic = memories + taskContext + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || "")) + nativePlacement;
+        let dynamic = memories + taskContext + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || "", skillIndex)) + nativePlacement;
+        if (skillInstructions) dynamic += "\n" + skillInstructions;
         // Scene model edited while this run is in progress: switch on the next provider request.
-        const latest = await this.config(session), primary = sceneModels(latest, session.scene!)[0];
+        const primary = sceneModels(latest, session.scene!)[0];
         const seen = scenePrimaries.get(session.scene!);
         scenePrimaries.set(session.scene!, primary);
         if (primary && seen !== undefined && seen !== primary) {
@@ -1270,7 +1283,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
         let model = await this.catalog.resolve(config, session.model);
         tools.config = latest;
-        dynamic += await tools.rules(model);
+        dynamic += await tools.rules(model, assigned?.text);
         if (mainTask && frames.length && !session.agentChild) {
           const caller = frames.findLast((f) => f.resume), origin = frames[0];
           dynamic += `\n[场景栈] 当前在「${session.scene}」场景（同一任务会话，续做沿用此现场；不要再次 switch_scene 到「${session.scene}」）。` + (caller
@@ -1293,7 +1306,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           return Promise.all(canonicalView.map(async (m) => {
             if (m.role === "tool" && secrets.has(m.callId!)) return { ...m, text: secrets.get(m.callId!) };
             if (m.role !== "user") return m;
-            let text = m.group ? m.text || "" : expandSkillCommand(expandedInputs.get(m.seq!) ?? m.text ?? "", skills);
+            let text = expandedInputs.get(m.seq!) ?? m.text ?? "";
             const quoted = m.quote && await this.store.message(key, m.quote.seq);
             // Attached files: name, type, size and the path this run can use (put on disk once per run).
             if (m.files?.length) text += await tools!.attachments.describe(m.files);
@@ -1302,11 +1315,19 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             return { ...m, files: undefined, text: m.runtime === "steer" ? steerPrompt(text) : text };
           }));
         };
-        let view = this.providers.dynamicPrompt(key, await prepareView(), dynamic);
+        const projectView = async (notice = "") => {
+          const rows = this.providers.dynamicPrompt(key, await prepareView(), dynamic, notice, tools!.mcpPrompt);
+          if (session!.employeeId) for (const row of rows) {
+            if (row.runtime !== "dynamic") continue;
+            for (const match of (row.text || "").matchAll(/已载入正文，不要再读取同一 SKILL\.md：\n<skill>\n([\s\S]*?)\n<\/skill>/g)) redact.add(match[1]);
+          }
+          return rows;
+        };
+        let view = await projectView();
         if (config.contextMode === "acp") {
           const notice = await tools.context.nudge();
           if (notice) {
-            view = this.providers.dynamicPrompt(key, await prepareView(), dynamic, notice);
+            view = await projectView(notice);
             emit("context_budget", await tools.context.status());
           }
         }
@@ -1347,7 +1368,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               emptyRecovered = true;
               outputRecovery ||= recoveryModel(model);
               this.providers.reset(key);
-              view = this.providers.dynamicPrompt(key, await prepareView(), dynamic);
+              view = await projectView();
               emit("retry", { reason: "模型未返回正文或工具调用，正在恢复一次；不会重放历史工具操作", attempt: attempt + 1 });
               continue;
             }
@@ -1361,7 +1382,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             ) {
               trimRecovered = true;
               this.providers.reset(key);
-              view = this.providers.dynamicPrompt(key, await prepareView(), dynamic);
+              view = await projectView();
               emit("retry", {
                 contextRecovery: true,
                 reason:
@@ -1380,7 +1401,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               outputRecovery = recoveryModel(model);
               if (outputRecovery) {
                 this.providers.reset(key);
-                view = this.providers.dynamicPrompt(key, await prepareView(), dynamic);
+                view = await projectView();
                 emit("retry", {
                   reason:
                     "Output exhausted; lower thinking once, no tool dispatched",
@@ -1398,7 +1419,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               overflowRecovered = true;
               const receipt = await this.compact(tools, model, system, true, dynamic);
               if (receipt && receipt.status !== "applied") throw e;
-              view = this.providers.dynamicPrompt(key, await prepareView(), dynamic);
+              view = await projectView();
               emit("retry", { contextRecovery: true });
               continue;
             }
@@ -1421,7 +1442,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             model = await this.catalog.resolve(config, next);
             await this.compact(tools, model, system, false, dynamic);
             this.providers.reset(key);
-            view = this.providers.dynamicPrompt(key, await prepareView(), dynamic);
+            view = await projectView();
             emit("scene", {
               scene: session.scene,
               model: next,

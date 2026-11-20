@@ -173,6 +173,7 @@ test("MCP Streamable HTTP describe-before-call, definition revalidation, readOnl
   assert.equal(calls, 0);
   await m.execute({ op: "call", server: "test", tool: "get" });
   changed = true;
+  await m.execute({ op: "list", server: "test" }); // This fixture doesn't send list_changed; explicitly refresh.
   await assert.rejects(() =>
     m.execute({ op: "call", server: "test", tool: "get" }),
   );

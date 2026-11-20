@@ -2,7 +2,7 @@ import { createHmac, randomBytes } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ErrorCode, McpError } from "@modelcontextprotocol/sdk/types.js";
+import { ErrorCode, McpError, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import { assert, expand, id, object, clip, sleep, type Obj } from "./util";
 import type { CloudRuntime } from "./cloud";
 
@@ -29,7 +29,9 @@ const definitionFingerprint = (definition: Obj) => JSON.stringify(
     : value,
 );
 type Options = { timeout: number; signal: AbortSignal };
-type Page = { server: string; client: Client; query: string; rows: Obj[]; remote?: string };
+type ToolList = Awaited<ReturnType<Client["listTools"]>>;
+type Catalog = { page?: ToolList; pending?: Promise<ToolList>; refs: Map<string, string> };
+type Page = { server: string; client: Client; catalog: Catalog; query: string; rows: Obj[]; remote?: string };
 const timeout = (value: number, fallback: number) => Number.isSafeInteger(value) && value > 0 ? Math.min(120000, value) : fallback;
 const transportCodes = new Set(["ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "EPIPE", "EAI_AGAIN", "ETIMEDOUT", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
 function classify(error: any, aborted: boolean) {
@@ -52,6 +54,7 @@ export class MCP {
   private readonly connecting = new Map<string, Promise<Client>>();
   readonly described = new Map<string, Map<string, string>>();
   private readonly pages = new Map<string, Page>();
+  private readonly catalogs = new WeakMap<Client, Catalog>();
   private readonly reviewKeys = new WeakMap<Client, Buffer>();
   // A ref proves this exact definition was returned on this connection; listing and guessing a call in the same batch is not enough.
   private definitionRef(client: Client, fingerprint: string) {
@@ -62,7 +65,10 @@ export class MCP {
   private review(client: Client, def: Obj, budget: number) {
     if (Buffer.byteLength(JSON.stringify(def)) > budget) return;
     const review = { definition: this.safe(def), definitionRef: this.definitionRef(client, definitionFingerprint(def)) };
-    if (Buffer.byteLength(JSON.stringify(review)) <= budget) return review;
+    if (Buffer.byteLength(JSON.stringify(review)) <= budget) {
+      this.bind(client, def.name, review.definitionRef);
+      return review;
+    }
   }
   private readonly lifetime = new AbortController();
   private readonly mask?: RegExp;
@@ -108,6 +114,80 @@ export class MCP {
 
   serviceNames() { return Object.keys(this.config).filter((name) => this.config[name].enabled !== false).map((name) => this.text(name)); }
 
+  private readonly warmed = new Set<string>();
+  /** Only warm a server explicitly named for MCP work, once per configured session. */
+  async warmMentioned(text: string, signal?: AbortSignal) {
+    if (!/\bmcp\b/i.test(text)) return;
+    const name = Object.keys(this.config).find(key => this.config[key].enabled !== false && !this.warmed.has(key) &&
+      new RegExp(`(?<![a-z0-9_.-])${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9_.-])`, "i").test(text));
+    if (!name) return;
+    this.warmed.add(name);
+    try {
+      await this.operation(name, "list", false, signal, (client, options) =>
+        Promise.resolve(this.firstToolPage(client, this.catalog(client), options)));
+    } catch { signal?.throwIfAborted(); } // Optional discovery; explicit list/describe still reports errors.
+  }
+
+  private isLocallyReadOnly(server: string, tool: string) {
+    const allowlist = this.config[server]?.readOnlyTools;
+    return Array.isArray(allowlist) && allowlist.includes(tool);
+  }
+
+  /** Request-only preview; never connect to an unused server from prompt preparation. */
+  catalogPreview(readOnly: boolean) {
+    const entries: Obj[] = [];
+    let budget = 16 * 1024;
+    for (const [name, client] of [...this.connections].sort(([a], [b]) => a.localeCompare(b))) {
+      const catalog = this.catalogs.get(client);
+      if (!catalog?.page) continue;
+      const tools = [...catalog.page.tools].sort((a, b) => a.name.localeCompare(b.name));
+      for (const tool of tools) {
+        if (readOnly && !this.isLocallyReadOnly(name, tool.name)) continue;
+        const review = this.review(client, tool, Math.min(budget, 12 * 1024));
+        if (!review) continue;
+        const entry = { server: this.text(name), tool: this.text(tool.name), ...review,
+          definition: JSON.parse(definitionFingerprint(review.definition)) };
+        const size = Buffer.byteLength(JSON.stringify(entry)) + 1;
+        if (size > budget) continue;
+        budget -= size;
+        entries.push(entry);
+      }
+    }
+    return entries;
+  }
+
+  private catalog(client: Client) {
+    let state = this.catalogs.get(client);
+    if (!state) this.catalogs.set(client, state = { refs: new Map() });
+    return state;
+  }
+
+  private bind(client: Client, name: string, ref: string) {
+    const refs = this.catalog(client).refs;
+    refs.set(name, ref);
+    // shortcut: evicted entries are rediscovered on demand, not authorized by name alone.
+    if (refs.size > 1024) refs.delete(refs.keys().next().value!);
+  }
+
+  private invalidateCatalog(client: Client) {
+    this.catalogs.delete(client);
+    for (const [key, page] of this.pages) if (page.client === client) this.pages.delete(key);
+  }
+
+  private firstToolPage(client: Client, catalog: Catalog, options: Options) {
+    options.signal.throwIfAborted();
+    if (catalog.pending) return catalog.pending;
+    if (catalog.page) return catalog.page;
+    // shortcut: cache one upstream page (<=256 KiB); use ordinary discovery for later or oversized pages.
+    return catalog.pending = client.listTools({}, options).then((result) => {
+      if (this.catalogs.get(client) === catalog && !options.signal.aborted &&
+          Buffer.byteLength(JSON.stringify(result)) <= 256 * 1024) {
+        catalog.page = result;
+      }
+      return result;
+    }).finally(() => { catalog.pending = undefined; });
+  }
+
   private connection(name: string, signal: AbortSignal) {
     let pending = this.connecting.get(name);
     if (!pending) {
@@ -124,6 +204,7 @@ export class MCP {
     const cfg = this.config[name], ms = timeout(cfg.startupTimeoutMs, 10000);
     const startup = AbortSignal.any([signal, AbortSignal.timeout(ms)]);
     const client = new Client({ name: "vega", version: "0.2.0" }, { capabilities: {} });
+    client.setNotificationHandler(ToolListChangedNotificationSchema, () => { this.invalidateCatalog(client); });
     const expanded = (values: Obj) => Object.fromEntries(Object.entries(values || {}).map(([key, value]) => [key, this.cloud ? String(value) : expand(String(value))]));
     const launch = !cfg.url && this.cloud?.launch(cfg.command, cfg.args || [], cfg.cwd || this.cwd || (await this.cloud.identity()).cwd, expanded(cfg.env));
     startup.throwIfAborted();
@@ -155,7 +236,7 @@ export class MCP {
     if (this.connections.get(name) !== client) return;
     this.connections.delete(name);
     this.described.delete(name);
-    for (const [key, page] of this.pages) if (page.client === client) this.pages.delete(key);
+    this.invalidateCatalog(client);
   }
   async close() {
     this.lifetime.abort();
@@ -208,11 +289,13 @@ export class MCP {
       }
     }
   }
-  private async definition(client: Client, name: string, options: Options, step: Step) {
+  private async definition(client: Client, name: string, options: Options, step: Step, catalog?: Catalog) {
     let cursor: string | undefined;
     for (let page = 0; page < 32; page++) {
       step.cursor = !!cursor;
-      const result = await client.listTools({ cursor }, options);
+      const result = !cursor && catalog
+        ? await this.firstToolPage(client, catalog, options)
+        : await client.listTools({ cursor }, options);
       const def = result.tools.find((tool) => tool.name === name);
       if (def) return { def, budgetExhausted: false };
       cursor = result.nextCursor;
@@ -239,12 +322,20 @@ export class MCP {
     assert(typeof name === "string" && name, "MCP server name required");
     if (a.op === "describe") {
       assert(typeof a.tool === "string" && a.tool, 'MCP tool name required; use op="list" with server to discover tool names');
-      const { client, def, budgetExhausted } = await this.operation(name, "describe", true, signal, async (client, options, step) => ({ client, ...await this.definition(client, a.tool, options, step) }));
-      assert(def, (budgetExhausted ? "MCP tool not found within 32-page discovery budget" : "MCP tool not found on this server") + '; use op="list" with server and copy the exact tool name');
+      const { client, catalog, def, budgetExhausted } = await this.operation(name, "describe", true, signal, async (client, options, step) => {
+        const catalog = this.catalog(client);
+        const result = await this.definition(client, a.tool, options, step, catalog);
+        options.signal.throwIfAborted();
+        return { client, catalog, ...result };
+      });
       assert(this.connections.get(name) === client, "MCP connection changed; describe again");
+      assert(this.catalogs.get(client) === catalog, "MCP catalog changed during discovery; describe again");
+      assert(def, (budgetExhausted ? "MCP tool not found within 32-page discovery budget" : "MCP tool not found on this server") + '; use op="list" with server and copy the exact tool name');
       let grants = this.described.get(name);
       if (!grants) this.described.set(name, grants = new Map());
-      grants.set(a.tool, definitionFingerprint(def));
+      const fingerprint = definitionFingerprint(def);
+      grants.set(a.tool, fingerprint);
+      this.bind(client, a.tool, this.definitionRef(client, fingerprint));
       return this.safe(def);
     }
     if (a.op === "call") {
@@ -253,8 +344,8 @@ export class MCP {
       const ref = a.definitionRef;
       assert(ref === undefined || (typeof ref === "string" && /^[A-Za-z0-9_-]{43}$/.test(ref)), "Invalid MCP definitionRef; copy it from the current discovery result");
       assert(connected && (ref || grant), "MCP call requires successful describe or a definitionRef from list on the current configuration and connection; call was not executed");
-      const allowlist = this.config[name].readOnlyTools;
-      assert(!readOnly || (Array.isArray(allowlist) && allowlist.includes(a.tool)), "Tool not in local read-only allowlist; annotations are not authorization");
+      const locallyReadOnly = this.isLocallyReadOnly(name, a.tool);
+      assert(!readOnly || locallyReadOnly, "Tool not in local read-only allowlist; annotations are not authorization");
       const started = Date.now();
       const blocked = (kind: string, reason: string) => new MCPFailure(`MCP ${reason}; describe again, call was not executed`, {
         server: this.text(name), operation: "call", stage: "revalidate", kind, attempts: 1,
@@ -262,13 +353,26 @@ export class MCP {
       });
       const result = await this.operation(name, "call", false, signal, async (client, options, step) => {
         step.stage = "revalidate";
-        const { def, budgetExhausted } = await this.definition(client, a.tool, options, step);
+        const catalog = this.catalog(client);
+        const reviewed = ref ?? this.definitionRef(client, grant!);
+        const send = () => {
+          options.signal.throwIfAborted();
+          step.stage = "call";
+          step.sent = true;
+          return client.callTool({ name: a.tool, arguments: object(a.arguments) }, undefined, options);
+        };
+        // A reviewed binding belongs to this connection and this catalog generation, including proxy tools.
+        if (catalog.refs.get(a.tool) === reviewed && (ref || this.described.get(name)?.get(a.tool) === grant)) return send();
+        const { def, budgetExhausted } = await this.definition(client, a.tool, options, step, catalog);
         options.signal.throwIfAborted();
         if (this.connections.get(name) !== client) throw blocked("connection_changed", "connection changed");
         if (!ref && this.described.get(name)?.get(a.tool) !== grant) throw blocked("describe_changed", "describe record changed");
-        if (!def) throw budgetExhausted
-          ? blocked("discovery_budget_exhausted", "tool not found within 32-page revalidation budget")
-          : blocked("tool_not_found", "tool no longer listed by the server");
+        if (this.catalogs.get(client) !== catalog) throw blocked("catalog_changed", "catalog changed during revalidation");
+        if (!def) {
+          throw budgetExhausted
+            ? blocked("discovery_budget_exhausted", "tool not found within 32-page revalidation budget")
+            : blocked("tool_not_found", "tool no longer listed by the server");
+        }
         const fingerprint = definitionFingerprint(def);
         if (ref ? this.definitionRef(client, fingerprint) !== ref : fingerprint !== grant) {
           const error = blocked("definition_changed", "tool definition or its review reference changed");
@@ -279,9 +383,8 @@ export class MCP {
           }
           throw error;
         }
-        step.stage = "call";
-        step.sent = true;
-        return await client.callTool({ name: a.tool, arguments: object(a.arguments) }, undefined, options);
+        this.bind(client, a.tool, reviewed);
+        return send();
       }, connected);
       return this.safe(result);
     }
@@ -291,22 +394,35 @@ export class MCP {
     const saved = a.cursor === undefined ? undefined : this.pages.get(a.cursor);
     assert(a.cursor === undefined || (saved && saved.server === name && saved.query === query && this.connections.get(name) === saved.client), "Invalid or expired MCP discovery cursor; start a fresh list");
     const page = await this.operation(name, "list", !saved, signal, async (client, options) => {
-      const page: Page = saved || { server: name, client, query, rows: [] };
+      if (!saved && !this.catalog(client).pending) this.invalidateCatalog(client);
+      const page: Page = saved || { server: name, client, catalog: this.catalog(client), query, rows: [] };
       assert(client === page.client, "MCP connection changed");
       if (!page.rows.length) {
-        const result = await client.listTools({ cursor: page.remote }, options);
+        const result = saved ? await client.listTools({ cursor: page.remote }, options)
+          : await this.firstToolPage(client, page.catalog, options);
+        options.signal.throwIfAborted();
+        assert(this.connections.get(name) === client && this.catalogs.get(client) === page.catalog,
+          "MCP catalog changed during discovery; start a fresh list");
         page.remote = result.nextCursor;
-        // Bound inline schemas per remote page, including the rows held for local pagination.
+        const matches = result.tools.filter((tool) => !query || (tool.name + " " + tool.description).toLowerCase().includes(query));
+        page.rows = matches.map((tool) => ({ name: this.text(tool.name), description: clip(this.text(tool.description || ""), 300) }));
+        // Fit more directly callable definitions without changing list order or letting later rows crowd out this page.
         let budget = 16 * 1024;
-        page.rows = result.tools.filter((tool) => !query || (tool.name + " " + tool.description).toLowerCase().includes(query))
-          .map((tool) => {
-            const review = this.review(client, tool, Math.min(budget, 12 * 1024));
-            if (review) budget -= Buffer.byteLength(JSON.stringify(review));
-            return { name: this.text(tool.name), description: clip(this.text(tool.description || ""), 300), ...review };
-          });
+        const candidates = matches.map((tool, index) => ({ tool, index, size: Buffer.byteLength(JSON.stringify(tool)) }))
+          .sort((a, b) => Number(a.index >= limit) - Number(b.index >= limit) || a.size - b.size);
+        for (const { tool, index, size } of candidates) {
+          const cap = Math.min(budget, 12 * 1024);
+          if (size > cap) continue;
+          const review = this.review(client, tool, cap);
+          if (!review) continue;
+          budget -= Buffer.byteLength(JSON.stringify(review));
+          Object.assign(page.rows[index], review);
+        }
       }
       return page;
     }, saved?.client);
+    assert(this.connections.get(name) === page.client && this.catalogs.get(page.client) === page.catalog,
+      "MCP catalog changed during discovery; start a fresh list");
     if (saved) this.pages.delete(a.cursor);
     const tools = page.rows.splice(0, limit);
     const nextCursor = page.rows.length || page.remote ? id() : undefined;

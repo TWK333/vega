@@ -11,7 +11,7 @@ import {
   unpackSkill,
   skillEntry,
 } from "../server/core/skills";
-import { loadSkills, expandSkillCommand } from "../server/core/prompt";
+import { loadSkills, selectedSkillPrompt } from "../server/core/prompt";
 import { shell } from "../server/core/tools";
 test("directory skill import retains scripts/references in SQLite and works after original deletion", async () => {
   const dir = await mkdtemp(join(tmpdir(), "vega-bundle-")),
@@ -43,12 +43,15 @@ test("directory skill import retains scripts/references in SQLite and works afte
         dir,
       ),
       entry = skills.find((s) => s.name === "bundled")!;
-    assert(entry.resourceRoot);
+    assert.equal(entry.resourceRoot, undefined);
+    const prompt = await selectedSkillPrompt("[m00001] /skill:bundled do it", skills, store);
+    assert.match(prompt, /Run scripts\/check.mjs/);
+    const resourceRoot = /附属资源目录（只按需使用）：([^\n]+)/.exec(prompt)![1];
     assert.equal(
-      await readFile(join(entry.resourceRoot, "references/info.md"), "utf8"),
+      await readFile(join(resourceRoot, "references/info.md"), "utf8"),
       "retained reference",
     );
-    const script = join(entry.resourceRoot, "scripts/check.mjs");
+    const script = join(resourceRoot, "scripts/check.mjs");
     const command =
       (process.platform === "win32" ? "& " : "") +
       "'" +
@@ -64,11 +67,8 @@ test("directory skill import retains scripts/references in SQLite and works afte
     );
     assert.equal(result.error, false);
     assert.match(result.value.output, /bundle script works/);
-    assert(
-      expandSkillCommand("[m00001] /skill:bundled do it", skills).includes(
-        entry.resourceRoot,
-      ),
-    );
+    assert.equal(await selectedSkillPrompt("use $bundled and $bundled", skills, store), prompt);
+    assert.equal(await selectedSkillPrompt("unrelated $notInstalled", skills, store), "");
     await writeFile(script, "tampered");
     await materializeSkill(store, (await store.object("skill", "bundled"))!);
     assert.match(await readFile(script, "utf8"), /bundle script works/);
