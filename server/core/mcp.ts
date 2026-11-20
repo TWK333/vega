@@ -6,7 +6,14 @@ import { assert, expand, id, object, clip, sleep, type Obj } from "./util";
 import type { CloudRuntime } from "./cloud";
 
 type Operation = "list" | "describe" | "call";
-type Step = { stage: "initialize" | Operation; cursor?: boolean; sent?: boolean };
+type Step = { stage: "initialize" | "revalidate" | Operation; cursor?: boolean; sent?: boolean };
+
+// Compare the original wire definition, ignoring only JSON object key order (not array order).
+const definitionFingerprint = (definition: Obj) => JSON.stringify(definition, (_, value) =>
+  value && typeof value === "object" && !Array.isArray(value)
+    ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, value[key]]))
+    : value,
+);
 type Options = { timeout: number; signal: AbortSignal };
 type Page = { server: string; client: Client; query: string; rows: Obj[]; remote?: string };
 const timeout = (value: number, fallback: number) => Number.isSafeInteger(value) && value > 0 ? Math.min(120000, value) : fallback;
@@ -158,6 +165,7 @@ export class MCP {
         deadline = AbortSignal.timeout(ms);
         return await work(client, { timeout: ms, signal: AbortSignal.any([cancel, deadline]) }, step);
       } catch (error) {
+        if (error instanceof MCPFailure) throw error;
         const issue = classify(deadline?.aborted ? deadline.reason : error, cancel.aborted);
         if (client && (issue.transient || cancel.aborted || issue.status === 404)) {
           this.forget(name, client);
@@ -180,10 +188,11 @@ export class MCP {
       step.cursor = !!cursor;
       const result = await client.listTools({ cursor }, options);
       const def = result.tools.find((tool) => tool.name === name);
-      if (def) return def;
+      if (def) return { def, budgetExhausted: false };
       cursor = result.nextCursor;
       if (!cursor) break;
     }
+    return { def: undefined, budgetExhausted: !!cursor };
   }
 
   async execute(a: Obj, readOnly = false, signal?: AbortSignal): Promise<any> {
@@ -203,13 +212,13 @@ export class MCP {
     const name = a.server;
     assert(typeof name === "string" && name, "MCP server name required");
     if (a.op === "describe") {
-      assert(typeof a.tool === "string" && a.tool, "MCP tool name required");
-      const { client, def } = await this.operation(name, "describe", true, signal, async (client, options, step) => ({ client, def: await this.definition(client, a.tool, options, step) }));
-      assert(def, "MCP tool not found within 32-page discovery budget");
+      assert(typeof a.tool === "string" && a.tool, 'MCP tool name required; use op="list" with server to discover tool names');
+      const { client, def, budgetExhausted } = await this.operation(name, "describe", true, signal, async (client, options, step) => ({ client, ...await this.definition(client, a.tool, options, step) }));
+      assert(def, (budgetExhausted ? "MCP tool not found within 32-page discovery budget" : "MCP tool not found on this server") + '; use op="list" with server and copy the exact tool name');
       assert(this.connections.get(name) === client, "MCP connection changed; describe again");
       let grants = this.described.get(name);
       if (!grants) this.described.set(name, grants = new Map());
-      grants.set(a.tool, JSON.stringify(def));
+      grants.set(a.tool, definitionFingerprint(def));
       return this.safe(def);
     }
     if (a.op === "call") {
@@ -218,13 +227,25 @@ export class MCP {
       assert(grant && connected, "MCP call requires successful describe on the current configuration and connection");
       const allowlist = this.config[name].readOnlyTools;
       assert(!readOnly || (Array.isArray(allowlist) && allowlist.includes(a.tool)), "Tool not in local read-only allowlist; annotations are not authorization");
+      const started = Date.now();
+      const blocked = (kind: string, reason: string) => new MCPFailure(`MCP ${reason}; describe again, call was not executed`, {
+        server: this.text(name), operation: "call", stage: "revalidate", kind, attempts: 1,
+        elapsedMs: Date.now() - started, sideEffectsPossible: false, automaticRetryAllowed: false,
+      });
       const result = await this.operation(name, "call", false, signal, async (client, options, step) => {
-        const def = await this.definition(client, a.tool, options, step);
-        if (this.connections.get(name) !== client || this.described.get(name)?.get(a.tool) !== grant || JSON.stringify(def) !== grant) return;
+        step.stage = "revalidate";
+        const { def, budgetExhausted } = await this.definition(client, a.tool, options, step);
+        options.signal.throwIfAborted();
+        if (this.connections.get(name) !== client) throw blocked("connection_changed", "connection changed");
+        if (this.described.get(name)?.get(a.tool) !== grant) throw blocked("describe_changed", "describe record changed");
+        if (!def) throw budgetExhausted
+          ? blocked("discovery_budget_exhausted", "tool not found within 32-page revalidation budget")
+          : blocked("tool_not_found", "tool no longer listed by the server");
+        if (definitionFingerprint(def) !== grant) throw blocked("definition_changed", "tool definition changed");
+        step.stage = "call";
         step.sent = true;
         return await client.callTool({ name: a.tool, arguments: object(a.arguments) }, undefined, options);
       }, connected);
-      assert(result, "MCP definition or connection changed; describe again, call was not executed");
       return this.safe(result);
     }
     const limit = a.limit ?? 20;

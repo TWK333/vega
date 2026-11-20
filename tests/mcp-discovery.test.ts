@@ -89,6 +89,63 @@ test("MCP redacts literal and expanded secrets, but revalidates the original sch
     assert.match(json, /credential redacted/);
   }
   echo = `Bearer ${credential}`; // Same public masked description, different raw definition.
-  await assert.rejects(mcp.execute(call), /definition or connection changed/);
+  await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
   assert.equal(requests.filter((q) => q.method === "tools/call").length, 1);
+});
+
+const preflightBlocked = (kind: string) => (error: unknown) => {
+  assert(error instanceof MCPFailure);
+  assert.equal(error.diagnostic.kind, kind);
+  assert.equal(error.diagnostic.stage, "revalidate");
+  assert.equal(error.diagnostic.sideEffectsPossible, false);
+  assert.match(error.message, /call was not executed/);
+  return true;
+};
+
+test("MCP revalidation ignores nested object key order but preserves array order", async (t) => {
+  let reordered = false;
+  const choices = ["story", "bug"];
+  const { mcp, requests } = await fixture(t, (q) => {
+    if (q.method === "tools/list") {
+      const scope = { type: "string", enum: choices }, limit = { type: "number" };
+      return { tools: [{ ...tool, inputSchema: { type: "object", properties: reordered ? { limit, scope } : { scope, limit } } }] };
+    }
+    if (q.method === "tools/call") return { content: [{ type: "text", text: "ok" }] };
+  });
+  const describe = { op: "describe", server: "svc", tool: "lookup" }, call = { ...describe, op: "call" };
+  await mcp.execute(describe);
+  reordered = true;
+  assert.equal((await mcp.execute(call)).content[0].text, "ok");
+  choices.reverse();
+  await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
+  assert.equal(requests.filter((q) => q.method === "tools/call").length, 1);
+});
+
+test("MCP tells missing tools apart from stale describe records and changed connections", async (t) => {
+  let tools = [tool];
+  let duringList: (() => void) | undefined;
+  const { mcp, requests } = await fixture(t, (q) => {
+    if (q.method === "tools/list") {
+      duringList?.();
+      return { tools };
+    }
+  });
+  const describe = { op: "describe", server: "svc", tool: "lookup" }, call = { ...describe, op: "call" };
+  await assert.rejects(mcp.execute({ ...describe, tool: "missing" }), /not found on this server.*op="list"/);
+  await mcp.execute(describe);
+  tools = [];
+  await assert.rejects(mcp.execute(call), preflightBlocked("tool_not_found"));
+  tools = [tool];
+  duringList = () => { mcp.described.delete("svc"); };
+  await assert.rejects(mcp.execute(call), preflightBlocked("describe_changed"));
+  duringList = undefined;
+  await mcp.execute(describe);
+  const client = mcp.connections.get("svc")!;
+  duringList = () => { mcp.connections.delete("svc"); };
+  try {
+    await assert.rejects(mcp.execute(call), preflightBlocked("connection_changed"));
+  } finally {
+    mcp.connections.set("svc", client);
+  }
+  assert(!requests.some((q) => q.method === "tools/call"));
 });
