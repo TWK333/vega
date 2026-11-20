@@ -54,6 +54,47 @@ function resultBody(m: Message): { prefix: string; value: Obj } | undefined {
     return;
   }
 }
+const privateTools = new Set(["bash", "bash_poll", "read", "write", "edit", "mcp", "polaris", "recall", "search_context"]);
+// Keep partial/uncertain outcomes even when the full result is archived before projection.
+function receiptFields(value: Obj | undefined) {
+  const fields: Obj = {};
+  for (const k of ["status", "inputAttempted", "completedActions", "verification", "exitCode", "jobId", "error", "reason", "observationError"]) {
+    const v = value?.[k];
+    if (typeof v === "boolean" || typeof v === "number" || typeof v === "string") fields[k] = typeof v === "string" ? v.slice(0, 240) : v;
+  }
+  return fields;
+}
+/** Only the request view changes. Shared instructions, conclusions, plan and switch receipts stay verbatim. */
+export function sceneHistory(rows: Message[], scene?: string): Message[] {
+  const foreign = new Set<string>();
+  return rows.map(row => {
+    if (row.role === "tool") {
+      if (!foreign.delete(row.callId!)) return row;
+      const text = row.text || "";
+      if (!row.images?.length && text.length <= 480) return row;
+      const parsed = resultBody(row)?.value;
+      const receipt = receiptFields(parsed);
+      for (const k of ["tabTag", "documentPath", "archivePath"]) if (typeof parsed?.[k] === "string") receipt[k] = parsed[k];
+      const files = row.images?.slice(-8).map(im => im.url || im.path || im.blobId).filter(Boolean);
+      return { ...row, images: undefined, text: `[Scene receipt #${row.seq}; original: recall(positions:[${row.seq}]); do not replay] ` +
+        JSON.stringify({ ...receipt, ...(files?.length ? { files } : {}), ...(row.error || !Object.keys(receipt).length ? { excerpt: text.slice(0, 180) } : {}) }) };
+    }
+    foreign.clear();
+    if (!row.calls?.length) return row;
+    const { toolScene, ...m } = row;
+    if (!scene || toolScene === scene) return m;
+    let changed = false;
+    const calls = row.calls.map(c => {
+      // Legacy batches have no provenance: Chrome alone unambiguously identifies its scene.
+      if (!(toolScene ? privateTools.has(c.name) || CHROME_TOOLS.has(c.name) || c.name.startsWith("jianlai_") : scene !== "computer" && CHROME_TOOLS.has(c.name))) return c;
+      foreign.add(c.id);
+      changed = true;
+      if (JSON.stringify(c.arguments).length <= 320) return c;
+      return { ...c, arguments: { archived: `see original batch #${row.seq}`, ...(typeof c.arguments.path === "string" ? { path: c.arguments.path.slice(0, 240) } : {}) } };
+    });
+    return changed ? { ...m, calls, thinking: undefined, opaque: undefined, signature: undefined } : m;
+  });
+}
 export function promptHistory(
   input: Message[],
   options: { trimImages?: boolean } = {},
@@ -117,9 +158,9 @@ export function promptHistory(
 /** Text kept in context for an oversized result. Chrome results keep the fields history pruning relies on. */
 export function archivedResult(name: string, value: Obj, raw: string, archivePath: string, warning?: string) {
   const tail = { archivePath, truncated: true, ...(warning ? { archiveWarning: warning } : {}), next: "完整结果已保存于 archivePath，用 read 按 offset/limit 分页读，hasMore 时从 nextOffset 继续" };
-  if (!CHROME_TOOLS.has(name) || !value || typeof value !== "object") return JSON.stringify({ preview: clip(raw, 32000), ...tail });
+  if (!CHROME_TOOLS.has(name) || !value || typeof value !== "object") return JSON.stringify({ ...receiptFields(value), preview: clip(raw, 32000), ...tail });
   const { tabTag, snapshotId, images, documentPath, ...rest } = value,
-    head = { tabTag, snapshotId, images, documentPath };
+    head = { ...receiptFields(value), tabTag, snapshotId, images, documentPath };
   return JSON.stringify({ ...head, preview: clip(JSON.stringify(rest), Math.max(4000, 32000 - JSON.stringify(head).length)), ...tail });
 }
 

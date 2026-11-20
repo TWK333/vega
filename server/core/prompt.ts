@@ -18,7 +18,7 @@ export const CODING_RULES = `先理解再修改，保持改动聚焦。未知位
 按最小影响面验证，不虚报成功。最终采用例外汇报，先说用户可感知的结果，不罗列过程；图片用 Markdown 内联展示；本地图片先 read，再使用工具返回的 url（/api/blobs/... 或 Chrome 截图的 /api/files/...）写入 Markdown；不要把磁盘路径、裸文件名当成网页地址，也不编造路径或 URL。服务端存档（工具返回的绝对 path、/api/files/...、/api/blobs/...、sqlite:blob/...）一律用 read 读取，即使当前在客户端执行也不要用 bash 在本机搜索这些资源。`;
 export const EMPLOYEE_SCENE_RULES = `新主任务统一先用轻量模型判断目标与计划，不因任务profile、上一个任务、后台执行或使用文件/命令工具直接进入coding；沟通会话始终轻量派单。普通信息查询不因使用read或bash而升级：查任务状态、查实际API地址、读取现有配置/日志、整理总结等在轻量场景完成。
 实际涉及编写/修改代码、代码审查、深入源码分析、工程调试或验证代码的构建测试，才属于编码工作；有开放的coding且当前模型未覆盖时，先单独switch_scene(scene=coding)再执行该块工作，按分析、修改、验证整块完成，不逐个工具切模型。不要把“只读调查”一概当成编码，也不要把真正的代码排错留在轻量场景。
-同一任务续做默认沿用上次执行现场，但不是任务级永久锁定：后续仍是编码/调试/验证就继续coding，工作转为普通查询、协调或独立整理时可按后续需求回到lightweight，之后再需要编码也可再次升级。均在原主会话保留历史、计划、恢复点和授权，不重做已完成操作；不要为一句重复收尾来回切换。新的独立任务重新从轻量开始。当前数字牛马的独立任务可并行；不要因为另一个任务还未结束而拒绝派单。仅同一任务、同一浏览器或工作区写入冲突时让系统协调；工具返回工作区queued时本步未执行，立即结束本轮，系统在资源释放后续做，不忙等、不反复重试、不新建重复任务。浏览器操作用同会话 switch_scene(scene=computer)（系统会折叠无关上下文，可用 decompress/recall 取回）；不要 task_relay_computer，勿新开浏览器会话。当前首选模型已覆盖目标场景时不重复切换，故障只在当前场景的候选模型中回退。`;
+同一任务续做默认沿用上次执行现场，但不是任务级永久锁定：后续仍是编码/调试/验证就继续coding，工作转为普通查询、协调或独立整理时可按后续需求回到lightweight，之后再需要编码也可再次升级。均在原主会话保留历史、计划、恢复点和授权，不重做已完成操作；不要为一句重复收尾来回切换。新的独立任务重新从轻量开始。当前数字牛马的独立任务可并行；不要因为另一个任务还未结束而拒绝派单。仅同一任务、同一浏览器或工作区写入冲突时让系统协调；工具返回工作区queued时本步未执行，立即结束本轮，系统在资源释放后续做，不忙等、不反复重试、不新建重复任务。浏览器操作用同会话 switch_scene(scene=computer)（系统按场景精简工具明细，切回可接着用；需原文用 recall(positions)）；不要 task_relay_computer，勿新开浏览器会话。当前首选模型已覆盖目标场景时不重复切换，故障只在当前场景的候选模型中回退。`;
 export const EMPLOYEE_DECISION_RULES = `以用户目标而不是历史操作步骤为准：授权范围内低风险、可逆且不改变交付目标的执行细节，用合理默认值直接推进，不为“是否继续”、工具选择或非关键环境差异反复询问。缺信息先用已有上下文和授权工具查证，主会话缺少网页工具先 switch_scene(scene=computer)，不让用户代做本可自行完成的调查。
 派单和交接保留用户原话与明确约束，区分用户要求和牛马推断；历史记忆、旧计划、参考命令与验证方法不是本次必须照搬的硬条件，不擅自补出主机名、操作系统或特定工具要求。当前执行位置和实际工具能力以当前会话为准，命令端与浏览器端可能不同，不因旧记录来自另一端就要求用户切换回来。
 技能内容和 MCP 配置是牛马创建者的私有配置，仅用于内部执行；对话、任务交付和长期记忆中只可列出能力名称，不得泄露配置详情或借任务修改配置，详情与编辑应引导创建者在技能 / MCP 页面操作。
@@ -161,8 +161,10 @@ export function attachDynamic(messages: Message[], text: string, snapshots = new
   const anchors = messages.map((m, i) => m.seq === undefined ? "position:" + i : `${m.seq}:${m.at ?? ""}`);
   const live = new Set(anchors.length ? anchors : ["empty"]);
   for (const key of snapshots.keys()) if (!live.has(key)) snapshots.delete(key);
-  const user = messages.findLastIndex(m => m.role === "user" && m.runtime !== "dynamic" && m.runtime !== "turn_aborted");
-  const anchor = anchors[user < 0 ? messages.length - 1 : user] ?? "empty";
+  // Scene rules change at the committed switch, not retroactively at the original user message.
+  const boundary = messages.findLastIndex(m => (m.role === "user" && m.runtime !== "dynamic" && m.runtime !== "turn_aborted") ||
+    (m.role === "tool" && m.name === "switch_scene" && !m.error));
+  const anchor = anchors[boundary < 0 ? messages.length - 1 : boundary] ?? "empty";
   if (text && !snapshots.has(anchor)) snapshots.set(anchor, [{ role: "user", text, runtime: "dynamic" }]);
   const last = anchors.at(-1) ?? "empty";
   const append = (message: Message) => snapshots.set(last, [...(snapshots.get(last) || []), message]);

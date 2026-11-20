@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Store, Message } from "./store";
 import { assert, clip, type Obj } from "./util";
-import { units, protectedStart, refName, promptHistory } from "./history";
+import { units, protectedStart, refName, promptHistory, sceneHistory } from "./history";
 export type Fold = {
   id: string;
   start: number;
@@ -102,6 +102,8 @@ export const sinceNewSession = (rows: Message[]) => {
   const i = rows.findLastIndex((m) => m.newSession);
   return i < 0 ? rows : rows.slice(i + 1);
 };
+const visibleMessages = (rows: readonly Readonly<Message>[]) =>
+  sinceNewSession(rows as Message[]).filter((m) => !(m.notice && m.newTask));
 export class Context {
   window = 200000;
   reserved = 32000;
@@ -110,8 +112,9 @@ export class Context {
   completedBefore = 0;
   accounting = "";
   /** A session's context with its saved budget (window, reserved output, fixed overhead). */
-  static async open(store: Store, session: string, mode: "auto" | "acp" = "acp") {
+  static async open(store: Store, session: string, mode: "auto" | "acp" = "acp", scene?: string) {
     const context = new Context(store, session, mode), s = await context.state();
+    context.scene = scene ?? (await store.session(session)).scene;
     context.window = s.window || 200000;
     context.reserved = s.reserved ?? 32000;
     context.overhead = s.overhead || 0;
@@ -124,7 +127,9 @@ export class Context {
     public mode: "auto" | "acp" = "acp",
   ) {}
   /** This session's rows the model sees: those after any legacy newSession divider, skipping UI-only /new task notices. */
-  async messages() { return sinceNewSession(await this.store.messages(this.session)).filter((m) => !(m.notice && m.newTask)); }
+  async messages() { return visibleMessages((await this.store.sharedMessages(this.session)).rows); }
+  scene?: string;
+  get dynamicKey() { return this.scene ? this.session + ":" + this.scene : this.session; }
   async state(): Promise<State> {
     return {
       ...fresh(),
@@ -160,8 +165,8 @@ export class Context {
     s.reserved = this.reserved;
     s.overhead = this.overhead;
     s.dynamicTokens = dynamicTokens;
-    if (changed) await this.save(s);
-    if (s.model !== key) {
+    const modelChanged = s.model !== key;
+    if (modelChanged) {
       s.model = key;
       s.anchor = undefined;
       s.calibration = 1;
@@ -169,8 +174,8 @@ export class Context {
       s.baseline = 0;
       s.nudgeShown = 0;
       s.shownByTier = [0, 0, 0, 0];
-      await this.save(s);
     }
+    if (changed || modelChanged) await this.save(s);
   }
   async folds() {
     return (
@@ -256,11 +261,17 @@ export class Context {
     }
     return out;
   }
+  private projection?: { last?: Message; key: string; rows: Message[] };
   async promptView(rows?: Message[]) {
-    rows ??= await this.messages();
-    return promptHistory(await this.view(rows), {
-      trimImages: (await this.state()).trimImages,
-    });
+    const state = await this.state();
+    const render = async (source: Message[]) => promptHistory(sceneHistory(await this.view(source), this.scene), { trimImages: state.trimImages });
+    if (rows) return render(rows);
+    const shared = await this.store.sharedMessages(this.session), last = shared.rows.at(-1);
+    const key = JSON.stringify([shared.revision, this.scene, this.mode, state.generation, state.trimImages, state.truncated]);
+    if (this.projection?.key === key && this.projection.last === last) return this.projection.rows;
+    const projected = await render(visibleMessages(shared.rows));
+    this.projection = { key, last, rows: projected };
+    return projected;
   }
   async promptTokens(view?: Message[]) {
     view ??= await this.promptView();
@@ -552,11 +563,13 @@ export class Context {
     return out;
   }
   async nudge() {
-    const rows = await this.messages(),
-      used = await this.promptTokens(),
-      ratio = used / this.window,
-      s = await this.state(),
-      runs = await this.runs(rows),
+    const used = await this.promptTokens(), ratio = used / this.window, s = await this.state();
+    // Far from pressure, avoid walking the archive for ranges/tier groups on every tool round.
+    if (ratio < 0.45 && !s.nudgeShown && !s.shownByTier.some(Boolean)) {
+      if (!s.baseline || used < s.baseline) { s.baseline = used; await this.save(s); }
+      return;
+    }
+    const rows = await this.messages(), runs = await this.runs(rows),
       groups = [await this.groups(1, rows), await this.groups(2, rows)],
       pending = [
         runs.reduce((n, r) => n + r.tokens, 0),
@@ -760,6 +773,7 @@ export class Context {
       s = await this.state(),
       key = JSON.stringify([
         revision,
+        this.scene,
         this.mode,
         this.window,
         this.reserved,
@@ -773,7 +787,7 @@ export class Context {
       statusCache.set(this.session, cached);
       return { ...cached.value };
     }
-    const value = await this.computeStatus(rows as Message[], s);
+    const value = await this.computeStatus(visibleMessages(rows), s);
     statusCache.delete(this.session);
     statusCache.set(this.session, { key, value });
     while (statusCache.size > STATUS_CACHE_SESSIONS)
@@ -960,96 +974,6 @@ export class Context {
     if (name === "search_context") return await this.search(args);
     if (name === "recall") return await this.recall(args);
     return await this.status();
-  }
-  /**
-   * On switch_scene: fold finished spans that are foreign to the destination scene so the
-   * model does not drag chrome screenshots into coding (or coding dumps into computer).
-   * Originals stay in SQLite; decompress / recall / search_context restore them.
-   */
-  async sceneFold(fromScene: string, toScene: string) {
-    if (!fromScene || !toScene || fromScene === toScene) return { status: "noop" as const };
-    const foldBrowser = toScene !== "computer" && (fromScene === "computer" || toScene === "coding" || toScene === "lightweight");
-    const foldCoding = toScene === "computer" && fromScene !== "computer";
-    if (!foldBrowser && !foldCoding) return { status: "noop" as const };
-    const rows = await this.messages(),
-      live = await this.live(rows),
-      limit = await this.protectedStart(rows),
-      covered = (n: number) => live.some((b) => b.start <= n && n <= b.end);
-    const isChrome = (m: Message) =>
-      (m.role === "tool" && !!m.name?.startsWith("chrome_")) ||
-      !!m.calls?.some((c) => c.name.startsWith("chrome_")) ||
-      (!!m.images?.length && m.role === "tool");
-    const isCodingHeavy = (m: Message) =>
-      (m.role === "tool" && ["bash", "write", "edit", "read"].includes(m.name || "")) ||
-      !!m.calls?.some((c) => ["bash", "write", "edit"].includes(c.name));
-    const match = foldBrowser ? isChrome : isCodingHeavy;
-    const topic = foldBrowser ? `folded-browser-for-${toScene}` : `folded-coding-for-${toScene}`;
-    // Gather finished units that contain matching messages and sit outside the protected tail.
-    const picks: { start: number; end: number }[] = [];
-    for (const u of units(rows).filter((u) => u.end < limit && !u.open)) {
-      if (covered(u.start) || covered(u.end)) continue;
-      const span = rows.filter((m) => m.seq! >= u.start && m.seq! <= u.end);
-      if (!span.some(match)) continue;
-      // Prefer units that are mostly foreign content (avoid folding the user's latest ask).
-      const foreign = span.filter(match).length;
-      if (foreign < 1) continue;
-      picks.push({ start: u.start, end: u.end });
-    }
-    if (!picks.length) {
-      // Still drop old images when leaving computer — cheap win without a fold.
-      if (foldBrowser && await this.trimOldImages()) return { status: "applied" as const, trimmedImages: true };
-      return { status: "noop" as const };
-    }
-    // Merge adjacent picks into one span for a denser mechanical fold.
-    picks.sort((a, b) => a.start - b.start);
-    let start = picks[0].start, end = picks[0].end;
-    for (const p of picks.slice(1)) {
-      if (p.start <= end + 1) end = Math.max(end, p.end);
-      else break; // keep first contiguous run only (protected-tail rules already limit size)
-    }
-    if (!this.closed(rows, start, end)) return { status: "noop" as const };
-    const span = rows.filter((m) => m.seq! >= start && m.seq! <= end);
-    const lines = [
-      `(Scene fold: ${fromScene} → ${toScene}; mechanical outline, not proof of success. The calls listed already ran: do not repeat them; decompress / recall / search_context for originals.)`,
-    ];
-    const artifacts = new Set<string>();
-    for (const m of span) {
-      if (m.role === "assistant" && m.text) {
-        const length = [...m.text.trim()].length;
-        // Long replies are delivery bodies: keep their number so task_complete can cite them instead of rewriting.
-        lines.push(length >= 300 ? `- assistant #${m.seq}（${length}字正文，原文保留，可用 deliverableRefs:[${m.seq}] 引用）: ${short(m.text, 160)}` : "- assistant: " + short(m.text, 160));
-      }
-      for (const c of m.calls || [])
-        if (c.name === "task_progress" && Array.isArray(c.arguments?.plan))
-          lines.push("- called task_progress " + short(String(c.arguments.message || ""), 100) + " | plan: " + short(c.arguments.plan.map((step: Obj) => `[${step.status}] ${short(String(step.content || ""), 60)}`).join("; "), 400));
-        else lines.push("- called " + c.name + " " + short(JSON.stringify(c.arguments), 100));
-      if (m.role === "tool")
-        lines.push("- " + (m.name || "tool") + (m.error ? " failed: " : ": ") + short(m.text || "", 120));
-      for (const image of m.images || []) {
-        const ref = image.url || image.path || (image.blobId ? "sqlite:blob/" + image.blobId : "");
-        if (ref) artifacts.add(ref);
-      }
-    }
-    if (artifacts.size) lines.splice(1, 0, "- artifacts: " + [...artifacts].slice(-8).join(", "));
-    const s = await this.state();
-    const fold: Fold = {
-      id: await this.nextID(s),
-      start,
-      end,
-      summary: lines.slice(0, 60).join("\n"),
-      topic,
-      active: true,
-      children: [],
-      tier: 1,
-      mechanical: true,
-      hash: hash(span),
-      at: Date.now(),
-    };
-    if (estimate(this.block(fold, rows)) >= estimate(await this.view(span)) * 0.95)
-      return { status: "noop" as const, reason: "fold not smaller" };
-    await this.commit(fold, [], s);
-    if (foldBrowser) await this.trimOldImages();
-    return { status: "applied" as const, block: fold.id, topic, start, end };
   }
   async stage() {
 

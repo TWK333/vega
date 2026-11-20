@@ -103,9 +103,8 @@ export function outputBudget(
       images: images?.map(() => ({ imageTokens: 1600 })),
     })),
   ]);
-  const tokens =
-    [...plain].reduce((n, c) => n + (c.charCodeAt(0) > 127 ? 1 : 0.25), 0) +
-    rows.reduce((n, m) => n + (m.images?.length || 0) * 1600, 0);
+  let tokens = rows.reduce((n, m) => n + (m.images?.length || 0) * 1600, 0);
+  for (const c of plain) tokens += c.charCodeAt(0) > 127 ? 1 : 0.25;
   const available = Math.floor(model.contextWindow - tokens - 256);
   assert(available >= 32, "Context window input leaves no output budget");
   return Math.min(model.maxOutputTokens, available);
@@ -120,6 +119,7 @@ export async function bodyFor(
     data: string;
   }>,
   cacheKey?: string,
+  budgetRows?: Message[],
 ) {
   const trimmed = historyImages(input),
     rows = resolveImage
@@ -137,7 +137,7 @@ export async function bodyFor(
     options = wireOptions(model),
     body: Obj = { ...options, model: model.id, stream: true };
   const api = model.api;
-  const budget = outputBudget(model, system, rows, tools);
+  const budget = outputBudget(model, system, budgetRows || trimmed, tools);
   if (api === "anthropic-messages") {
     delete body.max_tokens_field;
     body.model = model.id.replace(/\[1m\]$/, "");
@@ -546,7 +546,7 @@ export class Providers {
     data: im.data || "",
   });
   reset(session: string) {
-    this.dynamics.delete(session);
+    for (const key of this.dynamics.keys()) if (key === session || key.startsWith(session + ":")) this.dynamics.delete(key);
     for (const key of this.checkpoints.keys())
       if (key.startsWith(session + ":")) this.checkpoints.delete(key);
   }
@@ -563,10 +563,11 @@ export class Providers {
     // Only conversation turns can return tool-error receipts; one-shot model judges stay strict.
     deferToolErrors = false,
     usageScope?: UsageScope,
+    scene?: string,
   ): Promise<Message> {
     const meter = new RequestMeter(model, usageScope, this.onRequestUsage);
     try {
-      const reply = await this.generate(model, system, messages, tools, signal, emit, session, cacheKey, deferToolErrors, meter);
+      const reply = await this.generate(model, system, messages, tools, signal, emit, session, cacheKey, deferToolErrors, meter, scene);
       await meter.finish("completed");
       return reply;
     } catch (error) {
@@ -576,18 +577,11 @@ export class Providers {
   }
   private async generate(
     model: Model, system: string, messages: Message[], tools: Tool[], signal: AbortSignal,
-    emit: Emit, session: string, cacheKey: string | undefined, deferToolErrors: boolean, meter: RequestMeter,
+    emit: Emit, session: string, cacheKey: string | undefined, deferToolErrors: boolean, meter: RequestMeter, scene?: string,
   ): Promise<Message> {
     const promptCacheKey = cacheKey || session;
-    const { path, body } = await bodyFor(
-          model,
-          system,
-          messages,
-          tools,
-          this.resolveImage,
-          promptCacheKey,
-        );
     if (model.api === "devin") {
+      const { body } = await bodyFor(model, system, messages, tools, this.resolveImage, promptCacheKey);
       const reply = await devinStream(model, body, model.options.__devinVersion || "3000.11.228", signal, emit, deferToolErrors, meter);
       signal.throwIfAborted();
       return usableReply(reply);
@@ -616,8 +610,9 @@ export class Providers {
         .filter(Boolean)
         .join(",");
     }
-    const scope = hash({
-        base: model.baseURL,
+    const resumable = !!session && model.api === "openai-responses";
+    const scope = resumable && hash({
+        scene, base: model.baseURL,
         model: model.id,
         system,
         tools,
@@ -626,29 +621,16 @@ export class Providers {
         headers,
       }),
       checkpointKey = session + ":" + scope;
-    const previous = this.checkpoints.get(checkpointKey);
     const owner = crypto.randomUUID();
-    let continuation = false;
-    if (session && model.api === "openai-responses") {
+    let previous: Checkpoint | undefined, continuation = false;
+    if (resumable) {
       for (const [key, v] of this.checkpoints)
         if (performance.now() - v.at > 1800000) this.checkpoints.delete(key);
-      if (
-        previous &&
-        !previous.disabled &&
-        previous.response &&
-        historyHash(messages.slice(0, previous.count)) === previous.prefix
-      ) {
-        body.previous_response_id = previous.response;
-        body.input = (await bodyFor(
-                  model,
-                  system,
-                  messages.slice(previous.count),
-                  tools,
-                  this.resolveImage,
-                  promptCacheKey,
-                )).body.input;
-        continuation = true;
-      }
+      previous = this.checkpoints.get(checkpointKey);
+      messages = historyImages(messages);
+      continuation = !!previous?.response && !previous.disabled && previous.count <= messages.length &&
+        historyHash(messages.slice(0, previous.count)) === previous.prefix;
+      this.checkpoints.delete(checkpointKey); // keep the most recently used scopes on eviction
       this.checkpoints.set(checkpointKey, {
         response: "",
         count: 0,
@@ -664,6 +646,10 @@ export class Providers {
       if (this.checkpoints.size > 512)
         this.checkpoints.delete(this.checkpoints.keys().next().value!);
     }
+    // A valid continuation needs only new images on the wire; the output budget still covers the whole prefix.
+    const { path, body } = await bodyFor(model, system, continuation ? messages.slice(previous!.count) : messages,
+      tools, this.resolveImage, promptCacheKey, continuation ? messages : undefined);
+    if (continuation) body.previous_response_id = previous!.response;
     const send = (path: string, body: Obj, redirect: RequestRedirect = model.localAuth || model.api === "codebuddy" ? "manual" : "follow") => meter.send(model.baseURL + path, {
       method: "POST", redirect,
       headers, body: JSON.stringify(body), signal,

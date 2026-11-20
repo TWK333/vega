@@ -62,6 +62,8 @@ export type Message = {
   progress?: boolean;
   /** Step output is a separate card, not a group instruction to dispatch mentions. */
   stepOutput?: boolean | { step: number; label: string; text?: string; files?: FileRef[] };
+  /** Host-recorded scene of an assistant tool batch, never inferred from model or call arguments. */
+  toolScene?: string;
   thinking?: string;
   signature?: string;
   opaque?: any[];
