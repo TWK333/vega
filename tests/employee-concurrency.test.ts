@@ -34,6 +34,9 @@ test("a lightweight shell query releases its workspace lease before later model 
       if (attempt === 1) { assert(messages.findLast(message => message.role === "tool")!.text!.includes("query complete")); reasoning = true; await gate; }
     } else {
       assert.equal(id, writer);
+      const taskPrompt = messages.find(message => message.role === "user" && message.text?.includes("[热心市民任务"))?.text || "";
+      assert.match(taskPrompt, /git switch -c <新分支> <基线SHA>/);
+      assert.match(taskPrompt, /git worktree add -b <新分支> <目录> <基线SHA>/);
       if (model.selection === "p/light") return call("code", "switch_scene", { scene: "coding", message: "验证编码阶段可继续执行" });
       if (!messages.some(message => message.role === "tool" && message.name === "write")) {
         assert.equal(engine.employee.writers.size, 0, "entering coding does not reserve a writer");
