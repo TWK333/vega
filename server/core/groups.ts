@@ -8,7 +8,7 @@ import { ATTACHMENTS_MAX } from "./attachments";
 import { narrate, narratorSetup, NARRATOR } from "./narrator";
 import { createHash } from "node:crypto";
 import { quoteOf } from "../../shared/chat-quote";
-import { NEW_SESSION_NOTICE, newCommand } from "./new-session";
+import { NEW_TASK_NOTICE, newCommand } from "./new-session";
 
 /**
  * 群聊: users and their employees working together. Any user in a group can talk to and @ any employee in it; each
@@ -367,7 +367,8 @@ export class Groups {
       }
     }
     return rows.filter((m) => {
-      if (!m.seq || m.notice) return false;
+      if (!m.seq) return false;
+      if (m.notice) return !!(m.newTask && m.topicTaskId === task.id);
       if (!related.has(m.seq) && (otherTopic(m) || !((m.quote && related.has(m.quote.seq)) || (m.replyToSeq && related.has(m.replyToSeq))))) return false;
       related.add(m.seq);
       return true;
@@ -387,17 +388,24 @@ export class Groups {
     const topic = a.topicTaskId === undefined ? undefined : await this.topicTask(group, a.topicTaskId);
     check(a.topicTaskId === undefined || topic, 404, "群任务话题不存在");
     const name = (await this.userRows([viewer.id])).get(viewer.id)?.name || "用户";
-    // A topic is a view of the same session, not a place to reset the whole group.
+    // /new [text]: run as a new independent task while keeping the group/topic conversation context.
     const command = newCommand(text);
-    check(!topic || !command, 400, "请在主聊天使用 /new");
+    let newTask = false;
     if (command) {
-      const previous = clientMessageId ? await this.store.clientMessage(group.session, viewer.id, clientMessageId) : undefined;
-      if (previous) return { seq: previous.seq, duplicate: true };
       const alone = !command.rest && !a.images?.length && !a.files?.length;
-      const divider = await this.newSessions(group, alone ? { actorId: viewer.id, clientMessageId } : {});
-      if (alone) return { seq: divider.seq };
+      if (alone) {
+        const previous = clientMessageId ? await this.store.clientMessage(group.session, viewer.id, clientMessageId) : undefined;
+        if (previous) return { seq: previous.seq, duplicate: true };
+        const notice = await this.append(group, { role: "assistant", notice: true, newTask: true, topicTaskId: topic?.task.id, actorId: viewer.id, clientMessageId, text: NEW_TASK_NOTICE });
+        return { seq: notice.seq };
+      }
+      newTask = true;
+    } else {
+      const tail = (await this.store.messagePage(group.session, { limit: 10 })).messages
+        .filter((m) => !m.delivery && !m.progress && !m.stepOutput && (topic ? m.topicTaskId === topic.task.id : !m.topicTaskId)).at(-1);
+      if (tail?.notice && tail?.newTask && (!tail.actorId || tail.actorId === viewer.id)) newTask = true;
     }
-    const canDeduplicate = clientMessageId && !command;
+    const canDeduplicate = !!clientMessageId;
     const save = async () => {
       if (canDeduplicate) {
         // Membership and duplicate lookup must both hold at the point of append.
@@ -405,28 +413,11 @@ export class Groups {
         const previous = await this.store.clientMessage(group.session, viewer.id, clientMessageId);
         if (previous) return { seq: previous.seq, duplicate: true };
       }
-      const saved = await this.append(group, { role: "user", text: command ? command.rest : text, images: a.images?.length ? a.images : undefined, files: a.files?.length ? a.files : undefined, quote: a.quote, topicTaskId: topic?.task.id, actorId: viewer.id, clientMessageId, author: { kind: "user", id: viewer.id, name }, hop: 0 });
+      const saved = await this.append(group, { role: "user", text: command ? command.rest : text, ...(newTask ? { newTask: true } : {}), images: a.images?.length ? a.images : undefined, files: a.files?.length ? a.files : undefined, quote: a.quote, topicTaskId: topic?.task.id, actorId: viewer.id, clientMessageId, author: { kind: "user", id: viewer.id, name }, hop: 0 });
       this.store.afterCommit(() => void this.dispatch(group.id, saved).catch((error) => this.report(group.id, error)));
       return { seq: saved.seq };
     };
     return canDeduplicate ? this.store.transaction(save) : save();
-  }
-  /** /new: a divider; members' and the 旁白's sessions here are deleted (recreated on next use) and see only what follows. */
-  private async newSessions(group: Group, mark: Partial<Message>) {
-    this.assertIdle(group, group.employees.map((e) => e.id));
-    const { divider, old } = await this.store.transaction(async () => {
-      const divider = await this.store.append(group.session, { ...mark, role: "assistant", notice: true, newSession: true, text: NEW_SESSION_NOTICE });
-      const old = await this.change(group.id, (g) => {
-        const old = [...Object.values(g.memberSessions), ...(g.narrator?.session ? [g.narrator.session] : [])];
-        g.memberSessions = {};
-        delete g.narrator;
-        g.newSessionAt = divider.seq;
-        return old;
-      });
-      return { divider, old };
-    });
-    for (const session of old) { await this.dropSession(session); await this.engine.releaseSession(session); }
-    return divider;
   }
   /** A member's turn ended: its reply goes into the group (empty text is skipped). */
   async replied(session: Session, employeeId: string, text: string, tasks: NonNullable<Message["tasks"]>, hop: number, failed = false, matchedTaskId?: string) {
@@ -662,7 +653,7 @@ export class Groups {
     const floor = group.newSessionAt || 0;
     const seen = topic ? floor : Math.max((await this.store.lastMessage(session, "user"))?.group?.seq || 0, floor);
     const rows = topic ? await this.topicRows(group, topic) : (await this.store.messagePage(group.session, { after: seen })).messages;
-    const recent = rows.filter((m) => m.seq! > seen && m.seq! <= trigger.seq!).slice(-CONTEXT_MESSAGES);
+    const recent = rows.filter((m) => m.seq! > seen && m.seq! <= trigger.seq! && !(m.notice && m.newTask)).slice(-CONTEXT_MESSAGES);
     const label = (m: Message) => m.notice ? "系统" : m.author?.kind === "employee" ? (m.author.id === member.id ? "你" : `牛马「${m.author.name}」`) : `用户「${m.author?.name || "?"}」`;
     const attached = (m: Message) => [m.images?.length ? `${m.images.length} 张图片` : "", m.files?.length ? "文件 " + m.files.map((f) => f.name).join("、") : ""].filter(Boolean).join("，");
     const line = (m: Message) => `#${m.seq} ${label(m)}：${cut(String(m.displayText || m.text || ""), CONTEXT_CHARS)}${attached(m) ? `（附：${attached(m)}）` : ""}${m.quote ? `（回复 #${m.quote.seq}）` : ""}`;
@@ -686,6 +677,7 @@ export class Groups {
     if (trigger.author?.kind === "user") await (await this.employee(member.id))?.acceptUserSchedule(String(trigger.text || ""));
     await this.engine.submitChat(session, {
       role: "user", text, hop: (trigger.hop || 0) + 1,
+      ...(trigger.newTask ? { newTask: true } : {}),
       images: images.length ? images.map(({ mime, blobId }) => ({ mime, blobId })) : undefined, files: files.length ? files : undefined,
       ...(from.kind === "user" ? { actorId: from.id } : {}),
       group: { groupId: group.id, name: group.name, seq: trigger.seq!, from, byOwner, topicTaskId: topic?.task.id },

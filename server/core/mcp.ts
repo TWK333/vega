@@ -33,15 +33,22 @@ type ToolList = Awaited<ReturnType<Client["listTools"]>>;
 type Catalog = { page?: ToolList; pending?: Promise<ToolList>; refs: Map<string, string> };
 type Page = { server: string; client: Client; catalog: Catalog; query: string; rows: Obj[]; remote?: string };
 const timeout = (value: number, fallback: number) => Number.isSafeInteger(value) && value > 0 ? Math.min(120000, value) : fallback;
-const transportCodes = new Set(["ECONNRESET", "ECONNREFUSED", "ECONNABORTED", "EPIPE", "EAI_AGAIN", "ETIMEDOUT", "UND_ERR_SOCKET", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
-function classify(error: any, aborted: boolean) {
+const connectTimeoutCodes = new Set(["UND_ERR_CONNECT_TIMEOUT"]);
+const connectFailedCodes = new Set(["ECONNREFUSED", "EAI_AGAIN", "ENOTFOUND", "EHOSTUNREACH", "ENETUNREACH"]);
+const transportCodes = new Set(["ECONNRESET", "ECONNABORTED", "EPIPE", "ETIMEDOUT", "UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
+function classify(error: any, aborted: boolean): { kind: string; status?: number; transient: boolean; unsent?: boolean; causeCode?: string } {
   if (aborted) return { kind: "cancelled", transient: false };
   if (error instanceof StreamableHTTPError && error.code && error.code >= 100 && error.code <= 599)
     return { kind: "http_status", status: error.code, transient: [408, 429, 500, 502, 503, 504].includes(error.code) };
   if (error?.name === "TimeoutError" || (error instanceof McpError && error.code === ErrorCode.RequestTimeout))
     return { kind: "timeout", transient: true };
-  if ((error instanceof McpError && error.code === ErrorCode.ConnectionClosed) || transportCodes.has(error?.cause?.code || error?.code))
-    return { kind: "connection_lost", transient: true };
+  const code = typeof error?.cause?.code === "string" ? error.cause.code : typeof error?.code === "string" ? error.code : undefined;
+  if (code && connectTimeoutCodes.has(code)) return { kind: "connect_timeout", transient: true, unsent: true, causeCode: code };
+  if (code && connectFailedCodes.has(code)) return { kind: "connect_failed", transient: true, unsent: true, causeCode: code };
+  if (error instanceof McpError && error.code === ErrorCode.ConnectionClosed)
+    return { kind: "connection_lost", transient: true, causeCode: "ConnectionClosed" };
+  if (code && transportCodes.has(code))
+    return { kind: "connection_lost", transient: true, causeCode: code };
   return { kind: error instanceof McpError ? "rpc_error" : "invalid_response_or_configuration", transient: false };
 }
 
@@ -55,16 +62,16 @@ export class MCP {
   readonly described = new Map<string, Map<string, string>>();
   private readonly pages = new Map<string, Page>();
   private readonly catalogs = new WeakMap<Client, Catalog>();
-  private readonly reviewKeys = new WeakMap<Client, Buffer>();
-  // A ref proves this exact definition was returned on this connection; listing and guessing a call in the same batch is not enough.
-  private definitionRef(client: Client, fingerprint: string) {
-    let key = this.reviewKeys.get(client);
-    if (!key) this.reviewKeys.set(client, key = randomBytes(32));
+  private readonly reviewKeys = new Map<string, Buffer>();
+  // A ref proves this exact definition was returned on this session and server configuration; listing and guessing a call in the same batch is not enough.
+  private definitionRef(server: string, fingerprint: string) {
+    let key = this.reviewKeys.get(server);
+    if (!key) this.reviewKeys.set(server, key = randomBytes(32));
     return createHmac("sha256", key).update(fingerprint).digest("base64url");
   }
-  private review(client: Client, def: Obj, budget: number) {
+  private review(server: string, client: Client, def: Obj, budget: number) {
     if (Buffer.byteLength(JSON.stringify(def)) > budget) return;
-    const review = { definition: this.safe(def), definitionRef: this.definitionRef(client, definitionFingerprint(def)) };
+    const review = { definition: this.safe(def), definitionRef: this.definitionRef(server, definitionFingerprint(def)) };
     if (Buffer.byteLength(JSON.stringify(review)) <= budget) {
       this.bind(client, def.name, review.definitionRef);
       return review;
@@ -143,7 +150,7 @@ export class MCP {
       const tools = [...catalog.page.tools].sort((a, b) => a.name.localeCompare(b.name));
       for (const tool of tools) {
         if (readOnly && !this.isLocallyReadOnly(name, tool.name)) continue;
-        const review = this.review(client, tool, Math.min(budget, 12 * 1024));
+        const review = this.review(name, client, tool, Math.min(budget, 12 * 1024));
         if (!review) continue;
         const entry = { server: this.text(name), tool: this.text(tool.name), ...review,
           definition: JSON.parse(definitionFingerprint(review.definition)) };
@@ -235,7 +242,6 @@ export class MCP {
   private forget(name: string, client: Client) {
     if (this.connections.get(name) !== client) return;
     this.connections.delete(name);
-    this.described.delete(name);
     this.invalidateCatalog(client);
   }
   async close() {
@@ -244,6 +250,7 @@ export class MCP {
     const clients = [...this.connections.values()];
     this.connections.clear();
     this.described.clear();
+    this.reviewKeys.clear();
     this.pages.clear();
     await Promise.all(clients.map((client) => client.close().catch(() => {})));
   }
@@ -251,8 +258,8 @@ export class MCP {
   private async operation<T>(name: string, op: Operation, fresh: boolean, signal: AbortSignal | undefined, work: (client: Client, options: Options, step: Step) => Promise<T>, expected?: Client): Promise<T> {
     const started = Date.now(), cancel = signal ? AbortSignal.any([signal, this.lifetime.signal]) : this.lifetime.signal;
     const cfg = Object.hasOwn(this.config, name) ? this.config[name] : undefined;
-    const failure = (message: string, kind: string, attempts: number, stage: Step["stage"], sent = false, status?: number) => new MCPFailure(message, {
-      server: this.text(name), operation: op, stage, kind, status, attempts, elapsedMs: Date.now() - started, sideEffectsPossible: sent, automaticRetryAllowed: false,
+    const failure = (message: string, kind: string, attempts: number, stage: Step["stage"], sent = false, status?: number, causeCode?: string) => new MCPFailure(message, {
+      server: this.text(name), operation: op, stage, kind, status, ...(causeCode ? { causeCode } : {}), attempts, elapsedMs: Date.now() - started, sideEffectsPossible: sent, automaticRetryAllowed: false,
     });
     if (!cfg || cfg.enabled === false) throw failure("MCP server not enabled/configured; check the current employee's service list", "unknown_or_disabled", 0, "initialize");
     // Tenant MCP configuration must never expand host environment variables.
@@ -265,7 +272,7 @@ export class MCP {
       let client: Client | undefined, deadline: AbortSignal | undefined;
       try {
         cancel.throwIfAborted();
-        client = expected || await this.connection(name, cancel);
+        client = (attempt === 1 && expected) || await this.connection(name, cancel);
         step.stage = op;
         if (this.connections.get(name) !== client) throw new McpError(ErrorCode.ConnectionClosed, "MCP connection expired");
         const ms = timeout(cfg.requestTimeoutMs, 30000);
@@ -278,14 +285,16 @@ export class MCP {
           this.forget(name, client);
           void client.close().catch(() => {});
         }
-        if (attempt === 1 && cfg.url && fresh && !step.cursor && issue.transient && !cancel.aborted) {
+        const retryable = (fresh && !step.cursor) || (!!issue.unsent && !step.cursor);
+        if (attempt === 1 && cfg.url && retryable && issue.transient && !cancel.aborted) {
           await sleep(150, cancel).catch(() => {});
           if (!cancel.aborted) continue;
         }
         const kind = cancel.aborted ? "cancelled" : issue.kind;
         const detail = issue.status ? `HTTP ${issue.status}` : kind;
+        const sent = !!step.sent && !issue.unsent;
         throw failure(`MCP ${step.stage} failed (${detail}); URL, headers and upstream error text withheld.` +
-          (step.sent ? " The call may have executed; never retry automatically." : ""), kind, attempt, step.stage, step.sent, issue.status);
+          (sent ? " The call may have executed; never retry automatically." : ""), kind, attempt, step.stage, sent, issue.status, issue.causeCode);
       }
     }
   }
@@ -335,7 +344,7 @@ export class MCP {
       if (!grants) this.described.set(name, grants = new Map());
       const fingerprint = definitionFingerprint(def);
       grants.set(a.tool, fingerprint);
-      this.bind(client, a.tool, this.definitionRef(client, fingerprint));
+      this.bind(client, a.tool, this.definitionRef(name, fingerprint));
       return this.safe(def);
     }
     if (a.op === "call") {
@@ -343,7 +352,7 @@ export class MCP {
       const grant = this.described.get(name)?.get(a.tool), connected = this.connections.get(name);
       const ref = a.definitionRef;
       assert(ref === undefined || (typeof ref === "string" && /^[A-Za-z0-9_-]{43}$/.test(ref)), "Invalid MCP definitionRef; copy it from the current discovery result");
-      assert(connected && (ref || grant), "MCP call requires successful describe or a definitionRef from list on the current configuration and connection; call was not executed");
+      assert(grant || (ref && (connected || this.reviewKeys.has(name))), "MCP call requires successful describe or a definitionRef from list on the current configuration and connection; call was not executed");
       const locallyReadOnly = this.isLocallyReadOnly(name, a.tool);
       assert(!readOnly || locallyReadOnly, "Tool not in local read-only allowlist; annotations are not authorization");
       const started = Date.now();
@@ -354,7 +363,7 @@ export class MCP {
       const result = await this.operation(name, "call", false, signal, async (client, options, step) => {
         step.stage = "revalidate";
         const catalog = this.catalog(client);
-        const reviewed = ref ?? this.definitionRef(client, grant!);
+        const reviewed = ref ?? this.definitionRef(name, grant!);
         const send = () => {
           options.signal.throwIfAborted();
           step.stage = "call";
@@ -374,9 +383,9 @@ export class MCP {
             : blocked("tool_not_found", "tool no longer listed by the server");
         }
         const fingerprint = definitionFingerprint(def);
-        if (ref ? this.definitionRef(client, fingerprint) !== ref : fingerprint !== grant) {
+        if (ref ? this.definitionRef(name, fingerprint) !== ref : fingerprint !== grant) {
           const error = blocked("definition_changed", "tool definition or its review reference changed");
-          const review = this.review(client, def, 12 * 1024);
+          const review = this.review(name, client, def, 12 * 1024);
           if (review) {
             Object.assign(error.diagnostic, review);
             error.message = "MCP definition does not match the reviewed version; call was not executed. Review diagnostic.definition before any new call with diagnostic.definitionRef.";
@@ -413,7 +422,7 @@ export class MCP {
         for (const { tool, index, size } of candidates) {
           const cap = Math.min(budget, 12 * 1024);
           if (size > cap) continue;
-          const review = this.review(client, tool, cap);
+          const review = this.review(name, client, tool, cap);
           if (!review) continue;
           budget -= Buffer.byteLength(JSON.stringify(review));
           Object.assign(page.rows[index], review);

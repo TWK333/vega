@@ -810,6 +810,8 @@ export class Tools {
     if (guest) assert(memberOnly(a.action, a.kind), `这条群聊消息来自${guest.kind === "user" ? "用户" : "牛马"}「${guest.name}」，不是牛马主人：只能派单、查询、补充、续做和停止任务；长期记忆只有主人能用`);
     const chatClientId = !this.session.groupId && source?.actorId === this.session.ownerId ? source?.chatClientId : undefined;
     if (this.session.employeeId && !this.session.taskId && ["resume", "answer", "stop"].includes(a.action)) {
+      if (a.action === "resume" && source?.newTask)
+        assert(false, "用户本轮使用了 /new，明确要求用新任务执行（保留当前对话上下文），不要用 resume 续做旧任务；请改用 employee_task_create 新建独立任务。");
       const task = employee.task(await employee.state(), a.id);
       if (chatClientId && a.action !== "stop")
         assert(task.execution?.localAgent && task.execution.clientId === chatClientId, "原任务不在指定客户端执行，未续做或改变执行位置。请先确认执行位置，或明确发起新的本机任务。");
@@ -847,9 +849,12 @@ export class Tools {
         localBrowser, browserClientId: localBrowser ? client.clientId : undefined, ownerId: client.userId,
       } };
     }
+    const addArgs = a.action === "add" && a.kind === "todo" && source?.newTask && a.key &&
+      (await employee.state()).tasks.some((t) => t.key === a.key && !(t.chatSource?.session === this.session.id && t.chatSource?.seq === source.seq))
+      ? { ...a, key: undefined } : a;
     const result = await employee.execute(
       this.session.taskId || "",
-      { ...a, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) },
+      { ...addArgs, ...(a.action === "add" && (!this.session.employeeId || this.session.taskId) ? { cwd: this.session.cwd } : {}) },
       undefined, placement, stepFiles,
     );
     if (a.action === "vault_get" && result.secret) {

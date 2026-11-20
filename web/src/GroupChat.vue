@@ -377,7 +377,7 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
               <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" :placeholder="activeTopic ? '回复当前任务话题…' : '输入消息，@ 牛马让它干活…'" @keydown="keydown" />
               <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending || uploading || switching" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
             </div>
-            <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天' : '回复牛马或 @ 它让它回应 · /new 开启新会话' }} · Enter 发送 · Shift + Enter 换行</p>
+            <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天 · /new 用新任务执行' : '回复牛马或 @ 它让它回应 · /new 用新任务执行' }} · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
         <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @title="topicTitle = $event" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @close="work = false" />

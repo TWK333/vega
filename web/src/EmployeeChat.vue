@@ -281,7 +281,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
         <button class="primary send" :disabled="uploading || (!draft.trim() && !files.length)" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
       </div>
-      <p class="composer-hint">/new 开启新会话（不再参考之前的对话） · Enter 发送 · Shift + Enter 换行</p>
+      <p class="composer-hint">/new 用新任务执行（保留当前对话上下文） · Enter 发送 · Shift + Enter 换行</p>
     </form>
   </section>
 </template>

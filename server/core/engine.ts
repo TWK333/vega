@@ -1,5 +1,5 @@
 import { cloudFor, cloudEnabled } from "./cloud";
-import { NEW_SESSION_NOTICE } from "./new-session";
+import { NEW_SESSION_NOTICE, NEW_TASK_NOTICE } from "./new-session";
 import { Fire } from "./fire";
 import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
@@ -775,7 +775,14 @@ export class Engine {
     employee.schedule();
     return { ok: true };
   }
-  /** /new in a chat: a divider after which the model context starts over; the visible history stays. */
+  /** /new alone in a chat: arms the next message as a new task without clearing conversation context. */
+  async markNewTask(session: string, mark: Partial<Message> = {}) {
+    assert(!this.active.has(session), "对话仍在进行，请先停止后再标记新任务");
+    const saved = await this.store.append(session, { ...mark, role: "assistant", notice: true, newTask: true, text: NEW_TASK_NOTICE });
+    this.emit({ type: "message_end", session, data: saved });
+    return saved;
+  }
+  /** Legacy context divider: the model context starts over after it while visible history stays. */
   async newChatContext(session: string, mark: Partial<Message> = {}) {
     assert(!this.active.has(session), "对话仍在进行，请先停止后再开启新会话");
     const saved = await this.store.transaction(async () => {
@@ -1264,7 +1271,9 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const supplement = session.localAgent && session.clientId ? this.localAgents.active(session.ownerId, session.clientId)?.supplement : "";
         const nativePlacement = latestChat?.chatClientId && !groupId
           ? "\n[本轮工作位置] 用户明确要求在已选定的客户端执行。沟通仍在服务端；新任务会自动绑定该电脑，不要因为沟通会话在服务端而说看不到本机。离线时如实报告，不改用其他位置；已有任务不自动迁移，位置不符时先说明，不在原位置继续。\n" : "";
-        let dynamic = memories + taskContext + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || "", skillIndex)) + nativePlacement;
+        const newTaskDirective = latestChat?.newTask
+          ? "\n[本轮指令：/new 新任务] 用户明确要求用新任务执行本条请求（保留当前对话上下文，可参考上文及关联任务了解背景、单号和对象）。必须用 employee_task_create 新建独立任务执行，禁止用 employee_task_manage(resume) 续做之前的任务，也不要沿用旧任务的 dedupeKey；派单说明里把上下文中相关的背景、对象和最新要求写完整。\n" : "";
+        let dynamic = memories + taskContext + "\n" + (await sessionDynamicPrompt(session, config, this.store, supplement || "", skillIndex)) + nativePlacement + newTaskDirective;
         if (skillInstructions) dynamic += "\n" + skillInstructions;
         // Scene model edited while this run is in progress: switch on the next provider request.
         const primary = sceneModels(latest, session.scene!)[0];

@@ -59,7 +59,9 @@ test("MCP never replays pagination, the call preflight, or a call with an unknow
   fail = "next";
   await assert.rejects(mcp.execute({ ...list, cursor: first.nextCursor }), (e: MCPFailure) => e.diagnostic?.attempts === 1);
   await assert.rejects(mcp.execute({ ...list, cursor: first.nextCursor }), /expired MCP discovery cursor/);
-  await assert.rejects(mcp.execute(call), /requires successful describe/);
+  fail = "preflight";
+  await assert.rejects(mcp.execute(call), (e: MCPFailure) => e.diagnostic?.attempts === 1 && !e.diagnostic.sideEffectsPossible);
+  assert(!requests.some((q) => q.method === "tools/call"));
   fail = undefined;
   await mcp.execute(describe);
   fail = "preflight";
@@ -294,3 +296,55 @@ test("MCP tells missing tools apart from stale describe records and changed conn
   }
   assert(!requests.some((q) => q.method === "tools/call"));
 });
+
+test("MCP auto-reconnects and revalidates reviewed calls after a transient disconnect", async (t) => {
+  let note = "stable";
+  let dropNextCall = true;
+  const { mcp, requests } = await fixture(t, (q) => {
+    if (q.method === "tools/list") return { tools: [{ ...tool, description: note }] };
+    if (q.method === "tools/call") {
+      if (dropNextCall) { dropNextCall = false; return "disconnect"; }
+      return { content: [{ type: "text", text: "ok" }] };
+    }
+  });
+  const [row] = (await mcp.execute({ op: "list", server: "svc" })).tools;
+  const call = { op: "call", server: "svc", tool: row.name, definitionRef: row.definitionRef };
+  await assert.rejects(mcp.execute(call), (error: MCPFailure) => {
+    assert(error instanceof MCPFailure);
+    assert.equal(error.diagnostic.kind, "connection_lost");
+    assert.equal(error.diagnostic.attempts, 1);
+    assert.equal(error.diagnostic.sideEffectsPossible, true);
+    assert(typeof error.diagnostic.causeCode === "string" && error.diagnostic.causeCode.length > 0);
+    return true;
+  });
+  assert.equal(mcp.connections.get("svc"), undefined);
+  // Next call in the same batch reconnects, revalidates the definition, and succeeds without a fresh list/describe.
+  assert.equal((await mcp.execute(call)).content[0].text, "ok");
+  assert.equal(requests.filter((q) => q.method === "initialize").length, 2);
+  assert.equal(requests.filter((q) => q.method === "tools/list").length, 2);
+  assert.equal(requests.filter((q) => q.method === "tools/call").length, 2);
+  // If the remote definition changes across a disconnect, revalidation still blocks execution.
+  dropNextCall = true;
+  await assert.rejects(mcp.execute(call), (error: MCPFailure) => error.diagnostic.kind === "connection_lost");
+  note = "mutated";
+  await assert.rejects(mcp.execute(call), preflightBlocked("definition_changed"));
+  assert.equal(requests.filter((q) => q.method === "tools/call").length, 3);
+});
+
+test("MCP classifies pre-send connect failures as unsent and retries HTTP calls once", async (t) => {
+  const probe = createServer();
+  await new Promise<void>((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const closedPort = (probe.address() as AddressInfo).port;
+  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  const mcp = new MCP({ svc: { url: `http://127.0.0.1:${closedPort}/mcp`, startupTimeoutMs: 1500, requestTimeoutMs: 1500 } }, process.cwd());
+  t.after(() => mcp.close());
+  await assert.rejects(mcp.execute({ op: "list", server: "svc" }), (error: MCPFailure) => {
+    assert(error instanceof MCPFailure);
+    assert.equal(error.diagnostic.kind, "connect_failed");
+    assert.equal(error.diagnostic.causeCode, "ECONNREFUSED");
+    assert.equal(error.diagnostic.sideEffectsPossible, false);
+    assert.equal(error.diagnostic.attempts, 2);
+    return true;
+  });
+});
+

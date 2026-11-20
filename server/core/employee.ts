@@ -1129,13 +1129,8 @@ export class Employee {
               } else if (run) {
                 delete run.outlineDraft;
               }
-              const additions: Obj[] = draft ? a.outlineReview.map((item: Obj) => {
-                if (item?.changedStep === undefined) return item;
-                const { changedStep, ...fields } = item;
-                assert(fields.requirement === undefined && Number.isSafeInteger(changedStep) && changedStep >= 1 && changedStep <= draft.missing.length,
-                  "changedStep 须为本次 changedSteps 中从 1 开始的有效序号，不能和 requirement 同时填写。");
-                return { ...fields, requirement: draft.missing[changedStep - 1] };
-              }) : [];
+              const unfinished = unfinishedSteps(t.plan);
+              const references = outlineSteps(t, unfinished);
               const evidence = draft?.evidence ?? content;
               const summary = draft ? draft.summary : a.summary;
               const deliverableRef = draft ? draft.deliverableRef : a.deliverableRef;
@@ -1167,21 +1162,44 @@ export class Employee {
                   },
                 };
               }
-              // One refusal names every problem, so a single retry fixes the summary and the citation together.
-              assert(!summaryError && !cited.error, [summaryError, cited.error && "尚未交付：" + cited.error].filter(Boolean).join("\n另外："));
-              const unfinished = unfinishedSteps(t.plan);
-              const references = outlineSteps(t, unfinished);
-              const review = draft ? [...draft.review, ...additions] : a.outlineReview;
-              if (review !== undefined) {
-                assert(Array.isArray(review) && review.length > 0 && review.length <= 100 && review.every((item: Obj) =>
+              const stepRefs = draft ? draft.missing : references;
+              let outlineError = "";
+              let additions: Obj[] = [];
+              if (a.outlineReview !== undefined) {
+                if (!Array.isArray(a.outlineReview) || !a.outlineReview.length || a.outlineReview.length > 100) {
+                  outlineError = "outlineReview 须逐项填写要求原文（或 changedStep 序号）、状态和依据（1–100项）。";
+                } else {
+                  const expanded: Obj[] = [];
+                  for (const item of a.outlineReview) {
+                    if (item && item.changedStep !== undefined) {
+                      const { changedStep, ...fields } = item;
+                      if (fields.requirement !== undefined || !Number.isSafeInteger(changedStep) || changedStep < 1 || changedStep > stepRefs.length) {
+                        outlineError = "changedStep 须为本次 changedSteps 中从 1 开始的有效序号，不能和 requirement 同时填写。";
+                        break;
+                      }
+                      expanded.push({ ...fields, requirement: stepRefs[changedStep - 1] });
+                    } else {
+                      expanded.push(item);
+                    }
+                  }
+                  if (!outlineError) additions = expanded;
+                }
+              }
+              const review = draft ? [...draft.review, ...additions] : (a.outlineReview !== undefined ? additions : undefined);
+              if (!outlineError && review !== undefined) {
+                const validItems = Array.isArray(review) && review.length > 0 && review.length <= 100 && review.every((item: Obj) =>
                   item && item.changedStep === undefined && typeof item.requirement === "string" && item.requirement.trim() && item.requirement.length <= 500 &&
                   ["met", "not_applicable", "unmet"].includes(item.status) &&
-                  typeof item.evidence === "string" && item.evidence.trim() && item.evidence.length <= 2000),
-                "outlineReview 须逐项填写要求原文、状态和依据（1–100项）；changedStep 仅用于补交。");
-                assert(review.reduce((size: number, item: Obj) => size + item.requirement.length + item.evidence.length, 0) <= 32000, "outlineReview exceeds 32000 characters");
-                if (draft) assert(additions.every((item) => draft.missing.includes(item.requirement.trim())),
-                  "复核补交仅允许填写上次返回的 changedSteps；如需修改已列项，请完整提交。");
+                  typeof item.evidence === "string" && item.evidence.trim() && item.evidence.length <= 2000);
+                if (!validItems) outlineError = "outlineReview 须逐项填写要求原文（或 changedStep 序号）、状态和依据（1–100项）。";
+                else if (review.reduce((size: number, item: Obj) => size + item.requirement.length + item.evidence.length, 0) > 32000)
+                  outlineError = "outlineReview exceeds 32000 characters";
+                else if (draft && !additions.every((item) => draft.missing.includes(item.requirement.trim())))
+                  outlineError = "复核补交仅允许填写上次返回的 changedSteps；如需修改已列项，请完整提交。";
               }
+              // One refusal names every problem, so a single retry fixes summary, citation and outlineReview together.
+              assert(!summaryError && !cited.error && !outlineError,
+                [summaryError, cited.error && "尚未交付：" + cited.error, outlineError].filter(Boolean).join("\n另外："));
               if ((t.outlineReviewRequired || unfinished.length) && !review) {
                 return {
                   ok: false, code: "outline_review_required",
@@ -1195,7 +1213,7 @@ export class Employee {
               if (unchecked.length) {
                 // A draft lives only in this run; no rejected delivery is saved or published as a result.
                 const token = run && review ? id("r") : undefined;
-                if (run && token) run.outlineDraft = { token, scope: scope(), evidence, summary, deliverableRef, review, missing: unchecked };
+                if (run && token && review) run.outlineDraft = { token, scope: scope(), evidence, summary, deliverableRef, review, missing: unchecked };
                 return {
                   ok: false, code: "outline_review_incomplete", changedSteps: unchecked,
                   ...(token ? { outlineReviewRetry: token } : {}),

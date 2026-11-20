@@ -125,7 +125,9 @@ test("复核补交可按本次缺项序号引用含替换字符的历史步骤",
     await employee.execute(id, { action: "progress", text: "开始验证", plan: [{ content: requirement, status: "pending" }] });
     await employee.execute(id, { action: "progress", text: "统一复验完成", plan: [{ content: "验收并保留抓包证据", status: "completed" }] });
     const item = { changedStep: 1, status: "met", evidence: "已核对两条请求体" };
-    await assert.rejects(employee.execute(id, { ...delivery, outlineReview: [item] }), /changedStep 仅用于补交/);
+    await assert.rejects(employee.execute(id, { ...delivery, outlineReview: [{ ...item, changedStep: 2 }] }), /有效序号/);
+    await assert.rejects(employee.execute(id, { ...delivery, outlineReview: [{ ...item, requirement }] }), /不能和 requirement 同时填写/);
+    await assert.rejects(employee.execute(id, { ...delivery, summary: "字".repeat(405), outlineReview: [{ ...item, changedStep: 2 }] }), /Delivery summary requires 1–400 characters[\s\S]*另外：[\s\S]*有效序号/);
     const draft = await employee.execute(id, { ...delivery, text: "复验完成", outlineReview: [
       { requirement: "验收并保留抓包证据", status: "met", evidence: "抓包回执已保存" },
     ] });
@@ -137,6 +139,25 @@ test("复核补交可按本次缺项序号引用含替换字符的历史步骤",
     const result = await employee.execute(id, { ...retry, outlineReview: [item] });
     assert.equal(result.stop, true);
     assert.deepEqual((await employee.state()).tasks[0].outlineReview.at(-1), { requirement, status: item.status, evidence: item.evidence });
+  } finally { employee.close(); await store.close(); }
+});
+
+test("首次完整交付也可直接用 changedStep 引用 task_progress 返回的 changedSteps", async () => {
+  const { store, employee, id } = await fixture();
+  try {
+    await running(employee, id);
+    const oldStep = "对查询失败项（如发布计划 403、标签字段缺失等）逐条记录卡点";
+    await employee.execute(id, { action: "progress", text: "登记计划", plan: [{ content: oldStep, status: "pending" }] });
+    const progress = await employee.execute(id, { action: "progress", text: "微调步骤并完成", plan: [{ content: "对查询失败项逐条记录卡点", status: "completed" }] });
+    assert.equal(progress.value.outlineReviewRequired, true);
+    assert.deepEqual(progress.value.changedSteps, [oldStep]);
+    const result = await employee.execute(id, { ...delivery, text: "已记录全部卡点", summary: "已完成", outlineReview: [
+      { changedStep: 1, status: "met", evidence: "已在报告第四节逐条记录卡点" },
+    ] });
+    assert.equal(result.stop, true);
+    assert.deepEqual((await employee.state()).tasks[0].outlineReview, [
+      { requirement: oldStep, status: "met", evidence: "已在报告第四节逐条记录卡点" },
+    ]);
   } finally { employee.close(); await store.close(); }
 });
 

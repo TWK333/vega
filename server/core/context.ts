@@ -123,8 +123,8 @@ export class Context {
     public session: string,
     public mode: "auto" | "acp" = "acp",
   ) {}
-  /** This session's rows the model sees: those after the last /new divider. */
-  async messages() { return sinceNewSession(await this.store.messages(this.session)); }
+  /** This session's rows the model sees: those after any legacy newSession divider, skipping UI-only /new task notices. */
+  async messages() { return sinceNewSession(await this.store.messages(this.session)).filter((m) => !(m.notice && m.newTask)); }
   async state(): Promise<State> {
     return {
       ...fresh(),

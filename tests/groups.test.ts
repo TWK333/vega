@@ -10,7 +10,7 @@ import { Tools } from "../server/core/tools";
 import { Auth } from "../server/core/auth";
 import { GROUP_HOPS_MAX } from "../server/core/groups";
 import { NARRATOR, NARRATOR_SYSTEM } from "../server/core/narrator";
-import { NEW_SESSION_NOTICE, newCommand } from "../server/core/new-session";
+import { NEW_TASK_NOTICE, newCommand } from "../server/core/new-session";
 import { readFileSync } from "node:fs";
 import { parseMentions } from "../server/core/names";
 import { sleep } from "../server/core/util";
@@ -203,7 +203,8 @@ test("task topics collect linked group messages and address replies to the right
     assert.doesNotMatch(request.text, /无关聊天/);
     assert.match(seen.at(-1)!.messages.at(-1).text, /本次话题关联群任务/);
     assert(seen.every((turn) => turn.employeeId === a) && narrated.length === 0);
-    await assert.rejects(engine.groups.send(u2, group.id, { text: "/new", topicTaskId: task.id }), { statusCode: 400 });
+    const armed = await engine.groups.send(u2, group.id, { text: "/new", topicTaskId: task.id });
+    assert((await engine.groups.topicMessages((await engine.groups.get(group.id))!, task.id)).some((m) => m.seq === armed.seq && m.notice && m.newTask && m.text === NEW_TASK_NOTICE));
     const other = await engine.groups.create(u1, { name: "其他群", employees: [a] });
     await assert.rejects(engine.groups.topicMessages((await engine.groups.get(other.id))!, task.id), { statusCode: 404 });
     await assert.rejects(engine.groups.send(u1, other.id, { text: "错误的话题", topicTaskId: task.id }), { statusCode: 404 });
@@ -236,13 +237,13 @@ test("topic restores an older kickoff after the chat source moves; reset only al
     let linked = await seqs();
     assert.equal(linked[0], first.seq, "the actual creation receipt restores the kickoff before the later supplement");
     assert(!linked.includes(unrelated.seq));
-    await engine.groups.send(u1, group.id, { text: "/new" });
+    await store.deleteSession(member);
     assert.equal(await store.hasSession(member), false);
     assert(!(await seqs()).includes(first.seq), "do not guess when the original and receipts are lost");
     const outsider = await store.append(group.session, { role: "user", text: original, at: task.createdAt - 1, author: { kind: "user", id: u1.id, name: "alice" } });
     await employee.update((state) => { employee.task(state, task.id).text = `目标：${title}\n用户原话：「${original}」`; });
     linked = await seqs();
-    assert.equal(linked[0], first.seq, "legacy tasks with a copied original request can still be recovered after /new");
+    assert.equal(linked[0], first.seq, "legacy tasks with a copied original request can still be recovered after member session reset");
     assert(!linked.includes(outsider.seq), "only the original requester's text qualifies");
     await store.append(group.session, { role: "user", text: original, at: task.createdAt - 1, author: requester });
     assert(!(await seqs()).includes(first.seq), "identical repeated messages do not identify a unique kickoff");
@@ -681,33 +682,49 @@ test("/new parsing: alone or with text; anything else is an ordinary message", (
   assert.deepEqual(newCommand("  /new  帮我看下\n第二行 "), { rest: "帮我看下\n第二行" });
   for (const text of ["/news", "说 /new", "/New", "", undefined]) assert.equal(newCommand(text), undefined, String(text));
   const route = readFileSync("server/routes/api/[...path].ts", "utf8");
-  assert(route.includes("newCommand(a.text)") && route.includes("engine.newChatContext(session.id"), "the private chat route handles /new");
+  assert(route.includes("newCommand(a.text)") && route.includes("engine.markNewTask(session.id"), "the private chat route handles /new as new task");
 });
 
-test("/new in a private chat: the visible history stays, the model only sees what follows the divider", async () => {
+test("/new in a private chat: keeps conversation context, forbids resume, and creates a fresh task even with a reused dedupeKey", async () => {
   const { engine, make, close } = await fixture();
   try {
     const a = await make("小A", "u1");
-    const session = await (await engine.employee.for(a)).chat("u1");
-    const seen = script(engine, { [a]: ["旧的回答", "新的回答"] });
-    await engine.submitChat(session.id, { role: "user", text: "旧的问题", actorId: "u1" });
+    const employee = await engine.employee.for(a);
+    const session = await employee.chat("u1");
+    const existing = await employee.execute("", { action: "add", kind: "todo", text: "旧单子查询 1020427644", key: "tapd-1020427644" });
+    await employee.update((s) => { s.tasks[0].status = "done"; });
+    const seen = script(engine, {
+      [a]: [
+        "已查过旧单子 1020427644。",
+        { calls: [{ id: "try_resume", name: "employee_task_manage", arguments: { taskId: existing.value.id, request: { command: "resume", supplement: "重查" } } }] },
+        { calls: [{ id: "create_new", name: "employee_task_create", arguments: { instructions: "重新查 1020427644", dedupeKey: "tapd-1020427644" } }] },
+        "已用新任务重新查 1020427644。",
+      ],
+    });
+    await engine.submitChat(session.id, { role: "user", text: "先记住单号 1020427644", actorId: "u1" });
     await settle(engine);
-    await engine.newChatContext(session.id);
-    await engine.submitChat(session.id, { role: "user", text: "新的问题", actorId: "u1" });
+    await engine.markNewTask(session.id, { actorId: "u1" });
+    await engine.submitChat(session.id, { role: "user", text: "重新查这个单子", newTask: true, actorId: "u1" });
     await settle(engine);
     const second = JSON.stringify(seen[1].messages);
-    assert(second.includes("新的问题") && !second.includes("旧的问题") && !second.includes(NEW_SESSION_NOTICE), "context starts after the divider");
+    assert(second.includes("先记住单号 1020427644") && second.includes("重新查这个单子"), "prior conversation context is preserved");
+    assert(!second.includes(NEW_TASK_NOTICE), "UI-only /new notice is excluded from model turns");
+    assert(second.includes("[本轮指令：/new 新任务]"), "dynamic prompt carries /new new-task directive");
     const rows = await engine.store.messages(session.id);
-    assert.deepEqual(rows.filter((m) => m.role === "user").map((m) => m.text), ["旧的问题", "新的问题"], "the history is kept");
-    assert(rows.some((m) => m.notice && m.newSession && m.text === NEW_SESSION_NOTICE));
+    const refused = rows.find((m) => m.role === "tool" && m.callId === "try_resume");
+    assert(refused?.error && /使用了 \/new.*employee_task_create/.test(String(refused.text)), String(refused?.text));
+    const created = rows.find((m) => m.role === "tool" && m.callId === "create_new");
+    assert(!created?.error && created?.text && !JSON.parse(created.text).exists, String(created?.text));
+    assert.equal((await employee.state()).tasks.length, 2, "a genuinely new task was created");
+    assert(rows.some((m) => m.notice && m.newTask && m.text === NEW_TASK_NOTICE));
   } finally { await close(); }
 });
 
-test("/new in a group: 旁白 and member sessions start over; members then see only messages after the divider", async () => {
+test("/new in a group: keeps 旁白 and member context, arms /new alone without waking anyone, and marks member turn as newTask", async () => {
   const { engine, make, close } = await fixture();
   try {
     const a = await make("小A", "u1");
-    const group = await engine.groups.create(u1, { name: "重开", users: ["u2"], employees: [a] });
+    const group = await engine.groups.create(u1, { name: "新任务群", users: ["u2"], employees: [a] });
     const seen = script(engine, { narrator: [{ targets: [], reason: "闲聊" }, { targets: ["小A"], reason: "点名" }], [a]: ["旧", "旧闻", "新"] });
     await engine.groups.send(u1, group.id, { text: "旧话题 @小A" });
     await settle(engine);
@@ -715,23 +732,22 @@ test("/new in a group: 旁白 and member sessions start over; members then see o
     await settle(engine);
     const before = (await engine.groups.get(group.id))!;
     const oldSessions = [before.memberSessions[a], before.narrator!.session];
-    // Any member user may use it; /new alone wakes nobody.
+    // Any member user may use /new alone; it does NOT wipe sessions or wake anyone.
     await engine.groups.send(u2 as any, group.id, { text: "/new" });
     await settle(engine);
     const after = (await engine.groups.get(group.id))!;
-    assert.deepEqual([after.memberSessions, after.narrator], [{}, undefined]);
-    for (const id of oldSessions) assert(!await engine.store.hasSession(id), "old sessions deleted");
-    assert.deepEqual([narrated.length, seen.length], [1, 2], "the divider is not judged and wakes nobody");
-    const divider = (await groupMessages(engine, group.id)).at(-1)!;
-    assert.deepEqual([divider.notice, divider.newSession, divider.text], [true, true, NEW_SESSION_NOTICE]);
-    // /new <text>: the text follows in the new context; the 旁白 starts fresh with nothing carried over.
-    await engine.groups.send(u1, group.id, { text: "/new 小A 来一下" });
+    assert.deepEqual([after.memberSessions[a], after.narrator?.session], oldSessions, "sessions are preserved");
+    for (const id of oldSessions) assert(await engine.store.hasSession(id), "old sessions stay intact");
+    assert.deepEqual([narrated.length, seen.length], [1, 2], "the /new notice is not judged and wakes nobody");
+    const notice = (await groupMessages(engine, group.id)).at(-1)!;
+    assert.deepEqual([notice.notice, notice.newTask, notice.text], [true, true, NEW_TASK_NOTICE]);
+    // /new <text>: keeps prior context and delivers newTask directive to the member.
+    await engine.groups.send(u1, group.id, { text: "/new 小A 重新查一下上面的单子" });
     await settle(engine);
-    const last = narrated.at(-1);
-    assert(last.setup && !/此前的群消息/.test(last.last) && /\[新消息\] #\d+ 用户「alice」：小A 来一下$/.test(last.last), last.last);
     const turn = JSON.stringify(seen.at(-1)!.messages);
-    assert(turn.includes("小A 来一下") && !turn.includes("旧话题") && !turn.includes("聊聊旧事") && !turn.includes("旧\""), "the member sees only what follows");
-    assert.equal(seen.at(-1)!.messages.filter((m: any) => m.role === "user" && m.runtime !== "dynamic").length, 1, "in a new member session");
+    assert(turn.includes("旧话题") && turn.includes("重新查一下上面的单子"), "member keeps earlier conversation context");
+    assert(!turn.includes(NEW_TASK_NOTICE), "UI-only /new notice is excluded from member prompt");
+    assert(turn.includes("[本轮指令：/new 新任务]"), "member receives /new new-task directive");
     assert.equal(seen.at(-1)!.messages.at(-1).runtime, "dynamic");
   } finally { await close(); }
 });

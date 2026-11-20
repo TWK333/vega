@@ -301,19 +301,28 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "messages" && method === "POST") {
         check(a.clientMessageId === undefined || (typeof a.clientMessageId === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(a.clientMessageId)), 400, "Invalid message ID");
         const session = await employee.chat(user.id);
-        // /new [text]: a new model context first; the rest (or attachments), if any, is the first message in it.
+        // /new [text]: run as a new independent task while keeping the conversation context.
         const command = newCommand(a.text);
+        let newTask = false;
         if (command) {
-          check(!engine.active.has(session.id), 409, "对话仍在进行，请先停止后再开启新会话");
           check(!employee.deleting && !employee.resetting, 409, "牛马正在删除或重置，请稍候");
-          if (a.clientMessageId && await store.clientMessage(session.id, user.id, a.clientMessageId)) return { id: session.id };
           const alone = !command.rest && !a.images?.length && !a.files?.length;
-          await engine.newChatContext(session.id, alone ? { actorId: user.id, clientMessageId: a.clientMessageId } : {});
-          if (alone) return { id: session.id, newSession: true };
+          if (alone) {
+            check(!engine.active.has(session.id), 409, "对话仍在进行，请先停止后再标记新任务");
+            if (a.clientMessageId && await store.clientMessage(session.id, user.id, a.clientMessageId)) return { id: session.id, newTask: true };
+            await engine.markNewTask(session.id, { actorId: user.id, clientMessageId: a.clientMessageId });
+            return { id: session.id, newTask: true };
+          }
+          newTask = true;
           a = { ...a, text: command.rest };
+        } else {
+          const last = (await store.messagePage(session.id, { limit: 10 })).messages
+            .filter((m) => !m.delivery && !m.progress && !m.stepOutput).at(-1);
+          if (last?.notice && last?.newTask && (!last.actorId || last.actorId === user.id)) newTask = true;
         }
         const message = {
           ...await inputMessage(a, store, session.id), actorId: user.id,
+          ...(newTask ? { newTask: true } : {}),
           clientMessageId: a.clientMessageId,
           clientMessageHash: a.clientMessageId ? createHash("sha256").update(JSON.stringify([a.text || "", a.images || [], a.files || [], a.quoteSeq ?? null])).digest("hex") : undefined,
         };
