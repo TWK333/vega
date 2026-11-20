@@ -42,6 +42,8 @@ const statusOf = (task) => props.taskStatus?.[task.id] ?? (props.tasks ? "delete
 const attachedTasks = computed(() => (props.message.tasks || []).filter((task) => !props.hiddenTaskIds?.has(task.id)));
 const stepTask = computed(() => typeof props.message.stepOutput === "object" && !props.message.stepOutput?.legacy ? props.message.tasks?.[0] : undefined);
 const canOpenStep = computed(() => !!stepTask.value && statusOf(stepTask.value) !== "deleted");
+const showStepLink = computed(() => !props.hideStepOutput && !!stepOutput.value && (canOpenStep.value || (stepOutput.value.omitted && !loadedStep.value)));
+const hasBubbleLinks = computed(() => showStepLink.value || attachedTasks.value.length > 0);
 async function openStep() {
   if (canOpenStep.value) { emit("task", stepTask.value.id); return; }
   if (!props.loadStepOutput || stepLoading.value) return;
@@ -97,23 +99,26 @@ async function runExport(format) {
         <MessageText v-else-if="message.text" :text="bodyText" :streaming="message.streaming" :archive-base="archiveBase" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
         <FileCard v-for="(file, index) in message.files || []" :key="'f' + index" :file="file" />
+        <div v-if="hasBubbleLinks" class="chat-bubble-links">
+          <button v-if="showStepLink" type="button" class="chat-bubble-link chat-step-output" :aria-label="'查看步骤产物：' + (stepOutput.label || '任务详情')" :disabled="!canOpenStep && (!loadStepOutput || stepLoading)" @click="openStep">
+            <Icon name="file" :size="13" />
+            <span class="chat-link-text">步骤产物<template v-if="stepOutput.step"> · 第 {{ stepOutput.step }} 步</template>：{{ stepOutput.label }}<template v-if="!canOpenStep && stepLoading">（正在读取…）</template></span>
+            <Icon name="right" :size="13" />
+          </button>
+          <button v-for="task in attachedTasks" :key="task.id" type="button" class="chat-bubble-link chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
+            <Icon name="tasks" :size="13" />
+            <span class="chat-link-text">任务：{{ task.title }}</span>
+            <span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span>
+            <Icon v-if="statusOf(task) !== 'deleted'" name="right" :size="13" />
+          </button>
+        </div>
       </div>
-      <button v-if="!hideStepOutput && stepOutput && (canOpenStep || (stepOutput.omitted && !loadedStep))" type="button" class="chat-step-output" :aria-label="'查看步骤产物：' + (stepOutput.label || '任务详情')" :disabled="!canOpenStep && (!loadStepOutput || stepLoading)" @click="openStep">
-        <span class="chat-step-head"><Icon name="file" :size="16" />步骤产物<template v-if="stepOutput.step"> · 第 {{ stepOutput.step }} 步</template></span>
-        <strong>{{ stepOutput.label }}</strong>
-        <span class="chat-step-link">{{ canOpenStep ? '在任务详情中查看' : stepLoading ? '正在读取…' : '查看历史产物' }}<Icon name="right" :size="14" /></span>
-      </button>
-      <StepOutput v-else-if="!hideStepOutput && stepOutput" :output="stepOutput" :archive-base="archiveBase" :initially-open="!!loadedStep" />
+      <StepOutput v-if="!hideStepOutput && stepOutput && !showStepLink" :output="stepOutput" :archive-base="archiveBase" :initially-open="!!loadedStep" />
       <p v-if="!hideStepOutput && stepError" class="chat-step-error" role="alert">{{ stepError }}</p>
       <div v-if="message.sendStatus" class="chat-send-status" role="status">
         <span v-if="message.sendStatus === 'sending'"><span class="spinner" aria-hidden="true"></span>发送中…</span>
         <button v-else-if="message.sendStatus === 'failed'" type="button" :disabled="!quotable" :title="message.sendError" aria-label="重发这条消息" @click="emit('retry', message)">发送未确认 · 点击重发</button>
         <span v-else>已送达</span>
-      </div>
-      <div v-if="attachedTasks.length" class="chat-tasks">
-        <button v-for="task in attachedTasks" :key="task.id" type="button" class="chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
-          <Icon name="tasks" :size="15" /><span class="truncate">{{ task.title }}</span><span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span><Icon v-if="statusOf(task) !== 'deleted'" name="right" :size="14" />
-        </button>
       </div>
       <div v-if="canExport" class="chat-export">
         <button type="button" class="chat-export-toggle" :aria-expanded="exportOpen" @click="exportOpen = !exportOpen"><Icon name="download" :size="14" />导出完整结果</button>
@@ -178,19 +183,17 @@ async function runExport(format) {
 .chat-quote:hover:not(:disabled) { background: var(--surface-2); color: var(--text-2); }
 .chat-quote strong { max-width: 40%; }
 .chat-quote strong, .chat-quote span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.chat-step-output { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; gap: 6px; width: 100%; height: auto; min-width: 0; max-width: min(100%, 440px); padding: 12px 14px; border-color: var(--border); border-radius: var(--r-lg); background: var(--surface); font-weight: 400; text-align: left; white-space: normal; overflow-wrap: anywhere; }
-.chat-step-output:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); }
-.chat-step-output strong { display: -webkit-box; overflow: hidden; font-size: 13px; font-weight: 600; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.chat-step-head, .chat-step-link { display: flex; align-items: center; gap: 6px; color: var(--accent-text); font-size: 12px; }
-.chat-step-head { font-weight: 600; }
+.chat-bubble-links { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; min-width: 0; }
+.chat-bubble-links:not(:first-child) { margin-top: 7px; padding-top: 6px; border-top: 1px solid var(--border); }
+.chat-bubble-link { display: flex; align-items: center; justify-content: flex-start; gap: 5px; width: calc(100% + 8px); min-width: 0; height: auto; min-height: 24px; margin: 0 -4px; padding: 2px 4px; border: 0; border-radius: 6px; background: transparent; color: var(--accent-text); font-size: 12px; font-weight: 500; line-height: 1.45; text-align: left; }
+.chat-bubble-link:hover:not(:disabled) { background: var(--accent-softer); color: var(--accent); }
+.chat-bubble-link:hover:not(:disabled) .chat-link-text { text-decoration: underline; text-underline-offset: 2px; }
+.chat-bubble-link:disabled { color: var(--muted); opacity: .75; }
+.chat-bubble-link > .icon-svg { flex: none; opacity: .85; }
+.chat-bubble-link > .icon-svg:last-child { color: var(--faint); }
+.chat-bubble-link > .badge { flex: none; }
+.chat-link-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-step-error { margin: 0; color: var(--danger); font-size: 12px; }
-.chat-tasks { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; width: 100%; min-width: 0; }
-.chat-task-link { justify-content: flex-start; gap: 8px; width: 100%; min-width: 0; max-width: min(100%, 440px); height: auto; min-height: 36px; padding: 6px 8px 6px 10px; border-color: var(--border); background: var(--surface); font-weight: 500; text-align: left; }
-.chat-task-link > .icon-svg:first-child { color: var(--accent); }
-.chat-task-link > .truncate { flex: 1; min-width: 0; }
-.chat-task-link > .badge, .chat-task-link > .icon-svg { flex: none; }
-.chat-task-link > .icon-svg:last-child { color: var(--faint); }
-.chat-task-link:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); }
 .chat-export { display: grid; justify-items: start; gap: 4px; width: 100%; }
 .chat-export-toggle { gap: 6px; min-height: 30px; padding: 0 8px; border-color: var(--border); background: var(--surface); color: var(--text-2); font-size: 12px; font-weight: 500; }
 .chat-export-toggle:hover:not(:disabled) { border-color: var(--accent); background: var(--accent-softer); color: var(--accent); }
