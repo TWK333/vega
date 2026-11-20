@@ -7,6 +7,7 @@ import { Subscriptions } from "../server/core/subscriptions";
 import { Chrome } from "../server/core/chrome";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { followUpOpen, type Task } from "../server/core/employee";
+import { setWorkPrinciples } from "../server/core/work-principles";
 import { chromeCall, employeeCall } from "./public-call";
 
 async function fixture() {
@@ -109,6 +110,58 @@ test("a direct follow-up long after delivery continues the original task and kee
     assert.equal(again.duplicate, true, "the same supplement does not reopen a delivered revision");
     assert.equal(f.employee.task(await f.employee.state(), first.id).status, "done");
     assert.equal((await f.deliveries()).length, 2);
+  } finally { await f.engine.close(); await f.store.close(); }
+});
+
+test("resuming and redispatching use current work principles without changing task history", async () => {
+  const f = await fixture();
+  try {
+    await setWorkPrinciples(f.store, "owner", "旧公共原则");
+    await f.employee.control({ action: "settings", instruction: "使用旧版模板" });
+    const plan = [{ content: "用旧版模板整理资料", status: "completed" }];
+    const brief = "整理指定资料\n当时的工作原则：使用旧版模板";
+    let round = 0;
+    f.engine.providers.chat = async (_model, system) => {
+      assert.match(system, /\[工作原则\]\n旧公共原则\n\n使用旧版模板\n/);
+      return round++ === 0 ? progress("old-plan", plan) : complete("old-delivery", "已整理指定资料");
+    };
+    const original = await f.segment(await f.add(brief));
+    assert.equal(original.status, "done");
+
+    await f.employee.control({ action: "resume", id: original.id, text: "补上汇总行" });
+    await setWorkPrinciples(f.store, "owner", "核对条目总数");
+    await f.employee.control({ action: "settings", instruction: "使用新版模板" });
+    round = 0;
+    f.engine.providers.chat = async (_model, system, messages) => {
+      assert.doesNotMatch(system, /旧公共原则|使用旧版模板/);
+      assert.match(system, /按当前原则调整尚未完成的步骤/);
+      if (round++ === 0) {
+        assert.match(system, /\[工作原则\]\n核对条目总数\n\n使用新版模板\n/);
+        const task = messages.findLast(m => m.role === "user" && m.runtime !== "dynamic")!.text!;
+        assert.match(task, /用旧版模板整理资料/, "the completed step is retained as history");
+        await setWorkPrinciples(f.store, "owner", "");
+        return progress("new-plan", [...plan, { content: "补上汇总行", status: "completed" }]);
+      }
+      assert.match(system, /\[工作原则\]\n使用新版模板\n/);
+      return complete("new-delivery", "已补上汇总行");
+    };
+    const resumed = await f.segment(original);
+    assert.equal(resumed.status, "done");
+    assert.equal(resumed.workSession, original.workSession);
+    assert.deepEqual(resumed.plan.slice(0, 1), plan);
+
+    const { id } = await f.employee.control({ action: "redispatch", id: original.id, confirmed: true });
+    const copy = f.employee.task(await f.employee.state(), id);
+    assert.equal(copy.text, brief);
+    assert.deepEqual(copy.plan, []);
+    round = 0;
+    f.engine.providers.chat = async (_model, system) => {
+      assert.match(system, /\[工作原则\]\n使用新版模板\n/);
+      assert.match(system, /当前任务由旧任务重新派发/);
+      assert.doesNotMatch(system, /旧公共原则|使用旧版模板/);
+      return round++ === 0 ? progress("copy-plan", [{ content: "用新版模板整理资料", status: "completed" }]) : complete("copy-delivery", "已按当前工作原则整理资料");
+    };
+    assert.equal((await f.segment(copy)).status, "done");
   } finally { await f.engine.close(); await f.store.close(); }
 });
 
