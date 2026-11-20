@@ -1224,11 +1224,12 @@ export class Employee {
               if (review) t.outlineReview = review;
               delete t.outlineReviewRequired;
               delete t.outlineReferences;
-              t.summary = summary?.trim() || "";
-              t.completion = evidence;
+              const archive = { employeeId: this.employeeId, taskId: t.id };
+              [t.summary, t.completion, t.deliverable] = await Promise.all(
+                [summary?.trim() || "", evidence, cited.texts.join("\n\n")].map((text) => this.store.files.resolveTaskScreenshots(archive, text)),
+              );
               t.completedRevision = t.revision || 0;
               t.deliverableRefs = cited.refs;
-              t.deliverable = cited.texts.join("\n\n");
               delete t.deliverableNeeded;
               delete t.deliverableWarned;
               delete t.settleNudges;
@@ -1360,9 +1361,10 @@ export class Employee {
                     assert(source?.calls?.some((call) => call.name === "task_progress" && call.arguments?.stepOutput?.step === output.step), "未指定 ref 时，步骤产物必须与本次 task_progress 在同一条回复");
                     if (output.text === undefined && !stepFiles.length && authored(source)) body = source;
                   }
-                  const text = output.text ?? body?.text ?? "";
-                  assert([...text].length <= 64000, "步骤产物正文最多 64000 字，请分开提交");
-                  assert(text.trim() || stepFiles.length, "步骤产物需要非空文本或文件：只更新进度请省略 stepOutput；要交产物请填写 text、paths 或正文 ref。");
+                  const rawText = output.text ?? body?.text ?? "";
+                  assert([...rawText].length <= 64000, "步骤产物正文最多 64000 字，请分开提交");
+                  assert(rawText.trim() || stepFiles.length, "步骤产物需要非空文本或文件：只更新进度请省略 stepOutput；要交产物请填写 text、paths 或正文 ref。");
+                  const text = await this.store.files.resolveTaskScreenshots({ employeeId: this.employeeId, taskId: t.id }, rawText);
                   const ref = output.ref ? body!.seq! : source!.seq!;
                   const label = t.plan[output.step - 1].content;
                   const fingerprint = createHash("sha256").update(JSON.stringify([text, ...stepFiles.map((file) => [file.name, createHash("sha256").update(file.data).digest("hex")])])).digest("hex");

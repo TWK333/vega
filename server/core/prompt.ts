@@ -116,7 +116,7 @@ export function expandSkillCommand(text: string, skills: Obj[]) {
   if (!skill) return text;
   return `${tag}请使用 ${skill.name} 技能。先用 read 阅读技能文件 ${skill.path}，再按其流程完成授权任务。${skill.resourceRoot ? "\n附属资源目录：" + skill.resourceRoot + "（相对脚本/参考文件均基于此目录；不要误用会话工作目录）" : ""}\n任务：${match[2]}`;
 }
-export const IMAGE_MARKDOWN_RULES = `图片和截图用 Markdown 内嵌：![图片说明](<实际图片URL>)；截图使用工具返回的 url（attachments 的 /api/blobs/...，Chrome 截图的 /api/files/...）写入 Markdown；需要再次查看像素时对工具返回的 path 或上述 URL 调用 read（服务端存档，客户端执行时同样可用），不输出裸地址或裸 .webp 文件名、不放代码块、不用 bash 搜图。只引用实际返回的图片，不猜测或编造图片地址。`;
+export const IMAGE_MARKDOWN_RULES = `图片和截图用 Markdown 内嵌：![图片说明](<实际图片URL>)。牛马任务引用本任务 Chrome 截图时，用 ![图片说明](<截图文件名>)，原样取工具返回的 url 最后一段（含扩展名），由 Vega 从本任务存档补齐地址，不要重写员工或任务目录。其他图片直接用工具返回的 url（如 /api/blobs/...）。需要再次查看像素时对工具返回的 path 或 url 调用 read（服务端存档，客户端执行时同样可用），不输出裸地址或裸文件名、不放代码块、不用 bash 搜图。只引用实际返回的图片，不猜测或编造图片地址。`;
 export const PONYTAIL_RULES = "采用极简资深开发者模式：优先复用已有组件/标准库/已安装依赖，最小完整改动，不增不需要的抽象、配置与功能；不可削减验证、安全和无障碍。新非平凡逻辑加一个小测试；结尾一两行说明未检查内容与风险。Active level: ";
 
 /** Verbatim from nova prompt.rs. Frozen into the system prefix when Epic is on at session start. */

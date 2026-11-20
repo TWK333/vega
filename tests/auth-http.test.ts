@@ -57,7 +57,7 @@ async function readEvents(
 test(
   "deployed website login/RBAC: cookie,CSRF,private sessions,SSE stream revocation and no token bypass",
   { timeout: 60000, skip: process.env.VEGA_TEST_DEPLOYED !== "1" },
-  async () => {
+  async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "vega-web-auth-")),
       db = join(dir, "auth.db"),
       token = randomBytes(32).toString("base64url");
@@ -492,6 +492,16 @@ test(
       assert.equal((await req("/employees/" + workerA.id, "GET", undefined, b)).r.status, 404);
       assert.equal((await req("/employees", "GET", undefined, v)).r.status, 200);
       assert.deepEqual((await ok("/employees", "GET", undefined, a)).map((employee: any) => employee.id), [workerA.id]);
+      await t.test("sealed tasks are excluded from the sidebar's in-progress count", async () => {
+        const workerPath = `/employees/${workerA.id}`;
+        const { id } = await ok(workerPath, "POST", { action: "add", kind: "todo", text: "work to seal", nextCheckInMinutes: 60 }, a);
+        const activeCount = async () => (await ok("/employees", "GET", undefined, a))[0].activeTasks;
+        assert.equal(await activeCount(), 1);
+        await ok(`${workerPath}/control`, "POST", { action: "seal", id, manual: true }, a);
+        assert.equal((await ok(workerPath, "GET", undefined, a)).tasks[0].status, "sealed");
+        assert.equal(await activeCount(), 0);
+        await ok(`${workerPath}/control`, "POST", { action: "remove", id }, a);
+      });
       // 群聊 over HTTP: operators create groups, invite users, bring only their own employees; viewers read only; non-members see nothing.
       const idOf = async (login: Login) => (await ok("/bootstrap", "GET", undefined, login)).user.id;
       const [idA, idB, idV] = [await idOf(a), await idOf(b), await idOf(v)];
@@ -633,6 +643,7 @@ test(
       const stateB = await ok(`/employees/${workerB.id}`, "GET", undefined, b);
       assert.notEqual(stateA.tasks[0].id, stateB.tasks[0].id);
       assert.equal((await req(`/employees/${workerB.id}`, "POST", { action: "done", id: stateA.tasks[0].id }, a)).r.status, 404);
+
       const chat = await ok(`/employees/${workerA.id}/chat`, "GET", undefined, a);
       assert.equal(chat.session.employeeId, workerA.id);
       assert.equal((await req(`/employees/${workerA.id}/messages`, "POST", { text: "quote unavailable", quoteSeq: 99999 }, a)).r.status, 400);

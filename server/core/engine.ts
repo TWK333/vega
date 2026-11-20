@@ -1432,6 +1432,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
         assert(reply, "Provider retry exhausted");
         await tools.context.recordUsage(view, reply.usage || {}, canonicalView);
+        if (session.taskId && reply.text) reply.text = await this.store.files.resolveTaskScreenshots(session, reply.text);
         const savedReply = await this.store.append(key, redactMessage(reply, redact));
         if (session.employeeId && !session.taskId && !session.groupId) this.employeeMessage(session.employeeId, key, savedReply);
         emit("message_end", reply);

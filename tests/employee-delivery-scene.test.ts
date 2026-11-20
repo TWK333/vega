@@ -49,6 +49,36 @@ const withModel = (engine: Engine) => {
 const count = (text: string, part: string) => text.split(part).length - 1;
 const lastTool = (messages: any[], name: string) => messages.findLast(m => m.role === "tool" && m.name === name);
 
+test("task resolves screenshot references before storing the report and delivering its evidence", async () => {
+  const { store, engine, employee, add, segment } = await fixture();
+  let phase = 0, url = "";
+  try {
+    const job = await add("截图并交付验证报告");
+    engine.providers.chat = async () => {
+      if (++phase === 1) {
+        const session = await store.session(employee.task(await employee.state(), job.id).workSession);
+        const name = "a".repeat(32) + "-0.webp";
+        url = store.files.url(await store.files.write(session, name, "archived screenshot"));
+        return plan("completed");
+      }
+      assert.equal(phase, 2);
+      const wrong = url.replace(`/${job.id}/`, "/t-wrong/");
+      return call("complete-image", "task_complete", {
+        summary: "已验证页面",
+        evidence: `已确认：![截图](<${url.split("/").at(-1)}>)`,
+      }, `${"已验证页面正常。".repeat(20)}\n\n![页面截图](<${wrong}>)`);
+    };
+    withModel(engine);
+    const done = await segment(job);
+    const history = await store.messages(done.workSession);
+    assert.equal(done.status, "done");
+    assert(history.some(message => message.model && message.text?.includes(`![页面截图](<${url}>)`)), "model report in debug history uses the real screenshot URL");
+    assert(done.result.includes(`![页面截图](<${url}>)`));
+    assert(done.result.includes(`![截图](<${url}>)`));
+    assert(!done.result.includes("/t-wrong/"));
+  } finally { await engine.close(); await store.close(); }
+});
+
 test("replanned task checks the original outline, waits for clarification, then completes", async () => {
   const { store, engine, employee, add, segment } = await fixture();
   let phase = 0;

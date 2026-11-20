@@ -1,9 +1,14 @@
-import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { extname, join, relative, resolve, sep } from "node:path";
 import type { Session } from "./store";
 import { assert } from "./util";
 
 export const IMAGE_TYPES: Record<string, string> = { ".webp": "image/webp", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg" };
+
+const TASK_SHOT = /^[a-f\d]{32}(?:-\d+)?\.(?:webp|png|jpe?g)$/i;
+const TASK_SHOT_URL = /^\/api\/(?:[\w-]+\/)*files\/employees\/([\w%-]+)\/([\w-]+)\/([\w.-]+)([?#].*)?$/;
+// shortcut: task reports use inline images, extend alongside the renderer if reference-style images are added.
+const INLINE_IMAGE = /(`+)[^\n]*?\1|\\!|(!\[[^\]\n]*\]\([ \t]*)(<[^<>\r\n]+>|[^()<>\s]+)([ \t]*(?:(?:"[^"\r\n]*"|'[^'\r\n]*')[ \t]*)?\))/g;
 
 /**
  * Local files for results too large or too stale for the model context: Chrome screenshots, Chrome DOM records and
@@ -36,6 +41,42 @@ export class Files {
   }
   /** The web address of a file under root. */
   url(path: string) { return "/api/files/" + relative(this.root, path).split(sep).map(encodeURIComponent).join("/"); }
+  private async taskShotUrl(employeeId: string, taskId: string, value: string) {
+    const link = TASK_SHOT_URL.exec(value), name = link ? link[3] : value;
+    if (!TASK_SHOT.test(name) || (link && (link[1] !== encodeURIComponent(employeeId) || link[2] === taskId))) return;
+    const path = join(this.task(employeeId, taskId), name);
+    if (!await lstat(path).then((file) => file.isFile(), () => false)) return;
+    // An explicit link to another real archive wins. Only fix missing targets using this task's actual file.
+    if (link && await lstat(join(this.task(employeeId, link[2]), name)).then(() => true,
+      (e: NodeJS.ErrnoException) => e.code !== "ENOENT" && e.code !== "ENOTDIR")) return;
+    return this.url(path) + (link?.[4] || "");
+  }
+  async resolveTaskScreenshots({ employeeId, taskId }: Pick<Session, "employeeId" | "taskId">, text: string) {
+    if (!employeeId || !taskId || !text.includes("![")) return text;
+    const urls = new Map<string, Promise<string | undefined>>();
+    let fence = "";
+    const lines = text.split("\n").map((line) => {
+      const mark = /^[ \t]*(`{3,}|~{3,})(.*)/.exec(line);
+      if (fence) {
+        if (mark && mark[1][0] === fence[0] && mark[1].length >= fence.length && !mark[2].trim()) fence = "";
+        return line;
+      }
+      if (mark) { fence = mark[1]; return line; }
+      const matches = [...line.matchAll(INLINE_IMAGE)];
+      if (!matches.some((m) => m[3])) return line;
+      return Promise.all(matches.map(async ([original, , prefix, dest, end]) => {
+        if (!dest) return original;
+        const value = dest.startsWith("<") ? dest.slice(1, -1) : dest;
+        if (!urls.has(value)) urls.set(value, this.taskShotUrl(employeeId, taskId, value));
+        const url = await urls.get(value);
+        return url ? `${prefix}<${url}>${end}` : original;
+      })).then((replacements) => {
+        let i = 0;
+        return line.replace(INLINE_IMAGE, () => replacements[i++]!);
+      });
+    });
+    return (await Promise.all(lines)).join("\n");
+  }
   /** A path under root, or undefined when it is outside (an ordinary file). */
   own(path: string) {
     const full = resolve(path);

@@ -23,6 +23,31 @@ async function fixture() {
   return { store, engine, a, b, tools };
 }
 
+test("task screenshot Markdown resolves against real task files without redirecting existing or foreign links", async () => {
+  const store = await Store.open(":memory:");
+  try {
+    const files = store.files, task = await store.newSession({ cwd: process.cwd(), employeeId: "e1", taskId: "t-right" });
+    const name = "a".repeat(32) + "-0.webp";
+    const url = files.url(await files.write(task, name, "archived screenshot"));
+    const sibling = files.url(await files.write({ ...task, taskId: "t-other" }, name, "other screenshot"));
+    const typo = url.replace("t-right", "t-typo");
+    const missing = typo.replace(name, "b".repeat(32) + "-0.webp");
+    const untouched = [
+      `![其他任务](${sibling})`,
+      `![其他牛马](${typo.replace("e1", "e2")})`,
+      `![外部图片](https://example.test${typo})`,
+      `![未知截图](${missing})`,
+      `![正确地址](${url})`,
+      `[文本链接](${typo})`,
+      `\`![代码示例](<${typo}>)\``,
+      "```md", `![代码块](<${typo}>)`, "```",
+    ].join("\n");
+    const text = `![短引用](<${name}>)\n![错误目录](</api/team/vega/${typo.slice(5)}?v=1> "标题")\n${untouched}`;
+    assert.equal(await files.resolveTaskScreenshots(task, text), `![短引用](<${url}>)\n![错误目录](<${url}?v=1> "标题")\n${untouched}`);
+    assert.equal(await files.resolveTaskScreenshots({ ...task, taskId: undefined }, text), text);
+  } finally { await store.close(); }
+});
+
 test("archived files are written per employee task or user session and read back only from their own scope", async () => {
   const { store, engine, a, b, tools } = await fixture();
   try {
