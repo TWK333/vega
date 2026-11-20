@@ -1,4 +1,5 @@
 import { updateEmployeeAvatar, updateUserAvatar } from "../../core/employee-avatar";
+import { employeeMoodWeather } from "../../core/soul";
 import { userExperienceGraph } from "../../core/experience-access";
 import { chatHistory, withoutStepOutputs } from "../../core/chat-page";
 import { canConfigureEmployee, employeeCapabilities } from "../../core/employee-capabilities";
@@ -342,7 +343,8 @@ export default defineEventHandler(async (event) => {
       }
       if (path[2] === "chat" && method === "GET") {
         const session = await employee.chat(user.id);
-        return { session, ...await chatHistory(store, session.id, getRequestURL(event).searchParams), running: engine.active.has(session.id) };
+        const moodWeather = await employeeMoodWeather(store, employee.employeeId, state.ownerId, user.id).catch(() => undefined);
+        return { session, ...await chatHistory(store, session.id, getRequestURL(event).searchParams), running: engine.active.has(session.id), ...(moodWeather ? { moodWeather } : {}) };
       }
       if (path[2] === "messages" && method === "POST") {
         check(a.clientMessageId === undefined || (typeof a.clientMessageId === "string" && /^[a-zA-Z0-9_-]{16,80}$/.test(a.clientMessageId)), 400, "Invalid message ID");

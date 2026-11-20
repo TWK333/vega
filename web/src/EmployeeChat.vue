@@ -12,7 +12,7 @@ import { markSeen, seenSeq } from "./seen.js";
 import { avatarBubble } from "../../shared/employee-avatars";
 const props = defineProps({ api: Function, userId: String, employeeId: String, name: String, avatar: String, revision: Number, event: Object, composer: Object, readonly: Boolean, tasks: Array, remember: Function });
 const emit = defineEmits(["task"]);
-const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null);
+const messages = ref([]), running = ref(false), hasMore = ref(false), loadingOlder = ref(false), error = ref(""), transcript = ref(null), fileInput = ref(null), input = ref(null), moodWeather = ref("");
 const artifactSession = ref("");
 const draft = computed({ get: () => props.composer.text, set: (text) => props.composer.text = text });
 const files = computed({ get: () => props.composer.attachments, set: (items) => props.composer.attachments = items });
@@ -54,7 +54,18 @@ watch(visible, (rows) => markSeen(props.userId, props.employeeId, rows.at(-1)?.s
 const typingContinued = computed(() => continuesPrevious(displayed.value.at(-1)?.message, { role: "assistant" }));
 // 我发出的消息跟随对方的头像色，让每位热心市民的对话各有辨识度。
 const selfTint = computed(() => { const color = avatarBubble(props.avatar, props.employeeId); return { background: color.fill, color: color.ink }; });
-const history = createChatHistory({ api: (path, ...args) => props.api(path + "&stepSummaries=1", ...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, cache: createChatCache(props.userId, props.employeeId) });
+const history = createChatHistory({ api: (path, ...args) => props.api(path + "&stepSummaries=1", ...args), path: () => `/employees/${props.employeeId}/chat`, messages, running, hasMore, moodWeather, cache: createChatCache(props.userId, props.employeeId) });
+// 天气小图标固定在热心市民最后一次发言所在气泡组的头像旁。
+const lastBotAvatarIndex = computed(() => {
+  const rows = displayed.value;
+  let idx = -1;
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const m = rows[i].message;
+    if (!m.notice && m.role !== "user") { idx = i; break; }
+  }
+  while (idx > 0 && rows[idx].continued && !(newAt.value > 0 && idx === newAt.value)) idx--;
+  return idx;
+});
 
 // Message avatars rest on one up-right glance. The reply that replaces the typing row starts from the typing
 // avatar's last glance and eases into it (in memory only; nothing is persisted).
@@ -258,7 +269,7 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         <template v-for="({ message, continued, cards }, index) in displayed" :key="message.clientMessageId || message.seq || message.liveKey">
         <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
         <p v-if="message.notice" class="chat-notice">{{ message.text }}</p>
-        <ChatMessage v-else :message="message" :continued="continued && !(newAt > 0 && index === newAt)" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :load-step-output="(seq, message) => loadStepOutput(api, `/employees/${employeeId}/chat`, seq, artifactSession, message)" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
+        <ChatMessage v-else :message="message" :continued="continued && !(newAt > 0 && index === newAt)" :mood-weather="index === lastBotAvatarIndex ? moodWeather : ''" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :name="name" :avatar="avatar" :self-tint="selfTint" :employee-id="employeeId" :task-status="taskStatus" :tasks="tasks" :load-step-output="(seq, message) => loadStepOutput(api, `/employees/${employeeId}/chat`, seq, artifactSession, message)" :quotable="!readonly" :rememberable="!readonly && !!remember" @quote="quoteMessage" @jump="jumpTo" @task="emit('task', $event)" @retry="retry" @remember="onRemember" />
         </template>
         <article v-if="running" class="chat-message assistant chat-typing" :class="{ continued: typingContinued }" role="status" aria-label="正在输入中">
           <span v-if="typingContinued" class="chat-avatar spacer" aria-hidden="true"></span>
@@ -270,14 +281,14 @@ onBeforeUnmount(() => { disposed = true; history.dispose(); });
         </article>
       </div>
     </div>
-    <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号只能查看这个牛马的对话和任务。</p>
+    <p v-if="readonly" class="readonly-note"><Icon name="lock" :size="14" />当前账号只能查看这位热心市民的对话和任务。</p>
     <form v-else class="chat-composer" @paste="paste" @submit.prevent="send">
       <ComposerQuote v-if="quoted" :quote="quoted" :name="name" @jump="jumpTo" @remove="quoted = undefined" />
       <div v-if="files.length" class="attachments"><button v-for="(file, index) in files" :key="index" type="button" :title="'移除 ' + file.name" @click="files.splice(index, 1)"><Icon :name="isImage(file) ? 'image' : 'file'" :size="12" />{{ file.name }}<Icon name="close" :size="12" /></button></div>
       <div class="composer-row">
         <input ref="fileInput" type="file" hidden multiple @change="upload" />
         <button type="button" class="icon attach" aria-label="添加附件" title="附件（可粘贴图片）" :disabled="uploading" @click="fileInput.click()"><Icon name="paperclip" /></button>
-        <textarea ref="input" v-model="draft" class="chat-draft" aria-label="给牛马的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
+        <textarea ref="input" v-model="draft" class="chat-draft" aria-label="发给热心市民的消息" placeholder="告诉我目标，剩下的交给我…" rows="1" @keydown="keydown"></textarea>
         <button v-if="running" type="button" class="stop" title="停止本轮" @click="stop"><Icon name="stop" :size="14" /><span>停止本轮</span></button>
         <button class="primary send" :disabled="uploading || (!draft.trim() && !files.length)" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
       </div>

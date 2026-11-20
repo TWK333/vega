@@ -33,15 +33,15 @@ export function mergeMessages(current, incoming) {
 }
 
 /**
- * @param {{ api: Function, path: () => string, messages: {value:any[]}, running: {value:boolean}, hasMore: {value:boolean}, pageSize?: number, cache?: any }} options
+ * @param {{ api: Function, path: () => string, messages: {value:any[]}, running: {value:boolean}, hasMore: {value:boolean}, moodWeather?: {value:string}, pageSize?: number, cache?: any }} options
  */
-export function createChatHistory({ api, path, messages, running, hasMore, pageSize = CHAT_PAGE_SIZE, cache }) {
+export function createChatHistory({ api, path, messages, running, hasMore, moodWeather, pageSize = CHAT_PAGE_SIZE, cache }) {
   let session = "", stream = 0, queue = Promise.resolve(), generation = 0, disposed = false;
   const enqueue = (job) => { const next = queue.then(job, job); queue = next.catch(() => {}); return next; };
   const lastSeq = () => messages.value.at(-1)?.seq ?? 0;
   const valid = (current) => !disposed && current === generation && (!cache || cache.valid());
   const contiguous = (rows) => rows.every((row, i) => i === 0 || row.seq === rows[i - 1].seq + 1);
-  function reset() { session = ""; messages.value = []; hasMore.value = false; running.value = false; }
+  function reset() { session = ""; messages.value = []; hasMore.value = false; running.value = false; if (moodWeather) moodWeather.value = ""; }
   async function request(url, current) {
     try { return await api(url); }
     catch (error) {
@@ -68,6 +68,7 @@ export function createChatHistory({ api, path, messages, running, hasMore, pageS
     session = result.session?.id || "";
     messages.value = result.messages;
     hasMore.value = !!result.hasMore;
+    if (moodWeather && typeof result.moodWeather === "string") moodWeather.value = result.moodWeather;
     if (version === stream) running.value = !!result.running;
     void cache?.put(session, result.messages, true);
     return result.messages;
@@ -83,6 +84,7 @@ export function createChatHistory({ api, path, messages, running, hasMore, pageS
     const known = new Set(messages.value.map((message) => message.seq));
     const added = result.messages.filter((message) => !known.has(message.seq));
     messages.value = mergeMessages(messages.value, result.messages);
+    if (moodWeather && typeof result.moodWeather === "string") moodWeather.value = result.moodWeather;
     if (version === stream && !apply && syncRunning) running.value = !!result.running;
     void cache?.put(session, result.messages);
     apply?.(added);

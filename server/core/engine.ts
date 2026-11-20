@@ -42,6 +42,7 @@ import { Vault, migrateVaultOwnership } from "./vault";
 import { Triggers } from "./triggers";
 import { assert, clip, Redactor, sleep, type Obj } from "./util";
 import { usageScope } from "./request-usage";
+import { buildHiddenToneHint, observeUserMessage } from "./soul";
 
 /**
  * Model for a session about to run. Task sessions always follow the scene's current primary
@@ -1183,6 +1184,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         });
       };
       await reinforceMemory();
+      let soulObservedSeq: number | undefined;
       const group = worker && session.groupId && !session.taskId ? await this.groups.prompt(session.groupId, worker.employeeId) : "";
       const activeTasks = employee && !session.taskId
         ? (employee.tasks || []).filter((task) => !ended(task.status)).slice(-20).map(taskSummary)
@@ -1253,6 +1255,16 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         }
         const memories = employeeState ? formatMemoriesForPrompt(recallMemory(employeeState, memoryQuery, Date.now(), false) as any) : "";
         const latestChat = worker && !session.taskId ? latestUser : undefined;
+        if (worker && !session.taskId && !session.groupId && latestUser?.seq && latestUser.seq !== soulObservedSeq && latestUser.runtime !== "turn_aborted") {
+          soulObservedSeq = latestUser.seq;
+          await observeUserMessage(this.store, {
+            employeeId: worker.employeeId,
+            ownerId: employeeState?.ownerId || session.ownerId,
+            userId: latestUser.actorId || employeeState?.ownerId || session.ownerId,
+            text: String(latestUser.text || ""),
+            channel: "private",
+          }).catch(() => {});
+        }
         const groupId = session.groupId;
         const sourceGroup = groupId && latestChat?.group?.groupId === groupId ? await this.groups.get(groupId) : undefined;
         const groupMessage = sourceGroup && latestChat?.group ? await this.store.message(sourceGroup.session, latestChat.group.seq) : undefined;
@@ -1307,6 +1319,23 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           dynamic += "\n" + await (await Context.open(this.store, session.stageSource)).stage();
         if (/\/variant\/niu-m$/.test(session.model || "")) dynamic += "\n\n" + BOOST;
         if (session.agentChild) dynamic += CHILD_DYNAMIC_TAIL;
+        if (worker && employeeState && !session.agentChild) {
+          const toneUserId = session.taskId
+            ? assigned?.group
+              ? assigned.group.requester.kind === "user" ? assigned.group.requester.id : undefined
+              : employeeState.ownerId || session.ownerId
+            : session.groupId
+              ? latestChat?.group?.from?.kind === "user" ? latestChat.group.from.id : undefined
+              : latestChat?.actorId || employeeState.ownerId || session.ownerId;
+          const toneChannel = session.taskId ? "task" : session.groupId ? "group" : "private";
+          const toneHint = await buildHiddenToneHint(this.store, {
+            employeeId: worker.employeeId,
+            ownerId: employeeState.ownerId,
+            userId: toneUserId,
+            channel: toneChannel,
+          }).catch(() => "");
+          if (toneHint) dynamic += "\n" + toneHint;
+        }
         const principles = employeeState ? `\n[工作原则]\n${effectiveWorkPrinciples(await getWorkPrinciples(this.store, employeeState.ownerId), employeeState.instruction) || "（无）"}\n以本轮系统给出的工作原则为准。续做、重新派发或参考旧任务时，历史任务说明、计划、回执和记忆中的旧工作原则仅供追溯，不按过时的要求执行，也不要照抄到新任务里。续做保留原目标、已验证进度和回执，按当前原则调整尚未完成的步骤，不重做已完成的操作；不改变群公告分工或授权范围。${assigned?.origin ? "\n当前任务由旧任务重新派发，原任务说明里的旧工作原则同样只作历史参考。" : ""}` : "";
         const system = stable + principles;
         await this.compact(tools, model, system, false, dynamic);

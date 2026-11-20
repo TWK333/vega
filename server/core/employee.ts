@@ -19,6 +19,7 @@ import { Vault, VAULT_USAGE } from "./vault";
 import { requireSceneModel, schedulerLimits, type Config } from "./config";
 import { effectiveWorkPrinciples, getWorkPrinciples } from "./work-principles";
 import { loadRows, baseRecord, saveRows } from "./employee-rows";
+import { deleteEmployeeSoul, initEmployeeSoul, observeTaskOutcome } from "./soul";
 import { assertNameFree } from "./names";
 import { cloudFor } from "./cloud";
 import {
@@ -503,6 +504,7 @@ export class Employee {
       const s = await employee.profile();
       Object.assign(s, { name: a.name.trim(), avatar, instruction: a.instruction || "", ownerId, cwd, enabled: true, workStart: "00:00", workEnd: "00:00" });
       await employee.save(s);
+      await initEmployeeSoul(this.store, key, ownerId);
       (this.root || this).members.set(key, employee);
       return s;
     });
@@ -531,6 +533,7 @@ export class Employee {
       for (const kind of ["experience:" + this.employeeId, "skill:" + this.employeeId]) await this.store.removeKind(kind);
       await this.store.dropEmployeeRows(this.employeeId);
       await this.store.remove("employee-capabilities", this.employeeId);
+      await deleteEmployeeSoul(this.store, this.employeeId);
       if (this.employeeId === "default") {
         await this.store.unset("employee");
         await this.store.put("employee:default-deleted", true);
@@ -1722,8 +1725,9 @@ export class Employee {
               this.note(s, t, "seal", owner.name || "用户", "任务已封存");
               break;
             }
-            case "stop":
+            case "stop": {
               if (ended(t.status) && t.status !== "stopped") return { ok: true, status: t.status };
+              const wasActive = !ended(t.status);
               t.status = "stopped";
               t.nextCheckAt = 0;
               this.clearBackgroundWait(t);
@@ -1733,7 +1737,19 @@ export class Employee {
               for (const session of new Set([this.busy.get(t.id)?.session, t.workSession, t.computerSession].filter(Boolean)))
                 this.runtime.cancel(session);
               if (!this.busy.has(t.id)) t.finishedAt = Date.now();
+              if (wasActive) {
+                const requesterId = t.group
+                  ? (t.group.requester.kind === "user" ? t.group.requester.id : undefined)
+                  : s.ownerId || undefined;
+                await observeTaskOutcome(this.store, {
+                  employeeId: this.employeeId,
+                  ownerId: s.ownerId,
+                  userId: requesterId,
+                  outcome: "stopped",
+                }).catch(() => {});
+              }
               break;
+            }
             case "answer": {
               assert(t.status === "waiting", "Task not waiting for information");
               assert(
@@ -2356,6 +2372,15 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                   } else if (error) {
                     t.failures = (t.failures || 0) + 1;
                     this.recover(t, result);
+                    const requesterId = t.group
+                      ? (t.group.requester.kind === "user" ? t.group.requester.id : undefined)
+                      : s.ownerId || undefined;
+                    await observeTaskOutcome(this.store, {
+                      employeeId: this.employeeId,
+                      ownerId: s.ownerId,
+                      userId: requesterId,
+                      outcome: "failed",
+                    }).catch(() => {});
                   } else if (computer && result) {
                     t.side = "work";
                     t.status = "queued";
@@ -2412,11 +2437,22 @@ const handoff = computer && (input.handoff !== previous.handoff || input.handoff
                 }
                 if (ended(t.status)) {
                   t.finishedAt = Date.now();
-                  if (t.status === "done" && Array.isArray(t.recalledMemoryIds)) {
-                    for (const mid of t.recalledMemoryIds) {
-                      const memory = (s.memories as MemoryRecord[]).find((item) => item.id === mid);
-                      if (memory) applyFeedback(memory, "success", t.finishedAt);
+                  if (t.status === "done") {
+                    if (Array.isArray(t.recalledMemoryIds)) {
+                      for (const mid of t.recalledMemoryIds) {
+                        const memory = (s.memories as MemoryRecord[]).find((item) => item.id === mid);
+                        if (memory) applyFeedback(memory, "success", t.finishedAt);
+                      }
                     }
+                    const requesterId = t.group
+                      ? (t.group.requester.kind === "user" ? t.group.requester.id : undefined)
+                      : s.ownerId || undefined;
+                    await observeTaskOutcome(this.store, {
+                      employeeId: this.employeeId,
+                      ownerId: s.ownerId,
+                      userId: requesterId,
+                      outcome: "done",
+                    }).catch(() => {});
                   }
                 }
         });

@@ -51,6 +51,7 @@ const members = computed(() => groupMembers(group.value, props.user?.id));
 provide("mentions", { people: computed(() => groupMentionPeople(group.value)), open: (id) => emit("open-employee", id) });
 // Authors carry ids and names; avatars come from the current member list (a member who left keeps the initial / default bot).
 const avatars = computed(() => new Map([...(group.value?.users || []), ...(group.value?.employees || [])].map((p) => [p.id, p.avatar || ""])));
+const weatherByEmployee = computed(() => new Map((group.value?.employees || []).map((p) => [p.id, p.moodWeather || ""])));
 const shown = computed(() => {
   const rows = mergeMessages(history.value?.olderReferences || [], messages.value).filter((m) => m.notice || m.text?.trim() || m.tasks?.length || m.images?.length || m.files?.length)
     .map((m) => m.author ? { ...m, author: { ...m.author, avatar: avatars.value.get(m.author.id) || "" } } : m);
@@ -75,6 +76,18 @@ const shown = computed(() => {
 // 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
 const newFrom = ref(seenSeq(props.user?.id, props.groupId)), markGone = ref(false);
 const newAt = computed(() => !activeTopic.value && newFrom.value > 0 ? shown.value.findIndex(({ message }) => message.seq > newFrom.value) : -1);
+// 每位热心市民只在自己最后一次发言的头像旁展示当前天气小图标。
+const lastBotAvatarIndexById = computed(() => {
+  const rows = shown.value, map = new Map();
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const m = rows[i].message;
+    if (m.notice || m.author?.kind !== "employee" || map.has(m.author.id)) continue;
+    let head = i;
+    while (head > 0 && rows[head].continued && !(newAt.value > 0 && head === newAt.value)) head--;
+    map.set(m.author.id, head);
+  }
+  return map;
+});
 const lastSeq = computed(() => messages.value.at(-1)?.seq || 0);
 let settled = false, baseSeq = 0;
 watch(lastSeq, (seq) => { if (!activeTopic.value && settled && seq > baseSeq) markGone.value = true; });
@@ -386,7 +399,7 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
               <template v-for="({ message, continued, cards, topicContext }, index) in shown" :key="message.seq">
                 <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice" :data-message-seq="message.seq">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued && !(newAt > 0 && index === newAt)" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :topic-context="topicContext" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
+                <ChatMessage v-else :message="message" :continued="continued && !(newAt > 0 && index === newAt)" :mood-weather="message.author?.kind === 'employee' && lastBotAvatarIndexById.get(message.author.id) === index ? weatherByEmployee.get(message.author.id) : ''" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :topic-context="topicContext" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
                 <span class="chat-avatar" aria-hidden="true"><PressMention :name="e.name" :disabled="readonly" @press="mentionMember"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></PressMention></span>
