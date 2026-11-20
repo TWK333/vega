@@ -126,7 +126,7 @@ export type Session = {
   agentChild?: boolean;
   createdAt: number;
 };
-export type SceneFrame = { scene?: string; model?: string; resume?: string };
+export type SceneFrame = { scene?: string; model?: string; resume?: string; agent?: "code_agent" | "browser_agent" };
 /** Schema version kept in settings; a database of another version is refused (no migrations). */
 const SCHEMA = 6;
 /**

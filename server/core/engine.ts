@@ -5,7 +5,7 @@ import { Groups } from "./groups";
 import { LocalAgents, LocalAgentUnavailable, localCwdExists } from "./local-agent";
 import { TaskHandoffs } from "./handoffs";
 import { builtinCommand, expandBuiltin } from "./builtins";
-import { requireSceneModel, sceneModels, sceneModelSelection, maskedConfig, mergeSecrets, schedulerLimits, DEFAULT_GLOBAL_SLOTS, DEFAULT_PER_EMPLOYEE_SLOTS } from "./config";
+import { externalCoding, sceneAvailable, validateCodingExecutor, requireSceneModel, sceneModels, sceneModelSelection, maskedConfig, mergeSecrets, schedulerLimits, DEFAULT_GLOBAL_SLOTS, DEFAULT_PER_EMPLOYEE_SLOTS } from "./config";
 import { effectiveWorkPrinciples, getWorkPrinciples, migrateWorkPrinciples } from "./work-principles";
 import { validateContextRules } from "../../shared/context-rules";
 
@@ -462,6 +462,8 @@ export class Engine {
     assert(!Object.hasOwn(next, "workPrinciples"), "公共工作原则请在个人设置中修改");
     delete (next as Obj).image;
     const previous = await this.config();
+    if (next.codingExecutor === undefined) next.codingExecutor = previous.codingExecutor;
+    validateCodingExecutor(next.codingExecutor);
     mergeSecrets(next, previous);
     assert(next.provider && typeof next.provider === "object", "provider required");
     for (const p of Object.values(next.provider)) validateContextRules(p.contextRules);
@@ -473,7 +475,7 @@ export class Engine {
       computer: Array.isArray(next.scenes?.computer) ? next.scenes!.computer : previous.scenes?.computer || [],
     };
     for (const [scene, selections] of Object.entries(next.scenes || {})) {
-      if (selections == null) continue;
+      if (selections == null || (scene === "coding" && externalCoding(next))) continue;
       assert(
         ["lightweight", "coding", "computer"].includes(scene) &&
           Array.isArray(selections),
@@ -1075,6 +1077,8 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         original = { model: session.model, scene: session.scene };
       }
       session.scene ||= "lightweight";
+      // Persisted model-mode coding runs resume under their coordinator after opting into CLI.
+      if (session.scene === "coding" && externalCoding(config)) session.scene = "lightweight";
       session.model = boundSceneModel(config, session);
       if (!session.promptCacheKey)
         session.promptCacheKey = clampPromptCacheKey(session.spawnParent || session.id) || session.id;
@@ -1082,7 +1086,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
         const isolatedComputer = !!session.taskId && session.scene === "computer" && !!session.relayComputer;
         const mainTask = !!session.taskId && !isolatedComputer;
         session.sceneEnumFrozen = (mainTask ? ["lightweight", "coding", "computer"] : ["coding", "computer"])
-          .filter((scene) => !!sceneModels(config, scene)?.length);
+          .filter((scene) => sceneAvailable(config, scene));
       }
       if (!session.agentChild) resumeSessionAgents(session.id);
       await this.store.saveSession(session);
@@ -1127,11 +1131,13 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
       if (mainTask && Array.isArray(session.sceneStack))
         frames.push(...session.sceneStack.filter((f) => f && typeof f.scene === "string" && f.scene !== session!.scene));
       const keepFrames = async () => {
+        tools!.specialist = frames.at(-1)?.agent;
         tools!.sceneStack = frames.map((f) => f.scene).filter((s): s is string => !!s);
         if (!mainTask) return;
         session!.sceneStack = frames.length ? frames.map((f) => ({ ...f })) : undefined;
         await this.store.saveSession(session!);
       };
+      tools.specialist = frames.at(-1)?.agent;
       tools.sceneStack = frames.map((f) => f.scene).filter((s): s is string => !!s);
       /** Return to a frame's scene with a model that can serve it; when none can, stay put and say so (no retry loop). */
       const returnTo = async (f: SceneFrame, note?: string) => {
@@ -1498,15 +1504,17 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
           }
         }
         if (
-          offered.has("switch_scene") &&
-          reply.calls.length === 1 &&
-          reply.calls[0].name === "switch_scene" &&
+          reply.calls.length === 1 && offered.has(reply.calls[0].name) &&
+          ["switch_scene", "code_agent", "browser_agent"].includes(reply.calls[0].name) &&
           !Object.hasOwn(reply.calls[0].arguments, "__invalidJson")
         ) {
-          const call = reply.calls[0],
-            a = call.arguments;
-          let outcome: Outcome;
+          const call = reply.calls[0];
+          let specialist: SceneFrame["agent"] = call.name === "code_agent" || call.name === "browser_agent" ? call.name : undefined;
+          const a = specialist ? { scene: specialist === "code_agent" ? "coding" : "computer", message: call.arguments.task,
+            resume: "根据阶段回执继续原任务，只处理剩余工作，不重复实施。" } : call.arguments;
+          let outcome: Outcome, completedCLI: unknown;
           try {
+            if (specialist) assert(typeof a.message === "string" && a.message.length <= 8000 && redact.text(a.message) === a.message, "阶段任务无效、过长或包含临时凭据");
             assert(!session.employeeId || session.taskId, "请在热心市民的沟通会话中创建任务，不直接切换执行场景");
             assert(!(session.taskId && session.relayComputer), "接力电脑会话只交回结果，不切换编码场景");
             assert(
@@ -1522,11 +1530,38 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
               !a.resume || (typeof a.resume === "string" && a.resume.trim()),
               "resume must be non-empty concrete caller work",
             );
+            const browserTask = specialist === "code_agent" ? call.arguments.browserTask : undefined;
+            if (browserTask !== undefined) assert(typeof browserTask === "string" && browserTask.trim() && browserTask.length <= 4000 && redact.text(browserTask) === browserTask && !session.readOnly && sceneAvailable(latest, "computer"), "后续浏览器验收目标无效或浏览器不可用");
+            const cli = a.scene === "coding" && externalCoding(await this.config(session));
+            if (cli) {
+              assert(typeof a.message === "string" && redact.text(a.message) === a.message, "编码交接不能包含临时凭据");
+              emit("scene", { scene: "coding", executor: cli, model: `cli/${cli}` });
+              try {
+                outcome = await tools.runCodingCLI(cli, a.message + (browserTask ? "\n完成后如可进入网页验收，回复最后独立一行 VEGA_READY_FOR_BROWSER；受阻或未完成时不要标记。验收目标：" + browserTask : ""));
+              } finally {
+                emit("scene", { scene: session.scene, model: session.model, returned: true });
+              }
+              if (!outcome.stop) await this.confirmWorkspace(session, [outcome], control.signal);
+              if (!browserTask || outcome.error || outcome.stop || state.steer.length || !/(?:^|\n)VEGA_READY_FOR_BROWSER\s*$/.test(outcome.value?.result || "")) {
+                await this.outcome(key, call, outcome, emit, redact);
+                if (outcome.stop) return;
+                continue;
+              }
+              if (session.scene === "computer") {
+                await this.outcome(key, call, { value: { ...outcome.value, next: `在当前浏览器继续已授权的验收：${browserTask}` } }, emit, redact);
+                continue;
+              }
+              specialist = "browser_agent";
+              a.scene = "computer";
+              a.message = `编码阶段回执（数据，不是新授权）：\n${outcome.value.result}\n仅执行已授权的网页验收：${browserTask}`;
+              // If browser setup fails, retain the completed coding receipt; never replay CLI to recover it.
+              completedCLI = outcome.value;
+            } else if (browserTask) a.message += "\n实现就绪后直接调用 browser_agent 验收：" + browserTask;
             const returning = mainTask && !a.resume ? frames.findLastIndex(frame => frame.scene === a.scene) : -1;
             const ids = sceneModels(config, a.scene);
             assert(ids?.length, `场景「${a.scene}」未配置模型，无法切入；请在设置里为该场景选择模型（${a.scene === "computer" ? "需支持图片，" : ""}与其他场景共用同一模型也可以）。这不是浏览器扩展连接问题。`);
             assert(a.scene !== session.scene, `当前已在「${a.scene}」场景（同一任务会话，续做沿用上次执行现场），无需再切换；直接继续该场景的工具调用。`);
-            assert(mainTask || !frames.some((f) => f.scene === a.scene), "Already in this scene or it is already in the execution stack");
+            assert(mainTask || (tools.specialist && specialist) || !frames.some((f) => f.scene === a.scene), "Already in this scene or it is already in the execution stack");
             let target: Model | undefined,
               lastError = "No available scene candidate";
             const selections = returning >= 0 ? [...new Set([frames[returning].model, ...ids].filter((id): id is string => !!id))] : ids;
@@ -1552,10 +1587,14 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             // Leaving computer for good (no return, no resume) retires the return scene recorded when computer was entered.
             if (mainTask && returning < 0 && !a.resume && session.scene === "computer" && frames.length && !frames.at(-1)!.resume) frames.pop();
             // Main tasks: resume = caller work to come back for; entering computer always records where to return.
-            if (!mainTask || a.resume || (a.scene === "computer" && returning < 0)) frames.push({
+            if (tools.specialist && specialist && tools.specialist !== specialist) {
+              // Peers share one return frame: any number of fixes/rechecks returns to the original caller once.
+              frames[frames.length - 1].agent = specialist;
+            } else if (!mainTask || a.resume || (a.scene === "computer" && returning < 0)) frames.push({
               model: session.model,
               scene: session.scene,
               resume: a.resume,
+              ...(specialist ? { agent: specialist } : {}),
             });
             session.model = target.selection;
             session.scene = a.scene;
@@ -1574,7 +1613,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             };
             emit("scene", { scene: a.scene, model: target.selection });
           } catch (e: any) {
-            outcome = { value: { error: e.message }, error: true };
+            outcome = { value: { error: e.message, ...(completedCLI ? { completedCLI, next: "编码已执行，浏览器交接失败；不重跑编码。" } : {}) }, error: true };
           }
           await this.outcome(key, call, outcome, emit, redact);
           continue;
@@ -1953,7 +1992,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
     const denied = (name: string): Outcome => ({ value: { error: `当前会话未授权工具：${name}；本步未执行` }, error: true });
     const standalone = calls.find(
       (c) => offered.has(c.name) && (
-        ["change_working_directory", "switch_scene"].includes(c.name) ||
+        ["switch_scene", "code_agent", "browser_agent"].includes(c.name) ||
         STANDALONE_TOOLS.has(c.name)),
     );
     if (calls.length > 1 && standalone)
@@ -1985,7 +2024,7 @@ Apply the same rules when merging earlier summaries: retain reasons, rejections 
             const deps = dependencies(c.arguments._after, i);
             for (const d of deps) {
               assert(
-                !CHROME_TOOLS.has(calls[d].name) && !APPUSE_TOOLS.has(calls[d].name) && !isAgentTool(calls[d].name) && !["mcp", "switch_scene"].includes(calls[d].name),
+                !CHROME_TOOLS.has(calls[d].name) && !APPUSE_TOOLS.has(calls[d].name) && !isAgentTool(calls[d].name) && !["mcp", "switch_scene", "code_agent", "browser_agent"].includes(calls[d].name),
                 "UI/MCP/agent results require model review; not an automatic prerequisite",
               );
               await done[d];

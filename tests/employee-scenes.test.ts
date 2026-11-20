@@ -58,6 +58,122 @@ test("employee chat receives low-risk defaults without losing explicit device co
   } finally { await engine.close(); await store.close(); }
 });
 
+test("CLI coding handoff needs no coding model and returns to the coordinator", async () => {
+  const { store, engine, employee, add, segment } = await fixture();
+  const { Tools } = await import("../server/core/tools");
+  const original = Tools.prototype.runCodingCLI;
+  const runs: string[] = [];
+  try {
+    const cfg = await engine.config();
+    cfg.scenes!.coding = [];
+    await engine.saveConfig({ ...cfg, codingExecutor: "antigravity" });
+    Tools.prototype.runCodingCLI = async function (cli, handoff) {
+      runs.push(`${cli}:${handoff}`);
+      return { value: { result: "fixture CLI result" } };
+    };
+    let phase = 0;
+    engine.providers.chat = async (model, _sys, rows, defs) => {
+      assert.equal(model.selection, "p/light");
+      if (!phase++) {
+        assert(defs.find(d => d.name === "switch_scene")?.parameters.properties.scene.enum.includes("coding"));
+        return call("cli", "code_agent", { task: "edit and test" });
+      }
+      assert(rows.some(row => row.role === "tool" && row.text?.includes("fixture CLI result")));
+      return phase === 2 ? verified() : completed();
+    };
+    assert.equal((await segment(await add("code phase"))).status, "done");
+    assert.deepEqual(runs, ["antigravity:edit and test"]);
+  } finally { Tools.prototype.runCodingCLI = original; await engine.close(); await store.close(); }
+});
+
+for (const cli of [false, true]) test(`coding hands off directly to browser (${cli ? "CLI" : "model"})`, async () => {
+  const { store, engine, add, segment } = await fixture();
+  const { Tools } = await import("../server/core/tools");
+  const original = Tools.prototype.runCodingCLI;
+  const requests: string[] = [];
+  try {
+    if (cli) {
+      await engine.saveConfig({ ...await engine.config(), codingExecutor: "codex" });
+      Tools.prototype.runCodingCLI = async () => ({ value: { result: "edit tested\nVEGA_READY_FOR_BROWSER" } });
+    }
+    engine.providers.chat = async (model, _sys, rows, defs) => {
+      requests.push(model.selection);
+      if (requests.length === 1) return call("code", "code_agent", { task: "fix hover", browserTask: "verify hover" });
+      if (model.selection === "p/code") {
+        assert(defs.some(d => d.name === "browser_agent"));
+        return call("browser", "browser_agent", { task: "verify hover on updated build" });
+      }
+      if (model.selection === "p/vision") {
+        assert(rows.some(r => r.text?.includes("verify hover")));
+        return { role: "assistant", text: "hover verification result" };
+      }
+      return requests.at(-2) === "p/vision" ? verified() : completed();
+    };
+    assert.equal((await segment(await add("fix and verify"))).status, "done");
+    assert.deepEqual(requests, ["p/light", ...cli ? [] : ["p/code"], "p/vision", "p/light", "p/light"]);
+  } finally { Tools.prototype.runCodingCLI = original; await engine.close(); await store.close(); }
+});
+
+for (const cli of [false, true]) test(`browser sends an authorized fix directly to coding then rechecks (${cli ? 'CLI' : 'model'})`, async () => {
+  const { store, engine, add, segment } = await fixture();
+  const { Tools } = await import('../server/core/tools');
+  const original = Tools.prototype.runCodingCLI;
+  const route: string[] = [];
+  try {
+    if (cli) {
+      await engine.saveConfig({ ...await engine.config(), codingExecutor: 'antigravity' });
+      Tools.prototype.runCodingCLI = async () => { route.push('cli'); return { value: { result: 'fixed\nVEGA_READY_FOR_BROWSER' } }; };
+    }
+    engine.providers.chat = async (model, _sys, rows, defs) => {
+      route.push(model.selection);
+      if (route.length === 1) return call('inspect', 'browser_agent', { task: 'verify hover and repair if missing' });
+      if (route.length === 2) {
+        assert(defs.some(d => d.name === 'code_agent'));
+        return call('fix', 'code_agent', { task: 'fix missing hover', browserTask: 'recheck hover' });
+      }
+      if (model.selection === 'p/code') return call('recheck', 'browser_agent', { task: 'recheck hover' });
+      if (model.selection === 'p/vision') {
+        assert(rows.some(r => r.role === 'tool' && !r.error && r.text?.includes('recheck hover')));
+        return { role: 'assistant', text: 'hover verified' };
+      }
+      return route.at(-2) === 'p/vision' ? verified() : completed();
+    };
+    assert.equal((await segment(await add('verify and repair hover'))).status, 'done');
+    assert.deepEqual(route, ['p/light', 'p/vision', cli ? 'cli' : 'p/code', 'p/vision', 'p/light', 'p/light']);
+  } finally { Tools.prototype.runCodingCLI = original; await engine.close(); await store.close(); }
+});
+
+test("browser and code tools return the result to the caller without model-authored scene switches", async () => {
+  const { store, engine, employee, add, segment } = await fixture();
+  let phase = 0;
+  try {
+    engine.providers.chat = async (model, _sys, rows, defs) => {
+      switch (++phase) {
+        case 1: return call("browser", "browser_agent", { task: "inspect existing evidence" });
+        case 2:
+          assert.equal(model.selection, "p/vision");
+          assert(defs.some(d => d.name === "code_agent"));
+          assert(!defs.some(d => ["browser_agent", "switch_scene", "task_complete"].includes(d.name)));
+          return { role: "assistant", text: "browser finding" };
+        case 3:
+          assert.equal(model.selection, "p/light");
+          assert(rows.some(r => r.text === "browser finding"));
+          return call("code", "code_agent", { task: "check the browser finding" });
+        case 4:
+          assert.equal(model.selection, "p/code");
+          return { role: "assistant", text: "coding finding" };
+        case 5:
+          assert.equal(model.selection, "p/light");
+          assert(rows.some(r => r.text === "coding finding"));
+          return verified();
+        default: return completed();
+      }
+    };
+    assert.equal((await segment(await add("inspect then verify"))).status, "done");
+    assert.equal(phase, 6);
+  } finally { await engine.close(); await store.close(); }
+});
+
 test("even a coding-profile task starts lightweight, upgrades then switches to computer in the same work session", async () => {
   const { store, engine, employee, add, segment } = await fixture();
   const selected: string[] = [];

@@ -22,6 +22,7 @@ export type Config = {
   skillsDirectory?: string;
   ponytail?: string;
   scheduler?: SchedulerConfig;
+  codingExecutor?: "model" | "codex" | "antigravity";
 };
 export const DEFAULT_GLOBAL_SLOTS = 3;
 export const DEFAULT_PER_EMPLOYEE_SLOTS = 3;
@@ -105,6 +106,16 @@ export function sceneModelRows(config: Config | { scenes?: Record<string, SceneM
 }
 export function sceneModels(config: Config, scene: string): string[] {
   return sceneModelRows(config, scene).map((row) => row.model);
+}
+export function validateCodingExecutor(value: unknown) {
+  assert(value === undefined || value === "model" || value === "codex" || value === "antigravity", "Invalid coding executor");
+}
+export function externalCoding(config: Config) {
+  validateCodingExecutor(config.codingExecutor);
+  return config.codingExecutor === "model" ? undefined : config.codingExecutor;
+}
+export function sceneAvailable(config: Config, scene: string) {
+  return (scene === "coding" && !!externalCoding(config)) || !!sceneModels(config, scene).length;
 }
 export function sceneAllowSpawn(config: Config, scene: string, selection?: string) {
   if (scene === "computer") return false;
@@ -196,6 +207,7 @@ export function resolveModel(config: Config, selection = config.model): Model {
   };
 }
 export function validateConfig(c: Config) {
+  validateCodingExecutor(c.codingExecutor);
   for (const p of Object.values(c.provider || {})) validateContextRules(p.contextRules);
   if (c.model) resolveModel(c);
   assert(

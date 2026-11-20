@@ -3,6 +3,7 @@ import Icon from "./Icon.vue";
 import { computed, ref, watch } from "vue";
 const props = defineProps({ api: Function, config: Object, models: Array });
 const emit = defineEmits(["saved", "error", "notice"]);
+const executor = ref("model");
 const busy = ref(false),
   choices = ref({ lightweight: [], coding: [], computer: [] });
 const scenes = [
@@ -41,11 +42,12 @@ function selectedLabel(key, model) {
   return entries.value.find((m) => m.id === model && (key !== "computer" || m.images))?.name || model + "（暂不可用）";
 }
 const incomplete = computed(() =>
-  scenes.filter(([key]) => !choices.value[key].some((row) => row.model)).map(([, label]) => label),
+  scenes.filter(([key]) => !(key === "coding" && executor.value !== "model") && !choices.value[key].some((row) => row.model)).map(([, label]) => label),
 );
 watch(
   () => props.config,
   () => {
+    executor.value = props.config.codingExecutor || "model";
     choices.value = Object.fromEntries(
       scenes.map(([key]) => [key, (props.config.scenes?.[key] || []).map(asRow)]),
     );
@@ -73,6 +75,7 @@ async function save() {
   try {
     const next = JSON.parse(JSON.stringify(props.config));
     delete next.model;
+    next.codingExecutor = executor.value;
     next.scenes = Object.fromEntries(
       scenes.map(([key]) => [
         key,
@@ -94,16 +97,18 @@ async function save() {
 </script>
 <template>
   <section class="card">
-    <div class="card-head row"><div><h3>场景模型</h3><p class="hint">每个场景必须单独配置模型，不再使用默认模型回退；未配齐时任务不会运行。</p></div><button class="primary sm" :disabled="busy" @click="save">保存场景</button></div>
+    <div class="card-head row"><div><h3>场景模型</h3><p class="hint">轻量与浏览器场景使用模型；编码场景也可以直接交给工作区所在端的 CLI。</p></div><button class="primary sm" :disabled="busy" @click="save">保存场景</button></div>
     <p v-if="incomplete.length" class="callout warn"><Icon name="alert" :size="14" /><span>尚未配置：{{ incomplete.join("、") }}。配齐前系统不会启动对应场景。</span></p>
     <p v-if="!entries.length" class="callout info"><Icon name="alert" :size="14" /><span>先添加服务商并获取模型。</span></p>
     <div class="scene-grid">
       <article v-for="[key, label] in scenes" :key="key" class="scene-item">
-        <header><h4>{{ label }}</h4><span class="hint">{{ choices[key].filter((row) => row.model).length ? choices[key].filter((row) => row.model).length + ' 个模型' : '未配置' }}</span></header>
+        <header><h4>{{ label }}</h4><span class="hint">{{ key === 'coding' && executor !== 'model' ? '外部 CLI' : choices[key].filter((row) => row.model).length ? choices[key].filter((row) => row.model).length + ' 个模型' : '未配置' }}</span></header>
         <p v-if="key === 'lightweight'" class="hint">新任务与沟通会话从这里起步；留空则无法运行。</p>
         <p v-else-if="key === 'coding'" class="hint">实际进入编码工作时才升级；后续按需求继续编码或回到轻量，原任务历史不变。</p>
         <p v-else-if="key === 'computer'" class="hint">仅显示支持图片的模型；留空则无法启动浏览器执行。电脑场景不能开启分身。</p>
-        <ol class="scene-rows">
+        <label v-if="key === 'coding'">执行方式 <select v-model="executor"><option value="model">Vega 模型</option><option value="codex">Codex CLI</option><option value="antigravity">Antigravity CLI（反重力）</option></select></label>
+        <p v-if="key === 'coding' && executor !== 'model'" class="hint">请在工作区所在机器安装并登录 {{ executor === 'codex' ? 'codex' : 'agy' }}，加入执行账号的 PATH。编码交接会发送给该 CLI；不会自动切换设备或回退到模型。</p>
+        <ol v-if="key !== 'coding' || executor === 'model'" class="scene-rows">
           <li v-for="(selection, n) in choices[key]" :key="n" class="scene-row">
             <span class="scene-rank">{{ n + 1 }}</span>
             <div class="model-picker">
@@ -123,7 +128,7 @@ async function save() {
             </span>
           </li>
         </ol>
-        <button type="button" class="sm ghost add-model" @click="choices[key].push({ model: '', allowSpawn: false })"><Icon name="plus" :size="14" />{{ choices[key].length ? "备用模型" : "选择模型" }}</button>
+        <button v-if="key !== 'coding' || executor === 'model'" type="button" class="sm ghost add-model" @click="choices[key].push({ model: '', allowSpawn: false })"><Icon name="plus" :size="14" />{{ choices[key].length ? "备用模型" : "选择模型" }}</button>
       </article>
     </div>
   </section>
