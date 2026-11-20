@@ -462,7 +462,7 @@ test("real executor recovery preserves committed tool outcomes and consumes each
   engine.providers.chat = async (_model, _system, messages) => {
     const input = messages.findLast((message) => message.role === "user" && message.runtime !== "dynamic" && message.runtime !== "turn_aborted")!;
     if (inputs.at(-1) !== input.text) inputs.push(input.text!);
-    if (phase++ === 0) return { role: "assistant", calls: [{ id: "write-once", name: "write", arguments: { path: "proof.txt", content: "do not repeat" } }] };
+    if (phase++ === 0) return { role: "assistant", calls: [{ id: "write-once", name: "write", arguments: { path: join(dir, "proof.txt"), content: "do not repeat" } }] };
     if (phase === 2) throw new ProviderError("connection interrupted after write", 400);
     if (phase === 3) {
       assert.match(input.text!, /preserve login/);

@@ -33,7 +33,7 @@ test("client hints follow only the working device and owner, refresh live and ne
   let system = "";
   // 补充内容在动态段，随提示缓存冻结改挂到 user 消息上，不再出现在 system 前缀。
   engine.providers.chat = async (_model, prompt, view: { text?: string }[] = []) => {
-    system = [prompt, ...view.map((m) => m.text || "")].join("\n");
+    system = [prompt, view.findLast(m => m.text?.includes("当前执行位置："))?.text || ""].join("\n");
     return { role: "assistant", text: "done" };
   };
   const run = async (session: any, expected: string) => {
@@ -107,15 +107,15 @@ test("connecting a client never moves existing server sessions or their Stage/fo
   const { engine, store } = await fixture(t), session = await store.newSession({ cwd: dir, ownerId: "alice" });
   const config = { model: "", provider: {} }, signal = new AbortController().signal;
   const tools = await Tools.create(engine, session, config, signal, () => {});
-  await tools.execute({ id: "before", name: "write", arguments: { path: "note.txt", content: "before" } }, {} as any);
+  await tools.execute({ id: "before", name: "write", arguments: { path: join(dir, "note.txt"), content: "before" } }, {} as any);
   engine.localAgents.connect("alice", client);
   engine.localAgents.request = async () => { throw Error("Server work must not reach the client"); };
-  await tools.execute({ id: "after", name: "edit", arguments: { path: "note.txt", edits: [{ oldText: "before", newText: "after" }] } }, {} as any);
+  await tools.execute({ id: "after", name: "edit", arguments: { path: join(dir, "note.txt"), edits: [{ oldText: "before", newText: "after" }] } }, {} as any);
   assert.equal(await readFile(join(dir, "note.txt"), "utf8"), "after");
   for (const saved of [await store.session(session.id), await store.stage(session.id), await store.fork(session.id)]) {
     assert.equal(!!saved.localAgent, false);
     const reloaded = await Tools.create(engine, saved, config, signal, () => {});
-    const result = await reloaded.execute({ id: "read", name: "read", arguments: { path: "note.txt" } }, {} as any);
+    const result = await reloaded.execute({ id: "read", name: "read", arguments: { path: join(dir, "note.txt") } }, {} as any);
     assert.match(result.value.text, /after/);
   }
 });
@@ -209,7 +209,7 @@ test("execution changes cannot overlap a running turn, Fire, another switch or e
   await switching;
   assert.equal(engine.executionSwitches.size, 0);
   const task = await store.newSession({ ownerId: "alice", taskId: "task" });
-  await assert.rejects(engine.switchExecution(task.id, true), /牛马任务/);
+  await assert.rejects(engine.switchExecution(task.id, true), /热心市民的会话/);
   await assert.rejects(engine.switchExecution(session.id, "server" as any), /Invalid execution mode/);
 });
 

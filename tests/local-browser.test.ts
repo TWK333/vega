@@ -63,9 +63,10 @@ test("local Chrome tools and employee tasks use only their selected native brows
   assert.equal(result.value.tabs[0].tag, "local-a");
   const chrome = await engine.chromeFor({ ...session, employeeId: "employee", taskId: "task" });
   assert.equal(chrome, await engine.chromeFor(await store.session(session.id)));
-  assert.equal(await chrome.workspaceFile(session.cwd, "upload.txt"), "C:\\only-on-client\\upload.txt");
+  await assert.rejects(chrome.workspaceFile(session.cwd, "upload.txt"), /绝对路径/);
+  assert.equal(await chrome.workspaceFile(session.cwd, "C:/only-on-client/upload.txt"), "C:\\only-on-client\\upload.txt");
   const upload = calls.find((c) => c.operation === "workspace_file");
-  assert.deepEqual(upload.args, { cwd: client.cwd, path: "upload.txt" });
+  assert.deepEqual(upload.args, { cwd: client.cwd, path: "C:/only-on-client/upload.txt" });
   assert.equal(new Set(calls.map((c) => c.session)).size, 1, "same session keeps a lease across tool calls");
   const agent = engine.localAgents.active("alice", client.clientId)!;
   assert.deepEqual([...agent.browserLeases], [calls[0].session]);

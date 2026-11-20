@@ -30,14 +30,14 @@ test("a lightweight shell query releases its workspace lease before later model 
     assert(attempt < 8);
     if (id === query) {
       assert.equal(model.selection, "p/light");
-      if (!attempt) return call("query", "bash", { command: process.platform === "win32" ? "Write-Output 'query complete'" : "printf 'query complete'" });
+      if (!attempt) return call("query", "bash", { command: `cd '${cwd}'; ` + (process.platform === "win32" ? "Write-Output 'query complete'" : "printf 'query complete'") });
       if (attempt === 1) { assert(messages.findLast(message => message.role === "tool")!.text!.includes("query complete")); reasoning = true; await gate; }
     } else {
       assert.equal(id, writer);
       if (model.selection === "p/light") return call("code", "switch_scene", { scene: "coding", message: "验证编码阶段可继续执行" });
       if (!messages.some(message => message.role === "tool" && message.name === "write")) {
         assert.equal(engine.employee.writers.size, 0, "entering coding does not reserve a writer");
-        return call("actual-write", "write", { path: "code.txt", content: "verified" });
+        return call("actual-write", "write", { path: join(cwd, "code.txt"), content: "verified" });
       }
       assert([...engine.employee.writers.values()].some(lease => lease.taskId === writer));
     }
@@ -95,7 +95,7 @@ test("a sibling Git worktree and read-only probes run in parallel; an overlappin
     const successful = (name: string) => receipts.some(message => message.name === name && !message.error);
     if (id !== jobs.summary && model.selection === "p/light") return call(id + "-scene-" + attempt, "switch_scene", { scene: "coding", message: "按任务范围核对和操作当前工作区" });
     if (id === jobs.writer) {
-      if (!successful("write")) return call("write-once", "write", { path: "shared.txt", content: "A verified" });
+      if (!successful("write")) return call("write-once", "write", { path: join(cwd, "shared.txt"), content: "A verified" });
       entered = true;
       await Promise.race([gate, new Promise<never>((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }))]);
     } else if (id === jobs.waiter) {
@@ -103,25 +103,24 @@ test("a sibling Git worktree and read-only probes run in parallel; an overlappin
       if (!receipts.some(message => message.name === "bash")) {
         // A read-like prefix and a caller-supplied flag do not make arbitrary shell read-only.
         const command = process.platform === "win32" ? "Get-Location; Set-Content -LiteralPath stamp.txt -Value ran" : "pwd; printf ran > stamp.txt";
-        return call("blocked-bash", "bash", { command, readOnly: true });
+        return call("blocked-bash", "bash", { command: `cd '${nested}'; ${command}`, readOnly: true });
       }
-      if (!successful("read")) return call("read-after-lock", "read", { path: "../shared.txt" });
+      if (!successful("read")) return call("read-after-lock", "read", { path: join(cwd, "shared.txt") });
       const original = receipts.findLast(message => message.name === "read")!.text!;
       assert(original.includes("A verified"), "resuming a blocked writer must see the previous writer's actual result");
-      if (!successful("edit")) return call("edit-once", "edit", { path: "../shared.txt", edits: [{ oldText: "A verified", newText: "A verified + C verified" }] });
+      if (!successful("edit")) return call("edit-once", "edit", { path: join(cwd, "shared.txt"), edits: [{ oldText: "A verified", newText: "A verified + C verified" }] });
     } else if (id === jobs.reader) {
       assert.equal(model.selection, "p/code");
-      if (!successful("workspace_probe")) return call("probe-in-parallel", "workspace_probe", { paths: ["nested", "input.txt", "missing"] });
+      if (!successful("workspace_probe")) return call("probe-in-parallel", "workspace_probe", { paths: [nested, join(cwd, "input.txt"), join(cwd, "missing")] });
       const probe = JSON.parse(receipts.findLast(message => message.name === "workspace_probe")!.text!);
       assert.equal(probe.execution, "server");
       assert.equal(probe.platform, process.platform === "win32" ? "windows" : process.platform);
-      assert.equal(probe.cwd, cwd);
+      assert.equal(probe.cwd, undefined);
       assert.deepEqual(probe.directories.map((entry: any) => entry.isDir), [true, false, false]);
-      if (!successful("read")) return call("read-in-parallel", "read", { path: "input.txt" });
+      if (!successful("read")) return call("read-in-parallel", "read", { path: join(cwd, "input.txt") });
     } else if (id === jobs.topic) {
-      if (!successful("change_working_directory")) return call("enter-worktree", "change_working_directory", { path: worktree });
-      assert.equal(session.cwd, worktree);
-      if (!successful("write")) return call("write-worktree", "write", { path: "shared.txt", content: "linked checkout" });
+      assert.equal(session.cwd, cwd);
+      if (!successful("write")) return call("write-worktree", "write", { path: join(worktree, "shared.txt"), content: "linked checkout" });
     } else assert.equal(model.selection, "p/light");
     return task.plan?.every((step: any) => step.status === "completed") && task.plan.length
       ? call("done", "employee", { action: "complete", deliverableRef: [], text: "verified actual result", summary: "已验证。" })
@@ -143,7 +142,7 @@ test("a sibling Git worktree and read-only probes run in parallel; an overlappin
     await until(async () => { const state = await employee.state(); return [jobs.reader, jobs.summary].every((id) => employee.task(state, id).status === "done"); }, "read and summary tasks finish while writer is still active");
     await add("topic"); await engine.employee.drain();
     await until(async () => (await employee.findTask(jobs.topic))?.status === "done", "sibling worktree finishes while the original checkout is still locked");
-    assert.equal((await employee.findTask(jobs.topic))?.cwd, worktree);
+    assert.equal((await employee.findTask(jobs.topic))?.cwd, cwd);
     assert.equal(await readFile(join(worktree, "shared.txt"), "utf8"), "linked checkout");
     assert.equal(await readFile(join(cwd, "shared.txt"), "utf8"), "A verified");
     assert.equal(employee.task(await employee.state(), jobs.writer).status, "running");

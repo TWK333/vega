@@ -92,12 +92,14 @@ export type EmployeeState = {
 };
 /** The employee record alone (tasks and runs are rows, loaded by state()). */
 export type EmployeeProfile = Omit<EmployeeState, "tasks" | "runs">;
-// shortcut: leases track the bound cwd, not files arbitrary shell commands reach elsewhere; enforce that with executor isolation if needed.
-const workspaceKey = async (session: Session) => {
+// Opaque shell commands may write anywhere on their execution device.
+const workspaceKey = async (session: Session, directory: string | null) => {
+  const scope = (session.localAgent ? "client:" + session.clientId : "server") + "\0";
+  if (directory === null) return scope;
   const windows = ["win32", "windows"].includes(session.localAgent ? session.localPlatform || process.platform : process.platform);
-  let path = (windows ? win32 : posix).resolve(session.cwd);
+  let path = (windows ? win32 : posix).resolve(directory);
   if (!session.localAgent) try { path = await realpath(path); } catch {}
-  return (session.localAgent ? "client:" + session.clientId : "server") + "\0" + (windows ? path.toLowerCase() : path);
+  return scope + (windows ? path.toLowerCase() : path);
 };
 function workspaceBusy(writers: ReadonlyMap<string, { taskId: string }>, key: string, taskId: string) {
   const scope = key.slice(0, key.indexOf("\0") + 1), path = key.slice(scope.length);
@@ -106,7 +108,7 @@ function workspaceBusy(writers: ReadonlyMap<string, { taskId: string }>, key: st
   for (const [other, writer] of writers) {
     if (writer.taskId === taskId || !other.startsWith(scope)) continue;
     const dir = other.slice(scope.length);
-    if (path === dir || contains(path, dir) || contains(dir, path)) return true;
+    if (!path || !dir || path === dir || contains(path, dir) || contains(dir, path)) return true;
   }
   return false;
 }
@@ -650,9 +652,9 @@ export class Employee {
       if (this.rerun) { this.rerun = false; this.schedule(); }
     }
   }
-  async claimWorkspace(session: Session, hold = false) {
+  async claimWorkspace(session: Session, hold = false, directory: string | null = session.cwd) {
     if (!session.taskId || session.readOnly) return true;
-    const key = await workspaceKey(session);
+    const key = await workspaceKey(session, directory);
     const task = this.task(await this.state(), session.taskId);
     if (task.status !== "running") return false;
     const writers = (this.root || this).writers, owner = writers.get(key);

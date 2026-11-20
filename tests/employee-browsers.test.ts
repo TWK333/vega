@@ -54,8 +54,8 @@ test("cloud browsers use the owner's identity for profiles, uploads and cleanup 
   await f.browsers.get("ea");
   assert.equal((f.start.mock.calls[0].arguments as any[])[2], cloud);
   assert.equal((f.start.mock.calls[0].arguments as any[])[1].profile, join(home, "browsers", "ea"));
-  assert.equal(await f.chrome.workspaceFile(home, "report.txt"), join(home, "report.txt"));
-  await assert.rejects(f.chrome.workspaceFile(home, "../private-bob/report.txt"), /within the working directory/);
+  assert.equal(await f.chrome.workspaceFile(home, join(home, "report.txt")), join(home, "report.txt"));
+  await assert.rejects(f.chrome.workspaceFile(home, join(home, "../private-bob/report.txt")), /within the working directory/);
   await f.browsers.remove("ea");
   assert.deepEqual(removed, [join(home, "browsers", "ea")]);
   const failed = await fixture(t, undefined, async () => { throw Error("identity initialization failed"); });

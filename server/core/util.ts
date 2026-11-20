@@ -143,8 +143,12 @@ export function localJSON(file: string, optional = false, max = 4 << 20): Obj {
     throw e;
   }
 }
+export function absoluteFilePath(path: string, windows = process.platform === "win32") {
+  assert(typeof path === "string" && !path.includes("\0") && (windows ? /^(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+)/.test(path) : path.startsWith("/")), "文件和目录必须使用执行端的绝对路径");
+  return path;
+}
 export async function workspaceFile(cwd: string, input: string, fs = { realpath, stat: async (path: string) => statSync(path) }) {
-  assert(input.trim(), "File required");
+  absoluteFilePath(input);
   const root = await fs.realpath(cwd),
     file = await fs.realpath(resolve(root, input)),
     rel = relative(root, file);

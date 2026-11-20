@@ -106,7 +106,7 @@ test("a local response loss stops queued calls and persists the question instead
   catalog.resolve = async () => model as any;
   engine.providers.chat = async () => {
     completions++;
-    return { role: "assistant", calls: ["first", "second"].map((id) => ({ id, name: "bash", arguments: { command: "fixture" } })) };
+    return { role: "assistant", calls: ["first", "second"].map((id) => ({ id, name: "bash", arguments: { command: "cd 'C:/fixture'; fixture" } })) };
   };
   try {
     await engine.run(session.id, { role: "user", text: "run fixture" });

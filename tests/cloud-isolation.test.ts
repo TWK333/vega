@@ -94,10 +94,12 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
   assert.equal(session.cwd, ids.alice.cwd);
   await assert.rejects(store.newSession({ ownerId: "alice", cwd: ids.bob.cwd }), /私有工作区/);
   const tools = await Tools.create({ store, localAgents: hub, mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, new AbortController().signal, () => {});
-  await tools.execute({ id: "w", name: "write", arguments: { path: "test.txt", content: "before\n" } }, {} as any);
-  await tools.execute({ id: "e", name: "edit", arguments: { path: "test.txt", edits: [{ oldText: "before", newText: "after" }] } }, {} as any);
-  assert.match((await tools.read({ path: "test.txt" })).value.text, /after/);
-  const probe = await tools.execute({ id: "probe", name: "workspace_probe", arguments: { paths: [".", "unknown"] } }, {} as any);
+  const file = join(ids.alice.cwd, "test.txt");
+  await assert.rejects(tools.execute({ id: "relative", name: "write", arguments: { path: "test.txt", content: "bad" } }, {} as any), /绝对路径/);
+  await tools.execute({ id: "w", name: "write", arguments: { path: file, content: "before\n" } }, {} as any);
+  await tools.execute({ id: "e", name: "edit", arguments: { path: file, edits: [{ oldText: "before", newText: "after" }] } }, {} as any);
+  assert.match((await tools.read({ path: file })).value.text, /after/);
+  const probe = await tools.execute({ id: "probe", name: "workspace_probe", arguments: { paths: [ids.alice.cwd, join(ids.alice.cwd, "unknown")] } }, {} as any);
   assert.deepEqual(probe.value.directories.map((entry: any) => entry.isDir), [true, false]);
   await assert.rejects(tools.execute({ id: "outside-probe", name: "workspace_probe", arguments: { paths: [ids.bob.cwd] } }, {} as any), { code: "EACCES" });
   await store.saveSession({ ...session, id: "bob-archive", ownerId: "bob", cwd: ids.bob.cwd });
@@ -108,7 +110,7 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
   await store.grantBlob(ownBlob, session.id);
   assert.equal((await tools.read({ path: "sqlite:blob/" + ownBlob })).images?.[0].blobId, ownBlob);
   await assert.rejects(tools.read({ path: protectedFile }), { code: "EACCES" });
-  await assert.rejects(tools.execute({ id: "escape", name: "change_working_directory", arguments: { path: ids.bob.cwd } }, {} as any), /私有工作区/);
+  assert(!(await tools.definitions()).some(tool => tool.name === "change_working_directory"));
   const result = await shell(session.cwd, { command: "echo harmless", timeout: 5 }, new AbortController().signal, () => {}, new CloudRuntime("alice"));
   assert.equal(result.value.output, "alice:executed");
   const launch = new CloudRuntime("alice").launch("/mock/echo", [], session.cwd);
@@ -144,13 +146,13 @@ test("cloud tools route all filesystem access by owner, preserve edits, and fail
     const migrated = await engine.employee.profile();
     assert.equal(migrated.cwd, ids.alice.cwd);
     assert.equal(migrated.executionCwds?.server, ids.alice.cwd);
-    // 动态段（含「当前工作目录」）由 attachDynamic 附在最后一条 user 消息后，system 里没有。
+    // Storage keeps the private root without presenting it as an implicit command directory.
     let request: any[] = [];
     engine.providers.chat = async (_model, _system, messages) => { request = messages; return { role: "assistant", text: "recovered" }; };
     await engine.run(chat.id, { role: "user", text: "continue chatting" });
     assert.equal((await store.session(chat.id)).cwd, ids.alice.cwd);
     const lastUser = request.findLast((message: any) => message.role === "user");
-    assert(String(lastUser?.text || "").includes(ids.alice.cwd.replaceAll("\\", "/")));
+    assert(!String(lastUser?.text || "").includes("当前工作目录："));
     assert.equal((await store.lastMessage(chat.id, "assistant"))?.text, "recovered");
     assert((await store.messages(chat.id)).some((message) => message.text === "keep this earlier reply"));
     assert.equal(engine.employee.task(await engine.employee.state(), job.value.id).cwd, process.cwd());

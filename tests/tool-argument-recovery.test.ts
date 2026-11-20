@@ -122,12 +122,11 @@ test("sessions still reject unfinished streams before dispatching any tool", asy
   }
 });
 
-const append = call("once", "bash", { command: `node -e "require('node:fs').appendFileSync('once.txt','x')"`, timeout: 5 });
+const first = (cwd: string) => completion([call("once", "bash", { command: `cd '${cwd}'; node -e "require('node:fs').appendFileSync('once.txt','x')"`, timeout: 5 }), call("bad", "chrome_inspect", raw)]);
 const inspect = call("fixed", "chrome_inspect", { tabTag: "C1", visual: "none" });
-const first = completion([append, call("bad", "chrome_inspect", raw)]);
 
 for (const taskMode of [false, true]) test(`bad arguments are corrected in the same ${taskMode ? "employee run" : "conversation"} without replaying successful work`, { timeout: 30000 }, async t => {
-  const packets = [first, completion([inspect])];
+  const packets = [completion([]), completion([inspect])];
   if (taskMode) packets.push(
     completion([call("progress", "task_progress", { message: "命令和页面已验证", plan: [{ content: "执行验证：运行一次命令并核对页面", status: "completed" }] })]),
     completion([call("complete", "task_complete", { evidence: "命令成功，页面夹具确认正确", summary: "已完成验证", deliverableRefs: [] })]),
@@ -135,6 +134,7 @@ for (const taskMode of [false, true]) test(`bad arguments are corrected in the s
   else packets.push(completion([], "已完成验证"));
   const job = taskMode ? await taskFixture(t, packets) : undefined;
   const { engine, store, cwd, chrome, requests } = job || await fixture(t, packets);
+  packets[0] = first(cwd);
   const browser = t.mock.method(engine, "chromeFor", async () => chrome);
   t.mock.method(engine.handoffs, "ensureBrowserState", async () => {});
   const execute = t.mock.method(chrome, "execute", async () => ({ tabTag: "C1", pages: [{ title: "fixture" }] }));

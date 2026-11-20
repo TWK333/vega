@@ -102,7 +102,7 @@ test("a workspace probe uses only file stat on the selected Windows client", asy
   const tools = await Tools.create({ store, localAgents: hub, mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, idle(), () => {});
   const result = await tools.execute({ id: "probe", name: "workspace_probe", arguments: { paths: ["D:/", "E:/"] } }, {} as any);
   assert.equal(result.value.platform, "windows");
-  assert.equal(result.value.cwd, details.cwd);
+  assert.equal(result.value.cwd, undefined);
   assert.equal(result.value.execution, "client");
   assert.deepEqual(result.value.directories.map((entry: any) => entry.isDir), [true, false]);
   assert.equal(jobs.length, 2);
@@ -144,7 +144,7 @@ test("lost local response pauses for user confirmation, without replay or server
   const session = await store.newSession({ ownerId: "alice", cwd: dir, localAgent: true, clientId: details.clientId });
   const engine = { store, localAgents: hub, vault: new Vault(store), mcpFor: () => ({}) } as any;
   const tools = await Tools.create(engine, session, { model: "", provider: {} }, idle(), () => {});
-  const operation = tools.execute({ id: "once", name: "bash", arguments: { command: "this command must not run on the server", timeout: 10 } }, {} as any);
+  const operation = tools.execute({ id: "once", name: "bash", arguments: { command: `cd '${dir}'; this command must not run on the server`, timeout: 10 } }, {} as any);
   hub.disconnect("alice");
   const result = await operation;
   assert.equal(result.stop, true);
@@ -165,7 +165,8 @@ test("local file reads resolve on the client rather than statting server paths",
   hub.connect("alice", details, wire([], details.instance, (job) => queueMicrotask(() => hub.result("alice", { id: job.id, instance: details.instance, result: { path: "C:\\only-on-client\\note.txt", content: Buffer.from("hello\nworld").toString("base64") } }))));
   const session = await store.newSession({ ownerId: "alice", cwd: details.cwd, localAgent: true, clientId: details.clientId });
   const tools = await Tools.create({ store, localAgents: hub, vault: new Vault(store), mcpFor: () => ({}) } as any, session, { model: "", provider: {} }, idle(), () => {});
-  const result = await tools.execute({ id: "read", name: "read", arguments: { path: "note.txt" } }, {} as any);
+  await assert.rejects(tools.execute({ id: "relative", name: "read", arguments: { path: "C:note.txt" } }, {} as any), /绝对路径/);
+  const result = await tools.execute({ id: "read", name: "read", arguments: { path: "C:/only-on-client/note.txt" } }, {} as any);
   assert.match(result.value.text, /1\|hello\n2\|world/);
   assert.equal((await store.stage(session.id)).localAgent, true);
   assert.equal((await store.fork(session.id)).localAgent, true);

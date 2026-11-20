@@ -102,8 +102,8 @@ test("cwd, skills, memories and execution location stay out of the stable system
     assert.doesNotMatch(stable, /当前执行位置/);
     assert.match(stable, /图片和截图用 Markdown/);
     const dynamic = await sessionDynamicPrompt(session, config, store);
-    assert.match(dynamic, /project-cwd/);
-    assert.match(dynamic, /当前工作目录/);
+    assert.doesNotMatch(dynamic, /project-cwd|当前工作目录/);
+    assert.match(dynamic, /绝对路径/);
     assert.match(dynamic, /技能索引/);
     assert.match(dynamic, /当前执行位置/);
   } finally {

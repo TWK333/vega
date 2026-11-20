@@ -357,7 +357,7 @@ test("agent retries provider only, shares scene history, leaves one side effect"
       if (n === 1)
         completion(res, {
           tool_calls: [
-            toolCall("c", "write", { path: "once", content: "done" }),
+            toolCall("c", "write", { path: join(dir, "once"), content: "done" }),
           ],
         });
       else if (n === 2) {

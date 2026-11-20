@@ -115,11 +115,12 @@ test("native client authorizes through a site directory and runs directly withou
       (/^(?:write (?:server )?fixture|large fixture|loss fixture|continue after repair)/.test(m.content) || isPlacementAsk(m.content) || workerPlacement.test(m.content)))?.content;
     const hasTool = body.messages.at(-1)?.role === "tool", loss = String(latest).includes("loss fixture");
     const placementCheck = workerPlacement.test(latest || "");
-    const command = process.platform === "win32"
+    const directory = /write server fixture|在服务器上列出d盘目录/.test(latest || "") ? serverDir : clientDir;
+    const command = `cd '${directory}'; ` + (process.platform === "win32"
       ? (loss ? "Add-Content -LiteralPath loss.txt -Value once; Start-Sleep -Seconds 10" : placementCheck ? "Set-Content -LiteralPath routing-fixture.txt -Value placement-success" : "Set-Content -LiteralPath from-client.txt -Value local-success")
-      : (loss ? "printf 'once\\n' >> loss.txt; sleep 10" : placementCheck ? "printf 'placement-success\\n' > routing-fixture.txt" : "printf 'local-success\\n' > from-client.txt");
+      : (loss ? "printf 'once\\n' >> loss.txt; sleep 10" : placementCheck ? "printf 'placement-success\\n' > routing-fixture.txt" : "printf 'local-success\\n' > from-client.txt"));
     const tool = isPlacementAsk(latest || "") ? { name: "employee_task_create", arguments: JSON.stringify({ instructions: "check placement fixture: " + latest }) }
-      : String(latest).includes("large fixture") ? { name: "read", arguments: JSON.stringify({ path: "large.txt" }) } : { name: "bash", arguments: JSON.stringify({ command, timeout: 20 }) };
+      : String(latest).includes("large fixture") ? { name: "read", arguments: JSON.stringify({ path: join(clientDir, "large.txt") }) } : { name: "bash", arguments: JSON.stringify({ command, timeout: 20 }) };
     const delta = hasTool || String(latest).includes("continue after repair")
       ? { content: "verified completion" }
       : { tool_calls: [{ index: 0, id: "fixture-" + modelCalls, function: tool }] };

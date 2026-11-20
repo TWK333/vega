@@ -2,12 +2,21 @@ import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { ChromeBridge } from "../server/core/chrome-bridge";
 import { shell, Tools } from "../server/core/tools";
-import { assertShellCommand, SHELL_POLICY_ERROR } from "../server/core/shell-policy";
+import { assertShellCommand, explicitShellDirectory, SHELL_POLICY_ERROR } from "../server/core/shell-policy";
 import { LocalAgents, localShell } from "../server/core/local-agent";
 import { Store } from "../server/core/store";
 import { Vault } from "../server/core/vault";
 import { CODING_RULES } from "../server/core/prompt";
 import commandCases from "../local/testdata/shell-policy.json";
+
+test("model commands explicitly address a checkout on the execution platform", () => {
+  assert.equal(explicitShellDirectory("set -eu\ncd '/repo a' && git status", false), "/repo a");
+  assert.equal(explicitShellDirectory('git -C "D:/repo a" status', true), 'D:/repo a');
+  assert.equal(explicitShellDirectory('cat /repo/file', false), null);
+  for (const command of ['git status', 'cd ../repo; git status', 'cat /repo/file; git status'])
+    assert.throws(() => explicitShellDirectory(command, false), /绝对路径/);
+  assert.throws(() => explicitShellDirectory('cd D:repo; git status', true), /绝对路径/);
+});
 const cleanup: (() => any)[] = [];
 afterEach(async () => {
   for (const f of cleanup.splice(0).reverse()) await f();

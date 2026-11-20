@@ -329,7 +329,7 @@ test(
           action: "upload",
           frame: 0,
           selector: "#upload",
-          files: ["upload.txt"],
+          files: [join(dir, "upload.txt")],
         },
         visual: "none",
       });

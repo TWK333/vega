@@ -60,7 +60,7 @@ async function fixture(t: TestContext) {
 }
 
 for (const quick of [false, true]) test(`generic result: ${quick ? "short wait keeps the original slot" : "long wait gives the slot to the queued task and resumes once"}`, { timeout: 12000 }, async t => {
-  const { engine, store, employee, add, task, runs, start } = await fixture(t);
+  const { engine, store, employee, cwd, add, task, runs, start } = await fixture(t);
   const first = await add("A"), second = await add("B");
   const window = waitWindow(t);
   const reply = deferred<string>(), waiting = deferred<void>();
@@ -74,7 +74,7 @@ for (const quick of [false, true]) test(`generic result: ${quick ? "short wait k
     if (id === first) {
       originalSession ||= session!;
       assert.equal(session, originalSession);
-      if (!messages.some(m => m.callId === "launch-once")) return call("launch-once", "write", { path: "submitted.txt", content: "one operation" });
+      if (!messages.some(m => m.callId === "launch-once")) return call("launch-once", "write", { path: join(cwd, "submitted.txt"), content: "one operation" });
       if (!messages.some(m => m.text?.includes("unique async receipt"))) return { role: "assistant", text: "Waiting for the existing operation" };
     }
     return finish(id, messages);
@@ -113,7 +113,7 @@ test("a lone long bash_poll parks without unlocking an active writer", { timeout
   t.after(() => { exited.resolve(); if (job) completeBashJob(job); });
   engine.providers.chat = async (_model, _system, messages, _defs, _signal, _emit, session) => {
     const id = (await store.session(session!)).taskId!;
-    if (!messages.some(m => m.name === "write" && !m.error)) return call(id + "-write", "write", { path: "shared.txt", content: id });
+    if (!messages.some(m => m.name === "write" && !m.error)) return call(id + "-write", "write", { path: join(id === independent ? other : cwd, "shared.txt"), content: id });
     if (id === first) {
       job ||= createBashJob({ session: session!, timeoutSecs: 120, waitable: true, exited: exited.promise, kill() { exited.resolve(); } });
       if (!messages.some(m => m.text?.includes("shell result once"))) return call("long-poll", "bash_poll", { job_id: job.id, wait: 30 });

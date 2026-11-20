@@ -27,7 +27,7 @@ test("undeclared tools become error receipts; a session corrects itself without 
       ? { tool_calls: [call(0, "bad-one", "switch_scene", { scene: "coding", message: "do not switch" })] }
       : bodies.length === 2
         ? { tool_calls: [
-            call(0, "good", "write", { path: "once.txt", content: "written once" }),
+            call(0, "good", "write", { path: join(dir, "once.txt"), content: "written once" }),
             call(1, "bad-two", "switch_scene", { scene: "coding", message: "still forbidden" }),
             call(2, "bad-three", "unlisted_tool", {}),
             call(3, "dependent", "write", { path: "blocked.txt", content: "must not exist", _after: [3] }),

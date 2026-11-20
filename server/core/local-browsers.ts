@@ -4,7 +4,7 @@ import { ChromeBridge } from "./chrome-bridge";
 import { clientExperienceKind, restoreClientExperiences } from "./experience-access";
 import { LocalAgentUnavailable, type Agent, type LocalAgents } from "./local-agent";
 import type { Store, Session } from "./store";
-import type { Obj } from "./util";
+import { absoluteFilePath, type Obj } from "./util";
 
 class LocalBridge extends ChromeBridge {
   private info = super.status();
@@ -44,6 +44,7 @@ export class LocalBrowsers {
       // Navigation affects every session on this browser; observation keys still isolate input ownership.
       if (shared) chrome.observations = shared.chrome.observations;
       chrome.workspaceFile = async (cwd, path) => {
+        absoluteFilePath(path, agent.platform === "windows");
         const r = await bridge.request("workspace_file", { cwd, path });
         if (typeof r.path !== "string") throw Error("Invalid local upload path");
         return r.path;

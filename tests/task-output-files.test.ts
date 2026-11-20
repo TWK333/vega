@@ -51,7 +51,7 @@ test("生成文件作为独立产物保存快照，工作继续且重复回执�
   await mkdir(join(f.cwd, "dist"));
   const path = join(f.cwd, "dist", "build.zip"), original = Buffer.from([0, 1, 2, 255, 42]);
   await writeFile(path, original);
-  const { call, result } = await f.invoke({ step: 1, paths: ["dist/build.zip"] });
+  const { call, result } = await f.invoke({ step: 1, paths: [path] });
   assert.equal(result.value.stepOutput.duplicate, false);
   const task = (await f.employee.findTask(f.job))!;
   assert.equal(task.status, "running");
@@ -88,17 +88,17 @@ test("产物只读取工作区内普通文件，拒绝常见凭据、超限及�
   await large.truncate(ATTACHMENT_BYTES + 1); await large.close();
   await assert.rejects(f.invoke({ step: 1, paths: ["../outside"] }));
   await assert.rejects(f.invoke({ step: 1, paths: [".env"] }), /凭据文件/);
-  await assert.rejects(f.invoke({ step: 1, paths: ["large.bin"] }), /25MiB/);
+  await assert.rejects(f.invoke({ step: 1, paths: [join(f.cwd, "large.bin")] }), /25MiB/);
   const outside = await mkdtemp(join(tmpdir(), "vega-step-outside-"));
   t.after(async () => { await rm(outside, { recursive: true, force: true }); });
   await writeFile(join(outside, "secret.txt"), "outside");
   try {
     await symlink(join(outside, "secret.txt"), join(f.cwd, "link.txt"));
-    await assert.rejects(f.invoke({ step: 1, paths: ["link.txt"] }), /within the working directory/);
+    await assert.rejects(f.invoke({ step: 1, paths: [join(f.cwd, "link.txt")] }), /within the working directory/);
   } catch (error: any) { if (!["EPERM", "EACCES", "ENOTSUP"].includes(error.code)) throw error; }
   const redactor = new Redactor(); redactor.add("private-test-token"); f.engine.redactors.set(f.session.id, redactor);
   await writeFile(join(f.cwd, "safe.txt"), "artifact private-test-token");
-  await assert.rejects(f.invoke({ step: 1, paths: ["safe.txt"] }), /含有本轮凭据/);
+  await assert.rejects(f.invoke({ step: 1, paths: [join(f.cwd, "safe.txt")] }), /含有本轮凭据/);
   await assert.rejects(f.invoke({ step: 1, text: "private-test-token" }), /密码本凭据/);
   assert.equal((await f.employee.findTask(f.job))!.stepOutputs, undefined);
   assert.equal(Number((await f.store.one("SELECT count(*) n FROM blobs"))!.n), 0);
@@ -112,17 +112,18 @@ test("客户端产物在绑定客户端校验后读取，不静默改用服务�
     if (args.op === "read_workspace") return { path: "C:\\work\\dist\\agent.zip", content: Buffer.from("client bytes").toString("base64") };
     throw Error("unexpected operation");
   };
-  const { result } = await f.invoke({ step: 1, paths: ["dist/agent.zip"] });
+  const path = "C:/work/dist/agent.zip";
+  const { result } = await f.invoke({ step: 1, paths: [path] });
   assert.equal(result.value.ok, true);
   assert.deepEqual(operations, ["read_workspace"]);
   const file = (await f.employee.findTask(f.job))!.stepOutputs[0].files[0];
   assert.equal(file.name, "agent.zip");
   assert.equal(Buffer.from((await f.store.blobData(file.blobId))!.data).toString(), "client bytes");
   (f.engine.localAgents as any).request = async () => ({ error: "Unknown file operation" });
-  await assert.rejects(f.invoke({ step: 2, paths: ["dist/agent.zip"] }), /升级客户端/);
+  await assert.rejects(f.invoke({ step: 2, paths: [path] }), /升级客户端/);
   assert.equal((await f.employee.findTask(f.job))!.stepOutputs.length, 1, "旧客户端不退回到不安全的两次读取");
   f.engine.localAgents.disconnect(owner.id, "a".repeat(32));
-  const unavailable = await f.invoke({ step: 2, paths: ["dist/agent.zip"] });
+  const unavailable = await f.invoke({ step: 2, paths: [path] });
   assert.equal(unavailable.result.error, true);
   assert.equal((await f.employee.findTask(f.job))!.stepOutputs.length, 1);
 });
@@ -136,7 +137,7 @@ test("云端隔离文件按租户文件系统读取", async (t) => {
     stat: async (path: string) => { calls.push("stat"); return fs.stat(path); },
     readFile: async (path: string) => { calls.push("readFile"); return fs.readFile(path); },
   } };
-  await f.invoke({ step: 1, paths: ["artifact.txt"] });
+  await f.invoke({ step: 1, paths: [join(f.cwd, "artifact.txt")] });
   assert(calls.includes("realpath") && calls.includes("stat") && calls.includes("readFile"));
   const file = (await f.employee.findTask(f.job))!.stepOutputs[0].files[0];
   assert.equal(Buffer.from((await f.store.blobData(file.blobId))!.data).toString(), "cloud result");
@@ -147,7 +148,7 @@ test("群成员只取得本群产物文件；原生客户端下载同样校验 b
   const group = await f.engine.groups.create(owner, { name: "产物群", users: [guest.id], employees: [f.employee.employeeId] });
   await f.employee.update((state) => { f.employee.task(state, f.job).group = { groupId: group.id, name: "产物群", hop: 0, requester: { kind: "user", id: guest.id, name: "u2" }, byOwner: false }; });
   await writeFile(join(f.cwd, "output.bin"), Buffer.from([1, 2, 255]));
-  await f.invoke({ step: 1, text: "单独说明", paths: ["output.bin"] });
+  await f.invoke({ step: 1, text: "单独说明", paths: [join(f.cwd, "output.bin")] });
   const groupSession = (await f.engine.groups.get(group.id))!.session;
   const message = (await f.store.messages(groupSession)).find((row) => row.stepOutput)!;
   assert.equal(message.text, "产物已生成，继续工作");
