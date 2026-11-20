@@ -31,17 +31,17 @@ onBeforeUnmount(() => { disposed = true; version++; });
 <template>
   <div class="debug-layout" :class="{ 'has-selection': !!selected }">
     <section class="debug-list-pane" aria-label="调试会话列表">
-      <PageHeader title="调试会话" subtitle="按任务归组，查看真实消息与工具记录">
+      <PageHeader title="调试会话" subtitle="按任务归组，查看各账号的热心市民会话与工具记录">
         <button type="button" class="sm" :disabled="busy" title="刷新" @click="refresh"><Icon name="refresh" :size="14" /><span class="hide-mobile">刷新</span></button>
       </PageHeader>
       <div class="debug-filters">
-        <select v-model="employee" aria-label="牛马"><option value="">全部牛马</option><option v-for="[id, name] in employees" :key="id" :value="id">{{ name }}</option></select>
-        <label class="search"><Icon name="search" :size="14" /><input v-model="search" aria-label="按任务 ID、任务内容、会话 ID、标题或牛马查找" placeholder="任务 ID、任务内容或会话" /></label>
+        <select v-model="employee" aria-label="热心市民"><option value="">全部热心市民</option><option v-for="[id, name] in employees" :key="id" :value="id">{{ name }}</option></select>
+        <label class="search"><Icon name="search" :size="14" /><input v-model="search" aria-label="按归属用户、任务 ID、任务内容、会话 ID、标题或热心市民查找" placeholder="用户、任务 ID、内容或会话" /></label>
       </div>
       <p class="debug-count"><span>{{ groups.filter(group => group.taskId).length }} 个任务 · {{ visible.length }} 个会话</span><span><Icon name="lock" :size="11" />只读</span></p>
       <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span></p>
       <div class="debug-list">
-        <p v-if="!groups.length" class="empty-state">{{ busy ? '正在读取…' : '没有匹配的牛马会话' }}</p>
+        <p v-if="!groups.length" class="empty-state">{{ busy ? '正在读取…' : '没有匹配的热心市民会话' }}</p>
         <section v-for="group in groups" :key="group.key" class="debug-group" :class="{ loose: !group.taskId }" :aria-label="group.taskId ? '任务 ' + group.taskId : group.label">
           <header class="debug-group-head">
             <div class="debug-group-meta"><span>{{ group.taskId ? '任务' : group.label }}<span class="session-count">{{ group.sessions.length }} 个会话</span></span><span v-if="group.taskStatus" :class="['badge', taskTone(group.taskStatus)]">{{ taskLabel(group.taskStatus) }}</span></div>
@@ -53,7 +53,7 @@ onBeforeUnmount(() => { disposed = true; version++; });
             <span class="debug-session-body">
               <span class="debug-row"><strong>{{ session.employeeName }}</strong><span class="debug-label">{{ labels[session.kind] }}</span><span v-if="session.running" class="debug-running" aria-label="执行中"><span class="dot ok pulse"></span>执行中</span></span>
               <span v-if="!group.taskId" class="debug-title">{{ session.title }}</span>
-              <span class="debug-secondary"><span class="debug-model" :title="(session.scene || 'lightweight') + ' · ' + (session.model || '默认模型')">{{ session.model || '默认模型' }}</span><code :title="'会话 ID：' + session.id">{{ session.id.slice(0, 8) }}</code></span>
+              <span class="debug-secondary"><span class="debug-owner" :title="'归属用户：' + (session.ownerName || '未归属')">{{ session.ownerName || '未归属' }}</span><span class="debug-model" :title="(session.scene || 'lightweight') + ' · ' + (session.model || '默认模型')">{{ session.model || '默认模型' }}</span><code :title="'会话 ID：' + session.id">{{ session.id.slice(0, 8) }}</code></span>
             </span>
             <span class="debug-session-end"><time :title="formatBeijing(session.createdAt)">{{ formatBeijing(session.createdAt).slice(5, 16) }}</time><Icon :name="session.localAgent ? 'laptop' : 'server'" :size="12" :title="session.localAgent ? '客户端 · ' + (session.clientName || session.clientId) : '服务端'" /></span>
           </button>
@@ -61,7 +61,7 @@ onBeforeUnmount(() => { disposed = true; version++; });
       </div>
     </section>
     <section class="debug-detail-pane" aria-label="会话记录">
-      <EmployeeSessionView v-if="selected" :key="selected" :api="api" :session-id="selected" :revision="revision" :model="model" debug @back="selected = ''" />
+      <EmployeeSessionView v-if="selected" :key="selected" :api="api" :session-id="selected" :revision="revision" :model="model" debug @back="selected = ''" @open="selected = $event" />
       <div v-else class="debug-placeholder"><Icon name="code" :size="32" /><strong>选择一个会话</strong><span>查看完整消息、工具调用与原始参数。</span></div>
     </section>
   </div>
@@ -98,7 +98,8 @@ onBeforeUnmount(() => { disposed = true; version++; });
 .debug-running .dot { width: 5px; height: 5px; }
 .debug-title { overflow: hidden; color: var(--text-2); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .debug-secondary { display: flex; gap: 8px; min-width: 0; color: var(--faint); font-size: 10px; }
-.debug-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.debug-owner, .debug-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.debug-owner { max-width: 50%; }
 .debug-secondary code { flex: none; font-size: 10px; }
 .debug-session-end { display: grid; justify-items: end; gap: 8px; padding-top: 1px; color: var(--faint); font-size: 10px; white-space: nowrap; }
 @media (max-width: 399px) { .debug-list { padding-inline: 8px; } .debug-session { padding-inline: 9px; gap: 6px; } .debug-session-end time { max-width: 42px; overflow: hidden; } }

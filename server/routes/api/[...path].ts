@@ -36,6 +36,7 @@ import { installBrowserExtension } from "../../core/local-extension";
 import { assert, filterAsync, object, type Obj } from "../../core/util";
 import { parseStage, Context } from "../../core/context";
 import { maskedConfig, mergeSecrets, modelEntries } from "../../core/config";
+import type { Session } from "../../core/store";
 import presets from "../../../shared/provider-presets.json";
 async function inputMessage(
   a: Obj,
@@ -48,6 +49,35 @@ async function inputMessage(
   const quote = a.quoteSeq === undefined ? undefined : await store.quote(sessionId, a.quoteSeq);
   const { images, files } = await storeAttachments(store, sessionId, a);
   return { role: "user" as const, text: a.text || "", images, files: files.length ? files : undefined, quote };
+}
+async function sessionRecord(engine: ReturnType<typeof app>["engine"], session: Session, query: URLSearchParams, canWrite: boolean) {
+  const store = engine.store, key = session.id;
+  const history = await chatHistory(store, key, query);
+  const parentId = session.spawnParent || (session.agentChild ? session.stageSource : undefined);
+  const parent = parentId && parentId !== key ? await store.session(parentId).catch(() => undefined) : undefined;
+  const siblings = await store.sessionsByStageSource(parentId || key);
+  const agentSessions = siblings.filter((item) => item.agentChild).map((item) => ({
+    id: item.id,
+    title: item.title,
+    agentName: item.agentName,
+    status: engine.active.has(item.id) ? "running" : "idle",
+    running: engine.active.has(item.id),
+    updated: item.createdAt,
+  }));
+  return {
+    session,
+    parentSession: parent ? { id: parent.id, title: parent.title || "主会话", status: engine.active.has(parent.id) ? "running" : "idle" } : undefined,
+    agentSessions,
+    canWrite,
+    ...history,
+    folds: (await store.all("SELECT data FROM folds WHERE session=?", key)).map((r) => JSON.parse(r.data)),
+    fire: await engine.fire.forSession(key),
+    running: engine.active.has(key),
+    // Incremental refreshes (`after`) get the budget from context_budget events instead.
+    ...(query.has("after") && query.get("context") !== "1"
+      ? {}
+      : { context: await (await Context.open(store, key, (await engine.config()).contextMode === "acp" ? "acp" : "auto")).status() }),
+  };
 }
 export default defineEventHandler(async (event) => {
   const { store, engine, auth } = app(),
@@ -144,20 +174,36 @@ export default defineEventHandler(async (event) => {
       check(user.role === "admin", 403, "Administrator permission required");
     if (path[0] === "debug") {
       check(user.role === "admin", 403, "Administrator permission required");
-      check(method === "GET" && path[1] === "sessions" && path.length === 2, 404, "Debug route not found");
-      const mine = await filterAsync(await engine.employee.all(), (employee) => employee.accessible(user));
-      const names = new Map(await Promise.all(mine.map(async (employee) => { const s = await employee.profile(); return [s.id, s.name] as const; })));
-      const own = new Set(mine.map((employee) => employee.employeeId));
+      check(method === "GET" && path[1] === "sessions" && (path.length === 2 || path.length === 3), 404, "Debug route not found");
+      setHeader(event, "Cache-Control", "no-store");
+      if (path.length === 3) {
+        const session = await store.session(path[2]).catch(() => undefined);
+        check(session, 404, "Debug session not found");
+        const narrator = session.groupId && !session.employeeId && !session.taskId
+          ? (await engine.groups.get(session.groupId))?.narrator?.session : undefined;
+        check(session.employeeId || session.taskId || narrator === session.id, 404, "Debug session not found");
+        return await sessionRecord(engine, session, getRequestURL(event).searchParams, false);
+      }
+      const [employees, users, groups, sessions] = await Promise.all([engine.employee.all(), auth.users(), engine.groups.all(), store.employeeSessions()]);
+      const profiles = new Map(await Promise.all(employees.map(async (employee) => {
+        const { id, name, ownerId } = await employee.profile();
+        return [id, { name, ownerId }] as const;
+      })));
+      const usernames = new Map(users.map(({ id, username }) => [id, username]));
+      const owner = (ownerId = "") => ({ ownerId, ownerName: usernames.get(ownerId) || ownerId });
       // Each group's 旁白 session too (it belongs to no employee).
-      const narrators = (await engine.groups.all()).filter((g) => g.narrator?.session).map((g) => [g.narrator!.session, g.name] as const);
-      const narratorSessions = (await Promise.all(narrators.map(async ([id, name]) => await store.hasSession(id) ? { ...await store.session(id), employeeId: "", employeeName: "旁白 · " + name, taskText: "", kind: "narrator", running: false } : undefined))).filter(Boolean);
-      return [...narratorSessions, ...(await Promise.all((await store.employeeSessions()).map(async (session) => {
+      const narrators = groups.filter((g) => g.narrator?.session).map((g) => [g.narrator!.session, g.name] as const);
+      const narratorSessions = (await Promise.all(narrators.map(async ([id, name]) => {
+        if (!await store.hasSession(id)) return;
+        const session = await store.session(id);
+        return { ...session, ...owner(session.ownerId), employeeId: "", employeeName: "旁白 · " + name, taskText: "", kind: "narrator", running: false };
+      }))).filter(Boolean);
+      return [...narratorSessions, ...await Promise.all(sessions.map(async (session) => {
         const linked = session.taskId ? await store.employeeTask(session.taskId) : undefined;
         const employeeId = session.employeeId || linked?.employee || "";
-        // Each administrator's debug view covers only their own employees.
-        if (employeeId && !own.has(employeeId)) return undefined;
-        return { ...session, employeeId, employeeName: names.get(employeeId) || "未关联热心市民", taskText: linked?.task.text || "", kind: !session.taskId ? (session.groupId ? "group" : "chat") : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
-      }))).filter(Boolean)];
+        const profile = profiles.get(employeeId);
+        return { ...session, ...owner(profile?.ownerId || session.ownerId), employeeId, employeeName: profile?.name || "未关联热心市民", taskText: linked?.task.text || "", kind: !session.taskId ? (session.groupId ? "group" : "chat") : linked?.task.computerSession === session.id || session.scene === "computer" ? "computer" : "work", running: engine.active.has(session.id), taskStatus: linked?.task.status };
+      }))];
     }
     if (path[0] === "bootstrap" && method === "GET") {
       // 首次进入时自动创建一位热心市民；失败不阻断登录，下次再试。
@@ -447,38 +493,8 @@ export default defineEventHandler(async (event) => {
       if (path[2] === "access")
         check(false, 404, "Private sessions cannot be shared");
 
-      if (path.length === 2 && method === "GET") {
-        const query = getRequestURL(event).searchParams;
-        const history = await chatHistory(store, key, query);
-        const parentId = session.spawnParent || (session.agentChild ? session.stageSource : undefined);
-        const parent = parentId && parentId !== session.id ? await store.session(parentId).catch(() => undefined) : undefined;
-        const siblings = await store.sessionsByStageSource(parentId || key);
-        const agentSessions = siblings.filter((item) => item.agentChild).map((item) => ({
-          id: item.id,
-          title: item.title,
-          agentName: item.agentName,
-          status: engine.active.has(item.id) ? "running" : "idle",
-          running: engine.active.has(item.id),
-          updated: item.createdAt,
-        }));
-        return {
-          session,
-          parentSession: parent ? { id: parent.id, title: parent.title || "主会话", status: engine.active.has(parent.id) ? "running" : "idle" } : undefined,
-          agentSessions,
-          canWrite: !session.taskId && !session.agentChild && auth.canWrite(user, session),
-          ...history,
-          folds: (await engine.store.all("SELECT data FROM folds WHERE session=?", key))
-            .map((r: any) => JSON.parse(r.data)),
-          fire: await engine.fire.forSession(key),
-          running: engine.active.has(key),
-          // Incremental refreshes (`after`) get the budget from context_budget events instead.
-          ...(query.has("after") && query.get("context") !== "1"
-            ? {}
-            : {
-                context: await (await Context.open(store, key, (await engine.config()).contextMode === "acp" ? "acp" : "auto")).status(),
-              }),
-        };
-      }
+      if (path.length === 2 && method === "GET")
+        return await sessionRecord(engine, session, getRequestURL(event).searchParams, !session.taskId && !session.agentChild && auth.canWrite(user, session));
       if (path.length === 2 && method === "DELETE") {
         const family = await store.sessionFamily(key);
         assert(

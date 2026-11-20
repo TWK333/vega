@@ -578,10 +578,50 @@ test(
         assert.equal((await req(`/employees/${team.id}?confirmed=true`, "DELETE", undefined, login)).r.status, login === v ? 403 : 404);
       }
       const teamChat = await ok(`/employees/${team.id}/chat`, "GET", undefined, admin);
-      for (const login of [a, b, v]) assert.equal((await req('/debug/sessions', 'GET', undefined, login)).r.status, 403);
-      const debugSessions = await ok('/debug/sessions', 'GET', undefined, admin);
-      assert(debugSessions.some((session: any) => session.id === teamChat.session.id && session.kind === 'chat' && session.employeeName === 'Team worker'));
-      assert(debugSessions.some((session: any) => session.id === employeeSession.id && session.taskId === 'employee-test-task'));
+      await t.test("administrators can inspect another user's sessions only through the read-only debug route", async () => {
+        const chatPath = `/employees/${workerA.id}/chat`;
+        const { session: foreignSession } = await ok(chatPath, "GET", undefined, a);
+        const detail = `/debug/sessions/${foreignSession.id}`;
+        const history = await Store.open(db);
+        try {
+          await history.append(foreignSession.id, { role: "user", text: "Alice's private debug fixture" });
+          await history.append(foreignSession.id, { role: "tool", name: "fixture", text: "stored tool output" });
+        } finally {
+          await history.close();
+        }
+        assert.equal((await req(detail)).r.status, 401);
+        for (const login of [a, b, v]) {
+          assert.equal((await req("/debug/sessions", "GET", undefined, login)).r.status, 403);
+          assert.equal((await req(detail, "GET", undefined, login)).r.status, 403);
+        }
+        const list = await ok("/debug/sessions", "GET", undefined, admin);
+        assert(list.some((session: any) => session.id === teamChat.session.id && session.kind === "chat" && session.employeeName === "Team worker"));
+        assert(list.some((session: any) => session.id === employeeSession.id && session.taskId === "employee-test-task"));
+        const foreign = list.find((session: any) => session.id === foreignSession.id);
+        assert(foreign, "another user's chat is listed");
+        assert.deepEqual([foreign.kind, foreign.employeeName, foreign.ownerId, foreign.ownerName], ["chat", workerA.name, a.id, "runner-one"]);
+        const first = await req(detail + "?limit=1", "GET", undefined, admin);
+        assert.equal(first.r.status, 200);
+        assert.equal(first.r.headers.get("cache-control"), "no-store");
+        assert.equal(first.value.canWrite, false);
+        assert.equal(first.value.session.id, foreignSession.id);
+        assert.equal(first.value.hasMore, true);
+        assert.deepEqual(first.value.messages.map((m: any) => m.text), ["stored tool output"]);
+        const older = await ok(detail + "?before=2&limit=1", "GET", undefined, admin);
+        const newer = await ok(detail + "?after=1", "GET", undefined, admin);
+        const full = await ok(detail, "GET", undefined, admin);
+        assert.deepEqual(newer.messages, first.value.messages);
+        assert.deepEqual(full.messages, [...older.messages, ...first.value.messages]);
+        assert.equal(older.messages[0].text, "Alice's private debug fixture");
+        assert.equal((await req(`/debug/sessions/${legacy.id}`, "GET", undefined, admin)).r.status, 404, "ordinary sessions stay outside employee debugging");
+        assert.equal((await req("/debug/sessions/missing", "GET", undefined, admin)).r.status, 404);
+        assert.equal((await req(detail, "DELETE", undefined, admin)).r.status, 404);
+        assert.equal((await req(detail + "/messages", "POST", { text: "must not run" }, admin)).r.status, 404);
+        assert.equal((await req(`/sessions/${foreignSession.id}`, "DELETE", undefined, admin)).r.status, 404);
+        assert.equal((await req(`/sessions/${foreignSession.id}`, "GET", undefined, admin)).r.status, 404);
+        assert.equal((await req(`/sessions/${foreignSession.id}`, "GET", undefined, b)).r.status, 404);
+        assert.equal((await ok(`/sessions/${foreignSession.id}`, "GET", undefined, a)).session.id, foreignSession.id);
+      });
       assert.equal((await req(`/sessions/${teamChat.session.id}`, "GET", undefined, b)).r.status, 404);
       assert.equal((await req(`/employees/${team.id}/messages`, "POST", { text: "must not execute" }, v)).r.status, 403);
       assert.equal((await req(`/employees/${team.id}/control`, "POST", { action: "settings", name: "unauthorized" }, a)).r.status, 404);

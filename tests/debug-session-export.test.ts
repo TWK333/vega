@@ -69,7 +69,7 @@ test("debug export fetches the entire session, including unloaded and newly adde
   payload.messages.push({ seq: 123, role: "assistant", text: "导出前新增的消息" } as any);
   state.raw.value = false;
   await state.exportSession();
-  assert.deepEqual(paths, ["/sessions/session-fixture?limit=60", "/sessions/session-fixture"]);
+  assert.deepEqual(paths, ["/debug/sessions/session-fixture?limit=60", "/debug/sessions/session-fixture"]);
   assert.equal(state.messages.value.length, 60, "export does not alter the displayed page");
   assert.equal(state.blobs.length, 1);
   assert.equal(state.blobs[0].type, "application/json;charset=utf-8");
@@ -90,6 +90,7 @@ test("debug export fetches the entire session, including unloaded and newly adde
 test("exporting the same session before and after loading older pages returns the same messages", async () => {
   const payload = fixture();
   const state = mount(async (path) => {
+    assert.equal(path.split("?")[0], "/debug/sessions/session-fixture", "paging and export both use the admin route");
     if (path.includes("?limit=")) return { ...payload, messages: payload.messages.slice(-60), hasMore: true };
     if (path.includes("?before=")) {
       const before = Number(new URL("http://fixture" + path).searchParams.get("before"));

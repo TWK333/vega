@@ -1,4 +1,4 @@
-// 调试会话列表：按任务归组，并按任务 ID、任务内容以及会话 ID、标题、热心市民名筛选。
+// 调试会话列表：按任务归组，可查找归属用户、任务、会话和热心市民。
 
 /**
  * @typedef {Object} DebugSession
@@ -6,6 +6,8 @@
  * @property {string} [title]
  * @property {string} [employeeId]
  * @property {string} [employeeName]
+ * @property {string} [ownerId]
+ * @property {string} [ownerName]
  * @property {string} [taskId]
  * @property {string} [taskText]
  * @property {string} [taskStatus]
@@ -37,14 +39,14 @@ const UNLINKED = {
   narrator: "旁白会话",
 };
 
-const SEARCH_FIELDS = ["id", "title", "taskId", "taskText", "employeeName"];
+const SEARCH_FIELDS = ["id", "title", "taskId", "taskText", "employeeName", "ownerId", "ownerName"];
 
 function looseKind(session) {
   return Object.hasOwn(UNLINKED, session?.kind) ? session.kind : "other";
 }
 
 /**
- * 员工筛选之后，再按任务 ID / 任务内容（及会话 ID、标题、热心市民名）做不区分大小写的子串匹配。空白查询视为不过滤。
+ * 员工筛选之后，再按搜索字段做不区分大小写的子串匹配。空白查询视为不过滤。
  * @param {DebugSession[]} sessions
  * @param {{ employeeId?: string, query?: string }} [filter]
  * @returns {DebugSession[]}

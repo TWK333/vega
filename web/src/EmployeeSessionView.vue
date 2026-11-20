@@ -12,6 +12,7 @@ const props = defineProps({
   model: String,
 });
 const emit = defineEmits(["back", "open"]);
+const sessionPath = () => (props.debug ? "/debug/sessions/" : "/sessions/") + encodeURIComponent(props.sessionId);
 const raw = ref(false);
 const record = ref(null);
 const session = ref(null),
@@ -43,10 +44,10 @@ async function refresh() {
   error.value = "";
   try {
     const result = await props.api(
-      "/sessions/" + encodeURIComponent(props.sessionId) + (initial ? "?limit=" + CHAT_PAGE_SIZE : "?after=" + last),
+      sessionPath() + (initial ? "?limit=" + CHAT_PAGE_SIZE : "?after=" + last),
     );
     if (current !== version || request !== refreshVersion) return;
-    if (!result.session.taskId && !result.session.agentChild && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是牛马的会话");
+    if (!result.session.taskId && !result.session.agentChild && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是热心市民的会话");
     if (!initial && Number.isSafeInteger(result.lastSeq) && result.lastSeq < last) {
       record.value = null;
       messages.value = [];
@@ -94,10 +95,10 @@ async function loadOlder() {
   const el = transcript.value;
   try {
     const result = await props.api(
-      "/sessions/" + encodeURIComponent(props.sessionId) + "?before=" + first + "&limit=" + CHAT_PAGE_SIZE,
+      sessionPath() + "?before=" + first + "&limit=" + CHAT_PAGE_SIZE,
     );
     if (request !== version || messages.value[0]?.seq !== first) return;
-    if (!result.session.taskId && !result.session.agentChild && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是牛马的会话");
+    if (!result.session.taskId && !result.session.agentChild && !(props.debug && (result.session.employeeId || result.session.groupId))) throw Error("这不是热心市民的会话");
     const height = el?.scrollHeight ?? 0, top = el?.scrollTop ?? 0;
     messages.value = mergeMessages(result.messages || [], messages.value);
     hasMore.value = !!result.hasMore;
@@ -134,7 +135,7 @@ async function exportSession() {
   try {
     // Export always pulls the full transcript once (display stays paginated).
     const sessionId = props.sessionId;
-    const full = await props.api("/sessions/" + encodeURIComponent(sessionId));
+    const full = await props.api(sessionPath());
     if (full.session?.id !== sessionId || !Array.isArray(full.messages) || full.hasMore) throw Error("未能获取完整会话记录");
     const json = JSON.stringify({
       exportedAt: new Date().toISOString(),
@@ -191,7 +192,7 @@ watch(() => props.model, async (model) => {
 onBeforeUnmount(() => { version++; });
 </script>
 <template>
-  <PageHeader :title="session?.title || '牛马会话记录'" :subtitle="debug ? '调试会话' : (session?.agentChild ? '分身只读记录' : '只读执行记录')" :back="debug ? '调试会话' : '返回牛马'" @back="emit('back')">
+  <PageHeader :title="session?.title || '热心市民会话记录'" :subtitle="debug ? '调试会话' : (session?.agentChild ? '分身只读记录' : '只读执行记录')" :back="debug ? '调试会话' : '返回工作区'" @back="emit('back')">
     <template #title-extra><span :class="['badge', running ? 'info' : '']"><span v-if="running" class="dot info pulse"></span>{{ running ? "执行中" : "执行记录" }}</span></template>
     <button v-if="debug" type="button" class="sm" :aria-pressed="raw" @click="raw = !raw"><Icon name="code" :size="14" /><span class="hide-mobile">{{ raw ? '整理视图' : '原始消息' }}</span></button>
     <button v-if="debug" type="button" class="sm" :disabled="busy || !record" title="导出该会话的全部记录（JSON）" aria-label="导出会话（JSON）" @click="exportSession"><Icon name="download" :size="14" /><span class="hide-mobile">导出会话</span></button>
@@ -200,7 +201,7 @@ onBeforeUnmount(() => { version++; });
   <section
     ref="transcript"
     class="transcript employee-session"
-    aria-label="牛马会话记录"
+    aria-label="热心市民会话记录"
     :aria-busy="busy || loadingOlder"
     @scroll.passive="onScroll"
   >
@@ -216,8 +217,8 @@ onBeforeUnmount(() => { version++; });
         @click="emit('open', item.id)"
       >{{ item.kind === 'main' ? item.title : item.title }}<span v-if="item.status === 'running' || item.status === 'working'" class="dot info pulse"></span></button>
     </nav>
-    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；补充、审批或续做请返回对应牛马，不能在这里输入或重放操作。<template v-if="debug">导出该会话截至导出时的全部原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
-    <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>牛马 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>会话场景</dt><dd>{{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
+    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；如需补充、审批或续做，请返回这位热心市民的工作区。这里不能输入或重放操作。<template v-if="debug">导出该会话截至导出时的全部原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
+    <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>热心市民 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>会话场景</dt><dd>{{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" class="context-note" role="status"><span class="spinner"></span>正在加载记录…</p>
     <div v-if="hasMore" class="load-older" :aria-busy="loadingOlder">
