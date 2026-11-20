@@ -409,12 +409,20 @@ test("task cards in a group show the live task status, and a status change refre
     assert(!events.slice(count).some((e) => e.type === "group_changed"), "no reload when no group task changed status");
     const card = { ...messages[0], author: { kind: "employee", id: a, name: "小A" }, tasks: [{ id: task.id, title: task.text, status: "queued" }] } as any;
     assert.deepEqual(await engine.groups.taskStatus([card]), { [task.id]: "running" }, "the stored card is a snapshot; the board shows the live status");
+    const liveGroup = (await engine.groups.get(group.id))!;
+    const progressMsg = { seq: 99, role: "assistant", text: "进展中", progress: true, topicTaskId: task.id, author: { kind: "employee", id: a, name: "小A" } } as any;
+    const userTopicMsg = { seq: 100, role: "user", text: "补充条件", topicTaskId: task.id, author: { kind: "user", id: u1.id, name: "alice" } } as any;
+    const meta = await engine.groups.taskMeta(liveGroup, [progressMsg, userTopicMsg]);
+    assert.deepEqual(meta[task.id], { id: task.id, title: task.text, status: "running", employeeId: a }, "taskMeta resolves live title, status and owner for topicTaskId-only messages");
     await employeeA.update((state) => { employeeA.task(state, task.id).status = "done"; });
     await sleep(10);
     const beforeRemove = events.length;
     await employeeA.control({ action: "remove", id: task.id });
     await until(() => events.slice(beforeRemove).some((e) => e.type === "group_changed" && e.data?.groupId === group.id));
     assert.deepEqual(await engine.groups.taskStatus([card]), { [task.id]: "deleted" }, "deleted cards do not retain a stale status");
+    const deletedMeta = await engine.groups.taskMeta(liveGroup, [card, progressMsg]);
+    assert.equal(deletedMeta[task.id].status, "deleted");
+    assert.equal(deletedMeta[task.id].title, task.text, "deleted task retains snapshot title from linked card");
   } finally { await close(); }
 });
 

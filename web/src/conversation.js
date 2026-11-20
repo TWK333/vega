@@ -29,11 +29,38 @@ export function employeeChatMessages(messages) {
     (message.role === "assistant" && !!(message.text?.trim() || message.images?.length)));
 }
 
-/** Consecutive non-notice messages from the same sender group visually without repeating avatar and name. */
+/** Single task a message belongs to (explicit topicTaskId, or its sole linked task). */
+export function messageTaskId(message) {
+  if (!message || message.notice) return "";
+  if (message.topicTaskId) return message.topicTaskId;
+  if (message.tasks?.length === 1 && message.tasks[0]?.id) return message.tasks[0].id;
+  return "";
+}
+
+const TASK_ACCENTS = ["#3b6de0", "#0d8a72", "#7c4dff", "#c47000", "#c93b6b", "#0881a3", "#3f8629", "#933ea8"];
+
+/** Deterministic subtle accent color per task so concurrent group tasks stay visually distinct. */
+export function taskAccentColor(taskId) {
+  const key = String(taskId || "");
+  if (!key) return "";
+  let hash = 2166136261;
+  for (let i = 0; i < key.length; i++) hash = Math.imul(hash ^ key.charCodeAt(i), 16777619);
+  return TASK_ACCENTS[(hash >>> 0) % TASK_ACCENTS.length];
+}
+
+/** Single-line task title with bare URLs stripped when enough readable text remains. */
+export function cleanTaskTitle(text) {
+  const raw = String(text || "").replace(/\s+/g, " ").trim();
+  const cleaned = raw.replace(/https?:\/\/\S+/g, "").replace(/\s{2,}/g, " ").trim();
+  return cleaned.length >= 6 ? cleaned : raw;
+}
+
+/** Consecutive non-notice messages from the same sender and task group visually without repeating avatar and name. */
 export function continuesPrevious(previous, message) {
   if (!previous || !message || previous.notice || message.notice) return false;
   if (previous.role !== message.role) return false;
-  return previous.author?.id === message.author?.id && previous.author?.kind === message.author?.kind;
+  if (previous.author?.id !== message.author?.id || previous.author?.kind !== message.author?.kind) return false;
+  return messageTaskId(previous) === messageTaskId(message);
 }
 
 export function chatCardVisibility(messages, taskStatus) {

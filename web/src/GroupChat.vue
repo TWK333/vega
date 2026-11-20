@@ -8,7 +8,7 @@ import GroupAvatar from "./GroupAvatar.vue";
 import MentionTextarea from "./MentionTextarea.vue";
 import Icon from "./Icon.vue";
 import GroupWork from "./GroupWork.vue";
-import { continuesPrevious, chatCardVisibility } from "./conversation";
+import { continuesPrevious, chatCardVisibility, messageTaskId, taskAccentColor } from "./conversation";
 import { CHAT_PAGE_SIZE, loadStepOutput, mergeMessages } from "./chat-history.js";
 import { groupMembers, groupMentionPeople } from "./group.js";
 import { attachmentPayload, isImage, readAttachments, useAttachmentInput } from "./attachments.js";
@@ -26,7 +26,14 @@ const requestedTopic = computed(() => viewMode.value === "topic" ? topic.value :
 const historyKey = computed(() => requestedTopic.value?.taskId || "");
 const activeTopic = computed(() => history.value?.topic || null);
 const switching = computed(() => historyKey.value !== (activeTopic.value?.taskId || ""));
-const messages = computed(() => history.value?.messages || []), taskStatus = computed(() => history.value?.taskStatus || {});
+const messages = computed(() => history.value?.messages || []), taskStatus = computed(() => history.value?.taskStatus || {}), taskMeta = computed(() => history.value?.taskMeta || {});
+const workTaskLookup = computed(() => {
+  const map = new Map();
+  for (const member of workMembers.value || [])
+    for (const task of member.tasks || [])
+      map.set(task.id, { id: task.id, title: task.text, status: task.status, employeeId: member.id });
+  return map;
+});
 const taskFocus = computed(() => topic.value ? { member: topic.value.employeeId, task: topic.value.taskId } : null);
 function chooseView(mode) {
   if (viewMode.value !== mode) viewMode.value = mode;
@@ -49,10 +56,20 @@ const shown = computed(() => {
     .map((m) => m.author ? { ...m, author: { ...m.author, avatar: avatars.value.get(m.author.id) || "" } } : m);
   const cards = chatCardVisibility(rows, taskStatus.value);
   const firstWindowSeq = messages.value[0]?.seq ?? Infinity;
+  const inTopic = !!activeTopic.value;
   return rows.map((message, index) => {
     const previous = rows[index - 1];
     const jumpedGap = previous && previous.seq < firstWindowSeq && message.seq >= firstWindowSeq && previous.seq !== message.seq - 1;
-    return { message, continued: !jumpedGap && continuesPrevious(previous, message), cards: cards[index] };
+    const taskId = !inTopic ? messageTaskId(message) : "";
+    let topicContext;
+    if (taskId) {
+      const meta = taskMeta.value[taskId] || workTaskLookup.value.get(taskId);
+      const linked = message.tasks?.find((task) => task.id === taskId);
+      const title = meta?.title || linked?.title || "";
+      const status = taskStatus.value[taskId] ?? meta?.status ?? linked?.status;
+      topicContext = { id: taskId, title, status, color: taskAccentColor(taskId) };
+    }
+    return { message, continued: !jumpedGap && continuesPrevious(previous, message), cards: cards[index], topicContext };
   });
 });
 // 「新」分界：进来时上次看到的位置之后是新的；来了新消息就收起（切出再进来也不会再出现）。
@@ -67,7 +84,7 @@ const available = computed(() => (props.myEmployees || []).filter((e) => !group.
 const invitable = computed(() => directory.value.filter((u) => !group.value?.users.some((m) => m.id === u.id)));
 // Both add rows always show, so users find them; when empty they say why.
 const noUsersHint = computed(() => props.user?.role === "admin" ? "没有可邀请的用户（在左下角「账号与安全」→ 成员里新建账号）" : "没有可邀请的用户（请管理员在「账号与安全」里新建账号）");
-const noEmployeesHint = computed(() => props.myEmployees?.length ? "你的牛马都已在群里" : "你还没有牛马（先在左侧「数字牛马」里新建）");
+const noEmployeesHint = computed(() => props.myEmployees?.length ? "你名下的热心市民都已在群里" : "你还没有热心市民，可在左侧「热心市民」里创建一位");
 // A member employee's avatar and name open its chat only for its owner.
 const canOpen = (author) => author?.kind === "employee" && !!group.value?.employees.find((e) => e.id === author.id)?.mine;
 const canStop = (e) => e.mine || group.value?.isCreator;
@@ -122,7 +139,7 @@ async function load(scroll = false) {
     if (!current()) return;
     const stick = scroll || (follow && nearBottom() && !page?.loadingOlder);
     if (!page) {
-      page = shallowReactive({ topic: selection, messages: [], taskStatus: {}, olderReferences: [], hasMore: false, loadingOlder: false, olderError: "", top: undefined });
+      page = shallowReactive({ topic: selection, messages: [], taskStatus: {}, taskMeta: {}, olderReferences: [], hasMore: false, loadingOlder: false, olderError: "", top: undefined });
       if (key) topicHistory = page;
       else mainHistory = page;
     }
@@ -131,6 +148,7 @@ async function load(scroll = false) {
     page.messages = [...prefix, ...recent];
     if (!prefix.length) page.hasMore = !!result.hasMore;
     page.taskStatus = { ...(prefix.length ? page.taskStatus : {}), ...result.taskStatus, ...delta?.taskStatus };
+    page.taskMeta = { ...(prefix.length ? page.taskMeta : {}), ...result.taskMeta, ...delta?.taskMeta };
     group.value = (delta || result).group;
     edit.value = { name: group.value.name, bulletin: group.value.bulletin };
     const opened = showHistory(page);
@@ -160,6 +178,7 @@ async function loadOlder() {
     const offset = anchor?.getBoundingClientRect().top;
     page.messages = mergeMessages(result.messages, page.messages);
     page.taskStatus = { ...result.taskStatus, ...page.taskStatus };
+    page.taskMeta = { ...result.taskMeta, ...page.taskMeta };
     page.hasMore = result.messages.length > 0 && !!result.hasMore;
     await nextTick();
     if (current() && anchor && el.contains(anchor)) {
@@ -204,7 +223,11 @@ async function jumpTo(seq) {
       const result = await groupPage(id, `before=${seq + 1}&limit=1`);
       if (!current()) return;
       const source = result.messages.find((row) => row.seq === seq);
-      if (source) page.olderReferences = mergeMessages(page.olderReferences, [source]);
+      if (source) {
+        page.olderReferences = mergeMessages(page.olderReferences, [source]);
+        if (result.taskStatus) page.taskStatus = { ...page.taskStatus, ...result.taskStatus };
+        if (result.taskMeta) page.taskMeta = { ...page.taskMeta, ...result.taskMeta };
+      }
       await nextTick();
     }
     if (!current()) return;
@@ -249,16 +272,16 @@ async function change(fn, after) {
 const saveInfo = () => change(() => props.api(`/groups/${props.groupId}`, "PATCH", edit.value), () => load());
 const addUser = () => invite.value && change(() => props.api(`/groups/${props.groupId}/users`, "POST", { userIds: [invite.value] }), () => { invite.value = ""; return load(); });
 const addEmployee = () => bring.value && change(() => props.api(`/groups/${props.groupId}/employees`, "POST", { employeeId: bring.value }), () => { bring.value = ""; return load(); });
-const removeEmployee = (e) => confirm(`把牛马「${e.name}」移出群聊？`) && change(() => props.api(`/groups/${props.groupId}/employees/${e.id}`, "DELETE"), () => load());
-const removeUser = (u) => confirm(`把 ${u.name} 移出群聊？他的牛马也会一起离开。`) && change(() => props.api(`/groups/${props.groupId}/users/${u.id}`, "DELETE"), () => load());
+const removeEmployee = (e) => confirm(`将热心市民「${e.name}」移出群聊？`) && change(() => props.api(`/groups/${props.groupId}/employees/${e.id}`, "DELETE"), () => load());
+const removeUser = (u) => confirm(`将 ${u.name} 移出群聊？这位用户邀请入群的热心市民也会离开。`) && change(() => props.api(`/groups/${props.groupId}/users/${u.id}`, "DELETE"), () => load());
 const stop = (e) => run(() => props.api(`/groups/${props.groupId}/cancel`, "POST", { employeeId: e.id }));
 function leave() {
   const mine = group.value.employees.filter((e) => e.mine).length;
-  if (!confirm(`退出群聊「${group.value.name}」？${mine ? "你的牛马也会一起离开。" : ""}${group.value.users.length === 1 ? "你是最后一位成员，群聊会被解散。" : ""}`)) return;
+  if (!confirm(`退出群聊「${group.value.name}」？${mine ? "你邀请入群的热心市民也会离开。" : ""}${group.value.users.length === 1 ? "你是最后一位成员，群聊会被解散。" : ""}`)) return;
   void change(() => props.api(`/groups/${props.groupId}/users/${props.user.id}`, "DELETE"), () => emit("closed"));
 }
 function dissolve() {
-  if (!confirm(`解散群聊「${group.value.name}」？群消息和牛马在群里的对话都会删除（已派出的任务保留，结果回到各自牛马的私聊）。`)) return;
+  if (!confirm(`解散群聊「${group.value.name}」？群消息和热心市民的群内对话会删除；已派出的任务保留，结果会发到对应的私聊。`)) return;
   void change(() => props.api(`/groups/${props.groupId}`, "DELETE"), () => emit("closed"));
 }
 async function create() {
@@ -292,9 +315,11 @@ function showTask(selection) {
   chooseView(selection ? "topic" : "main");
 }
 function openTask(message, taskId) {
-  const author = group.value?.employees.find((e) => e.id === message.author?.id);
+  const meta = taskMeta.value[taskId] || workTaskLookup.value.get(taskId);
+  const employeeId = meta?.employeeId || (message.author?.kind === "employee" ? message.author.id : undefined);
+  const author = group.value?.employees.find((e) => e.id === employeeId);
   if (!author) { error.value = "这位热心市民已离开群聊。需要跟进任务时，请联系对应的归属用户"; return; }
-  selectTopic({ employeeId: author.id, taskId, title: message.tasks?.find((task) => task.id === taskId)?.title });
+  selectTopic({ employeeId: author.id, taskId, title: meta?.title || message.tasks?.find((task) => task.id === taskId)?.title });
 }
 // 工作面板: the group's tasks by member, reloaded with the group (task status changes bump the revision too).
 async function loadWork() {
@@ -325,23 +350,23 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
 <template>
   <section class="group-workspace">
     <template v-if="!groupId">
-      <PageHeader title="发起群聊" subtitle="拉上同事和牛马，在群里 @ 谁就由谁来干活。" back="返回" @back="emit('cancel')" />
+      <PageHeader title="发起群聊" subtitle="与同事和热心市民一起协作，在群里 @ 对应成员即可请对方回应。" back="返回" @back="emit('cancel')" />
       <div class="page-scroll create-page">
         <p v-if="error" class="banner error" role="alert"><span>{{ error }}</span><button class="icon" aria-label="关闭" @click="error = ''"><Icon name="close" :size="14" /></button></p>
         <form class="card create-card" @submit.prevent="create">
           <div class="form-grid">
             <label>群名<input v-model="form.name" required maxlength="40" placeholder="例如：发布小组、周报协作" autofocus /></label>
-            <label>群公告<textarea v-model="form.bulletin" rows="5" maxlength="4000" placeholder="写清分工和协作方式，例如：研发助手负责写代码；测试助手负责验证，发现问题 @研发助手 修复；发布前 @我 确认。"></textarea><small class="hint">群里的牛马每次回复都会按公告干活。</small></label>
+            <label>群公告<textarea v-model="form.bulletin" rows="5" maxlength="4000" placeholder="写清分工和协作方式，例如：研发助手负责写代码；测试助手负责验证，发现问题 @研发助手 修复；发布前 @我 确认。"></textarea><small class="hint">热心市民会按群公告中的分工处理消息。</small></label>
             <fieldset><legend>邀请用户</legend><label v-for="u in directory" :key="u.id" class="check"><input v-model="form.users" type="checkbox" :value="u.id" />{{ u.name }}</label><small v-if="!directory.length" class="hint">{{ noUsersHint }}</small></fieldset>
-            <fieldset><legend>拉入我的牛马</legend><label v-for="e in myEmployees" :key="e.id" class="check"><input v-model="form.employees" type="checkbox" :value="e.id" />{{ e.name }}</label><small v-if="!myEmployees?.length" class="hint">{{ noEmployeesHint }}</small></fieldset>
-            <p class="hint">每个人只能拉自己的牛马进群；被邀请的用户进群后，在群里右上角「群成员与公告」面板拉入他们自己的牛马。</p>
+            <fieldset><legend>邀请我的热心市民</legend><label v-for="e in myEmployees" :key="e.id" class="check"><input v-model="form.employees" type="checkbox" :value="e.id" />{{ e.name }}</label><small v-if="!myEmployees?.length" class="hint">{{ noEmployeesHint }}</small></fieldset>
+            <p class="hint">每位用户只能邀请自己名下的热心市民。其他用户入群后，可以在右上角「群成员与公告」中邀请各自名下的热心市民。</p>
           </div>
           <div class="actions end"><button type="button" class="ghost" @click="emit('cancel')">取消</button><button class="primary" :disabled="!form.name.trim()">创建群聊</button></div>
         </form>
       </div>
     </template>
     <template v-else>
-      <PageHeader :title="group?.name || '群聊'" :subtitle="group ? `${group.users.length} 位用户 · ${group.employees.length} 个牛马` : ''">
+      <PageHeader :title="group?.name || '群聊'" :subtitle="group ? `${group.users.length} 位用户 · ${group.employees.length} 位热心市民` : ''">
         <template #title-extra><span v-if="group" class="header-avatar"><GroupAvatar :group="group" /></span></template>
         <button type="button" class="sm" :class="{ active: panel }" :aria-expanded="panel" @click="panel = !panel"><Icon name="users" :size="15" /><span class="hide-mobile">群成员与公告</span></button>
         <button type="button" class="sm" :class="{ active: work }" :aria-expanded="work" @click="toggleWork"><Icon name="tasks" :size="15" /><span class="hide-mobile">工作面板</span></button>
@@ -358,10 +383,10 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
               <div v-if="!activeTopic && group?.bulletin" class="group-bulletin"><Icon name="inbox" :size="14" /><div><strong>群公告</strong><p>{{ group.bulletin }}</p></div></div>
               <div v-if="history?.hasMore" class="older-messages"><button type="button" class="ghost sm" :disabled="history.loadingOlder || switching" :title="history.olderError || undefined" @click="loadOlder">{{ history.loadingOlder ? '正在加载更早消息…' : history.olderError ? '加载失败，点击重试' : '加载更早消息' }}</button></div>
               <p v-if="activeTopic && !shown.length" class="group-notice">还没有关联消息，可以直接在此开始讨论。</p>
-              <template v-for="({ message, continued, cards }, index) in shown" :key="message.seq">
+              <template v-for="({ message, continued, cards, topicContext }, index) in shown" :key="message.seq">
                 <p v-if="newAt > 0 && index === newAt" :class="markGone ? 'chat-new gone' : 'chat-new'" role="separator" aria-label="新消息"><span>新</span></p>
                 <p v-if="message.notice" class="group-notice" :data-message-seq="message.seq">{{ message.text }}</p>
-                <ChatMessage v-else :message="message" :continued="continued && !(newAt > 0 && index === newAt)" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
+                <ChatMessage v-else :message="message" :continued="continued && !(newAt > 0 && index === newAt)" :hidden-task-ids="cards?.hiddenTaskIds" :hide-step-output="cards?.hideStepOutput" :topic-context="topicContext" :viewer-id="user?.id" :task-status="taskStatus" :load-step-output="(seq, message) => loadStepOutput(api, `/groups/${groupId}/messages`, seq, '', message)" :open-author="canOpen(message.author)" :mention-author="!readonly" :employee-id="message.author?.id" :name="message.author?.name" :quotable="!readonly" @quote="quoteMessage" @jump="jumpTo" @task="openTask(message, $event)" @author="emit('open-employee', $event)" @mention="mentionMember" />
               </template>
               <article v-for="e in runningMembers" :key="'typing-' + e.id" class="chat-message assistant chat-typing" role="status" :aria-label="e.name + ' 正在回复'">
                 <span class="chat-avatar" aria-hidden="true"><PressMention :name="e.name" :disabled="readonly" @press="mentionMember"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></PressMention></span>
@@ -379,10 +404,10 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
             <div class="composer-row">
               <input ref="fileInput" type="file" hidden multiple @change="upload" />
               <button type="button" class="icon attach" aria-label="添加附件" title="附件（可粘贴图片）" :disabled="uploading" @click="fileInput.click()"><Icon name="paperclip" /></button>
-              <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" :placeholder="activeTopic ? '回复当前任务话题…' : '输入消息，@ 牛马让它干活…'" @keydown="keydown" />
+              <MentionTextarea ref="input" v-model="draft" class="composer-input" :members="members" rows="1" maxlength="20000" :placeholder="activeTopic ? '回复当前任务话题…' : '输入消息，可 @ 热心市民…'" @keydown="keydown" />
               <button class="primary send" :disabled="(!draft.trim() && !files.length) || sending || uploading || switching" aria-label="发送" title="发送"><Icon name="send" :size="18" /></button>
             </div>
-            <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天 · /new 用新任务执行' : '回复牛马或 @ 它让它回应 · /new 用新任务执行' }} · Enter 发送 · Shift + Enter 换行</p>
+            <p class="composer-hint">{{ activeTopic ? '发送到当前任务话题，同步显示在主聊天 · /new 用新任务执行' : '回复消息或 @ 对应的热心市民即可请对方回应 · /new 用新任务执行' }} · Enter 发送 · Shift + Enter 换行</p>
           </form>
         </section>
         <GroupWork v-if="work && group" :members="workMembers" :loading="workLoading" :api="api" :group-id="groupId" :focus="taskFocus" @select="selectTopic" @exit="exitTask" @title="topicTitle = $event" @open="emit('open-task', $event)" @inspect="emit('inspect', $event)" @changed="run(loadWork)" @close="work = false" />
@@ -406,15 +431,15 @@ onMounted(() => { if (props.groupId) void run(load); else void loadDirectory(); 
             <p v-if="!readonly && !invitable.length" class="hint">{{ noUsersHint }}</p>
           </section>
           <section>
-            <h3>牛马 · {{ group.employees.length }}</h3>
+            <h3>热心市民 · {{ group.employees.length }}</h3>
             <ul class="member-list">
               <li v-for="e in group.employees" :key="e.id"><span class="member-avatar" title="长按 @ 它"><PressMention :name="e.name" :disabled="readonly" @press="mentionMember"><EmployeeAvatar :employee-id="e.id" :name="e.name" :avatar="e.avatar" /></PressMention></span>
                 <button v-if="e.mine" type="button" class="link member-name truncate" :title="'打开 ' + e.name" @click="emit('open-employee', e.id)">{{ e.name }}<small>我的</small></button>
                 <span v-else class="member-name truncate">{{ e.name }}<small>{{ e.ownerName || '其他用户' }}的</small></span>
                 <button v-if="(e.mine || group.isCreator) && !readonly" type="button" class="icon sm" :aria-label="'移出 ' + e.name" title="移出群聊" @click="removeEmployee(e)"><Icon name="close" :size="14" /></button></li>
             </ul>
-            <div v-if="!readonly" class="add-row"><select v-model="bring" aria-label="拉入我的牛马" :disabled="!available.length"><option value="">{{ available.length ? "拉入我的牛马…" : noEmployeesHint }}</option><option v-for="e in available" :key="e.id" :value="e.id">{{ e.name }}</option></select><button type="button" class="sm" :disabled="!bring" @click="addEmployee">拉入</button></div>
-            <p class="hint">只能拉你自己的牛马；被邀请的用户在这个面板里拉入他们自己的牛马。别人的牛马在群里只接派单（查询、补充、续做、停止任务），不会用主人的长期记忆；密码本仍按适用范围取用。</p>
+            <div v-if="!readonly" class="add-row"><select v-model="bring" aria-label="邀请我的热心市民" :disabled="!available.length"><option value="">{{ available.length ? "邀请我的热心市民…" : noEmployeesHint }}</option><option v-for="e in available" :key="e.id" :value="e.id">{{ e.name }}</option></select><button type="button" class="sm" :disabled="!bring" @click="addEmployee">邀请</button></div>
+            <p class="hint">只能邀请你名下的热心市民，其他群成员也可以在这里邀请各自名下的热心市民。你可以请其他用户名下的热心市民派单、查询、补充、续做或停止任务，但不能管理长期记忆；密码本仍按适用范围取用。</p>
           </section>
           <section class="panel-actions">
             <button type="button" class="ghost sm danger-text" @click="leave"><Icon name="logout" :size="14" />退出群聊</button>

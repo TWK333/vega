@@ -8,12 +8,13 @@ import FileCard from "./FileCard.vue";
 import StepOutput from "./StepOutput.vue";
 import { computed, ref } from "vue";
 import { taskLabel, taskTone, shortTime } from "./task-status";
+import { cleanTaskTitle } from "./conversation";
 import { MESSAGE_POSE } from "./bot-avatar.js";
 import PressMention from "./PressMention.vue";
 import { exportResult, exportTitleOf } from "./export-result.js";
 import { filesArchiveBase } from "./markdown.js";
 import { quoteOf } from "../../shared/chat-quote";
-const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, hiddenTaskIds: Set, hideStepOutput: Boolean, loadStepOutput: Function, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean, selfTint: Object });
+const props = defineProps({ message: Object, name: String, avatar: String, employeeId: String, taskStatus: Object, tasks: Array, hiddenTaskIds: Set, hideStepOutput: Boolean, topicContext: Object, loadStepOutput: Function, quotable: Boolean, rememberable: Boolean, continued: Boolean, viewerId: String, openAuthor: Boolean, mentionAuthor: Boolean, selfTint: Object });
 const emit = defineEmits(["quote", "jump", "task", "retry", "remember", "author", "mention"]);
 // In a group, long-pressing an employee's avatar @mentions it in the composer (mentionAuthor); a tap still opens it.
 const pressable = computed(() => props.mentionAuthor && sender.value.kind === "employee");
@@ -40,10 +41,21 @@ const sender = computed(() => props.message.author ? { kind: props.message.autho
 const tint = computed(() => (mine.value && !props.message.error ? props.selfTint : undefined));
 const statusOf = (task) => props.taskStatus?.[task.id] ?? (props.tasks ? "deleted" : task.status);
 const attachedTasks = computed(() => (props.message.tasks || []).filter((task) => !props.hiddenTaskIds?.has(task.id)));
+const topicStatus = computed(() => props.topicContext ? (props.taskStatus?.[props.topicContext.id] ?? props.topicContext.status) : "");
+const topicDeleted = computed(() => topicStatus.value === "deleted");
+const topicTitle = computed(() => cleanTaskTitle(props.topicContext?.title) || (topicDeleted.value ? "已删除的任务" : "关联任务"));
+const showTopicHeader = computed(() => !!props.topicContext && !props.continued);
+const promotedTopicTask = computed(() => showTopicHeader.value && attachedTasks.value.some((task) => task.id === props.topicContext.id));
+const footerTasks = computed(() => promotedTopicTask.value ? attachedTasks.value.filter((task) => task.id !== props.topicContext.id) : attachedTasks.value);
+const bubbleStyle = computed(() => {
+  const topicColor = props.topicContext?.color && !props.message.error ? { "--topic-color": props.topicContext.color } : undefined;
+  if (!tint.value && !topicColor) return undefined;
+  return { ...tint.value, ...topicColor };
+});
 const stepTask = computed(() => typeof props.message.stepOutput === "object" && !props.message.stepOutput?.legacy ? props.message.tasks?.[0] : undefined);
 const canOpenStep = computed(() => !!stepTask.value && statusOf(stepTask.value) !== "deleted");
 const showStepLink = computed(() => !props.hideStepOutput && !!stepOutput.value && (canOpenStep.value || (stepOutput.value.omitted && !loadedStep.value)));
-const hasBubbleLinks = computed(() => showStepLink.value || attachedTasks.value.length > 0);
+const hasBubbleLinks = computed(() => showStepLink.value || footerTasks.value.length > 0);
 async function openStep() {
   if (canOpenStep.value) { emit("task", stepTask.value.id); return; }
   if (!props.loadStepOutput || stepLoading.value) return;
@@ -94,7 +106,13 @@ async function runExport(format) {
         <button v-if="rememberable && !mine && message.text" type="button" class="chat-reply" aria-label="记住这句" title="记住这句" @click="emit('remember', message)"><Icon name="memory" :size="13" /><span class="reply-label">记住</span></button>
       </div>
       <button v-if="message.quote" type="button" class="chat-quote" :aria-label="'跳转到 ' + quoteName + ' 的消息：' + message.quote.text" @click="emit('jump', message.quote.seq)"><Icon name="reply" :size="12" /><strong>{{ quoteName }}</strong><span>{{ message.quote.text }}</span></button>
-      <div class="chat-bubble" :class="{ failed: message.error, tinted: !!tint }" :style="tint" :role="message.error ? 'alert' : undefined">
+      <div class="chat-bubble" :class="{ failed: message.error, tinted: !!tint, 'has-topic': !!topicContext?.color && !message.error }" :style="bubbleStyle" :role="message.error ? 'alert' : undefined">
+        <button v-if="showTopicHeader" type="button" class="chat-topic-header" :class="{ 'chat-task-link': promotedTopicTask }" :data-task-id="promotedTopicTask ? topicContext.id : undefined" :disabled="topicDeleted" :title="topicContext.title || topicTitle" :aria-label="(topicDeleted ? '任务已删除：' : '查看任务话题：') + topicTitle" @click="emit('task', topicContext.id)">
+          <i class="topic-dot" :style="{ background: topicContext.color }" aria-hidden="true"></i>
+          <span class="chat-link-text">{{ topicTitle }}</span>
+          <span v-if="topicStatus" :class="['badge', taskTone(topicStatus)]">{{ taskLabel(topicStatus) }}</span>
+          <Icon v-if="!topicDeleted" name="right" :size="13" />
+        </button>
         <UserMessage v-if="message.role === 'user' && message.text" :text="message.displayText || message.text" />
         <MessageText v-else-if="message.text" :text="bodyText" :streaming="message.streaming" :archive-base="archiveBase" />
         <img v-for="(image, index) in message.images || []" :key="index" :src="image.url || (image.blobId ? `/api/blobs/${image.blobId}` : `data:${image.mime};base64,${image.data}`)" alt="消息附图" />
@@ -105,7 +123,7 @@ async function runExport(format) {
             <span class="chat-link-text">步骤产物<template v-if="stepOutput.step"> · 第 {{ stepOutput.step }} 步</template>：{{ stepOutput.label }}<template v-if="!canOpenStep && stepLoading">（正在读取…）</template></span>
             <Icon name="right" :size="13" />
           </button>
-          <button v-for="task in attachedTasks" :key="task.id" type="button" class="chat-bubble-link chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
+          <button v-for="task in footerTasks" :key="task.id" type="button" class="chat-bubble-link chat-task-link" :data-task-id="task.id" :disabled="statusOf(task) === 'deleted'" :aria-label="(statusOf(task) === 'deleted' ? '任务已删除：' : '查看任务：') + task.title" @click="emit('task', task.id)">
             <Icon name="tasks" :size="13" />
             <span class="chat-link-text">任务：{{ task.title }}</span>
             <span v-if="statusOf(task)" :class="['badge', taskTone(statusOf(task))]">{{ taskLabel(statusOf(task)) }}</span>
@@ -138,8 +156,8 @@ async function runExport(format) {
 <style scoped>
 .chat-message { display: flex; align-items: flex-start; gap: var(--chat-gap); margin: 0 0 18px; min-width: 0; outline: none; }
 .chat-message.user { justify-content: flex-end; }
-/* Consecutive messages from the same sender pack tightly into one visual block while staying individual bubbles. */
-.chat-message.continued { margin-top: -12px; }
+/* Consecutive messages from the same sender and task pack tightly into one visual block while staying individual bubbles. */
+.chat-message.continued { margin-top: -14px; }
 .chat-avatar.spacer { height: 0; background: none; }
 .chat-avatar { display: grid; place-items: center; flex: none; width: var(--chat-avatar); height: var(--chat-avatar); overflow: hidden; border-radius: 12px; background: var(--accent-soft); color: var(--accent-text); font-size: 16px; font-weight: 600; }
 /* One shrinkable column: grid items default to an automatic minimum of their min-content width, so a single
@@ -163,13 +181,36 @@ async function runExport(format) {
 .chat-message:hover .chat-reply, .chat-message:focus-within .chat-reply, .chat-reply:focus-visible { opacity: 1; }
 .chat-reply:hover:not(:disabled) { background: var(--surface-2); color: var(--accent); }
 .chat-bubble { justify-self: start; min-width: 0; max-width: 100%; padding: 9px 13px; border-radius: 4px 14px 14px 14px; background: var(--surface-2); line-height: 1.65; overflow-wrap: anywhere; }
-.chat-message.continued .chat-bubble { border-radius: 8px 14px 14px 14px; }
-.user .chat-bubble { justify-self: end; }
-.user .chat-bubble { border-radius: 14px 4px 14px 14px; background: var(--accent-soft); color: #13254f; }
-.chat-message.user.continued .chat-bubble { border-radius: 14px 8px 14px 14px; }
+.chat-bubble.has-topic { border-radius: 6px 14px 14px 6px; box-shadow: inset 3px 0 var(--topic-color); }
+/* Stacked bubbles keep large rounding only on the group's outer corners so the inner edge reads as one straight column. */
+.chat-message:not(.continued):has(+ .chat-message.continued) .chat-bubble { border-radius: 4px 14px 6px 2px; }
+.chat-message.continued:has(+ .chat-message.continued) .chat-bubble { border-radius: 2px 6px 6px 2px; }
+.chat-message.continued:not(:has(+ .chat-message.continued)) .chat-bubble { border-radius: 2px 6px 14px 14px; }
+.chat-message:not(.continued):has(+ .chat-message.continued) .chat-bubble.has-topic { border-radius: 6px 14px 6px 0; }
+.chat-message.continued:has(+ .chat-message.continued) .chat-bubble.has-topic { border-radius: 0 6px 6px 0; }
+.chat-message.continued:not(:has(+ .chat-message.continued)) .chat-bubble.has-topic { border-radius: 0 6px 14px 6px; }
+.user .chat-bubble { justify-self: end; border-radius: 14px 4px 14px 14px; background: var(--accent-soft); color: #13254f; }
+.user .chat-bubble.has-topic { border-radius: 14px 6px 6px 14px; box-shadow: inset -3px 0 var(--topic-color); }
+.chat-message.user:not(.continued):has(+ .chat-message.user.continued) .chat-bubble { border-radius: 14px 4px 2px 6px; }
+.chat-message.user.continued:has(+ .chat-message.user.continued) .chat-bubble { border-radius: 6px 2px 2px 6px; }
+.chat-message.user.continued:not(:has(+ .chat-message.user.continued)) .chat-bubble { border-radius: 6px 2px 14px 14px; }
+.chat-message.user:not(.continued):has(+ .chat-message.user.continued) .chat-bubble.has-topic { border-radius: 14px 6px 0 6px; }
+.chat-message.user.continued:has(+ .chat-message.user.continued) .chat-bubble.has-topic { border-radius: 6px 0 0 6px; }
+.chat-message.user.continued:not(:has(+ .chat-message.user.continued)) .chat-bubble.has-topic { border-radius: 6px 0 6px 14px; }
 /* A colored bubble keeps its links and mentions readable instead of accent-blue on the same color. */
 .chat-bubble.tinted :deep(a), .chat-bubble.tinted :deep(.mention) { color: inherit; text-decoration: underline; }
 .chat-bubble.failed { background: var(--danger-soft); box-shadow: inset 3px 0 var(--danger); }
+.chat-topic-header { display: flex; align-items: center; justify-content: flex-start; gap: 6px; width: calc(100% + 10px); min-width: 0; height: auto; min-height: 24px; margin: -2px -5px 0; padding: 2px 5px; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); font-size: 12px; font-weight: 500; line-height: 1.4; text-align: left; }
+.chat-topic-header:not(:last-child) { margin-bottom: 7px; padding-bottom: 6px; border-bottom: 1px solid color-mix(in srgb, var(--border) 85%, transparent); border-radius: 6px 6px 0 0; }
+.chat-topic-header:hover:not(:disabled) { background: var(--accent-softer); color: var(--accent); }
+.chat-topic-header:hover:not(:disabled) .chat-link-text { text-decoration: underline; text-underline-offset: 2px; }
+.chat-topic-header:disabled { color: var(--muted); opacity: .75; }
+.chat-topic-header > .badge, .chat-topic-header > .icon-svg { flex: none; }
+.chat-topic-header > .icon-svg:last-child { color: var(--faint); }
+.topic-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; }
+.user .chat-topic-header { color: inherit; }
+.user .chat-topic-header:not(:last-child) { border-bottom-color: rgb(19 37 79 / 12%); }
+.user .chat-topic-header:hover:not(:disabled) { background: rgb(19 37 79 / 6%); color: inherit; }
 .chat-message:focus .chat-bubble { outline: 2px solid var(--accent); outline-offset: 2px; }
 .chat-bubble :deep(.message-text) { font-size: 14px; }
 .chat-bubble :deep(.code-block) { margin-left: -4px; margin-right: -4px; }
@@ -205,7 +246,7 @@ async function runExport(format) {
 @media (hover: none) { .chat-reply { opacity: .7; } .reply-label { display: none; } }
 @media (max-width: 767px) {
   .chat-message { margin-bottom: 16px; }
-  .chat-message.continued { margin-top: -10px; }
+  .chat-message.continued { margin-top: -12px; }
   .user .chat-content { max-width: 88%; }
   .chat-reply { min-height: 28px; padding: 0 6px; }
 }

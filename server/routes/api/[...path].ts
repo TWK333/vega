@@ -919,7 +919,9 @@ async function groupRoute(path: string[], method: string, a: Obj, user: { id: st
       const topicTaskId = query.get("topicTaskId");
       const scoped = topicTaskId === null ? undefined : await groups.topicMessages(group, topicTaskId);
       const page = await chatHistory(store, group.session, query, scoped);
-      return { ...page, group: await groups.view(group, user), taskStatus: await groups.taskStatus(page.messages) };
+      const [taskStatus, taskMeta] = await Promise.all([groups.taskStatus(page.messages), groups.taskMeta(group, page.messages)]);
+      for (const [taskId, info] of Object.entries(taskMeta)) if (!(taskId in taskStatus)) taskStatus[taskId] = info.status;
+      return { ...page, group: await groups.view(group, user), taskStatus, taskMeta };
     }
     if (method === "POST") {
       const input = await inputMessage({ text: typeof a.text === "string" ? a.text : "", images: a.images, files: a.files, quoteSeq: a.quoteSeq }, store, group.session);

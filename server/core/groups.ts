@@ -520,6 +520,52 @@ export class Groups {
     }
     return status;
   }
+  /** Live title, status and owner employee for tasks referenced by group messages (cards and topicTaskId). */
+  async taskMeta(group: Group, messages: Message[]) {
+    const needed = new Set<string>(), cardIds = new Set<string>(), fallback = new Map<string, { title?: string; employeeId?: string }>();
+    const employeeIds = new Set(group.employees.map((e) => e.id));
+    for (const m of messages) {
+      const empId = m.author?.kind === "employee" ? m.author.id : undefined;
+      if (empId) employeeIds.add(empId);
+      if (m.topicTaskId) {
+        needed.add(m.topicTaskId);
+        const prev = fallback.get(m.topicTaskId) || {};
+        if (empId && !prev.employeeId) prev.employeeId = empId;
+        fallback.set(m.topicTaskId, prev);
+      }
+      for (const t of m.tasks || []) {
+        if (!t.id) continue;
+        needed.add(t.id);
+        cardIds.add(t.id);
+        const prev = fallback.get(t.id) || {};
+        if (t.title && !prev.title) prev.title = t.title;
+        if (empId && !prev.employeeId) prev.employeeId = empId;
+        fallback.set(t.id, prev);
+      }
+    }
+    const meta: Record<string, { id: string; title: string; status: string; employeeId?: string }> = {};
+    if (!needed.size) return meta;
+    for (const employeeId of employeeIds) {
+      const employee = await this.employee(employeeId);
+      if (!employee) continue;
+      for (const task of (await employee.state()).tasks) {
+        if (!needed.has(task.id)) continue;
+        if (task.group?.groupId !== group.id && !cardIds.has(task.id)) continue;
+        meta[task.id] = {
+          id: task.id,
+          title: cut(String(task.text || "").replace(/\s+/g, " ").trim(), 80),
+          status: task.status,
+          employeeId,
+        };
+      }
+    }
+    for (const taskId of needed) {
+      if (meta[taskId]) continue;
+      const info = fallback.get(taskId);
+      meta[taskId] = { id: taskId, title: info?.title || "", status: "deleted", ...(info?.employeeId ? { employeeId: info.employeeId } : {}) };
+    }
+    return meta;
+  }
   /** What a task started in the group needs to know: the bulletin and the other employees it may hand work to. */
   async taskContext(groupId: string, employeeId: string) {
     const group = await this.get(groupId);

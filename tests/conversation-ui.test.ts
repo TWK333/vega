@@ -5,7 +5,7 @@ import vm from "node:vm";
 import { webcrypto } from "node:crypto";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import { createChatHistory, mergeMessages } from "../web/src/chat-history.js";
-import { employeeChatMessages, continuesPrevious, chatCardVisibility } from "../web/src/conversation.js";
+import { employeeChatMessages, continuesPrevious, chatCardVisibility, messageTaskId, taskAccentColor, cleanTaskTitle } from "../web/src/conversation.js";
 import { attachmentPayload, isImage, useAttachmentInput } from "../web/src/attachments.js";
 
 const chat = readFileSync("web/src/EmployeeChat.vue", "utf8");
@@ -237,6 +237,14 @@ test("consecutive messages from the same sender only show avatar and name once; 
   assert.equal(continuesPrevious({ role: "assistant", author: e1, progress: true }, { role: "assistant", author: e2, progress: true }), false);
   assert.equal(continuesPrevious({ role: "user", author: u1 }, { role: "user", author: u1 }), true);
   assert.equal(continuesPrevious({ role: "user", author: u1 }, { role: "user", author: u2 }), false);
+  assert.equal(continuesPrevious({ role: "assistant", author: e1, topicTaskId: "t1" }, { role: "assistant", author: e1, topicTaskId: "t1" }), true, "same author and same task stay grouped");
+  assert.equal(continuesPrevious({ role: "assistant", author: e1, topicTaskId: "t1" }, { role: "assistant", author: e1, topicTaskId: "t2" }), false, "switching tasks breaks the bubble group even for the same employee");
+  assert.equal(continuesPrevious({ role: "assistant", author: e1, tasks: [{ id: "t1" }] }, { role: "assistant", author: e1, topicTaskId: "t1" }), true, "single-task card and topicTaskId progress belong to the same task block");
+  assert.equal(continuesPrevious({ role: "assistant", author: e1 }, { role: "assistant", author: e1, topicTaskId: "t1" }), false, "entering a task from general chat starts a new block");
+  assert.equal(messageTaskId({ role: "assistant", tasks: [{ id: "t1" }, { id: "t2" }] }), "", "multi-task message has no single topic owner");
+  assert.equal(taskAccentColor("t1"), taskAccentColor("t1"));
+  assert.match(taskAccentColor("t1"), /^#[0-9a-f]{6}$/i);
+  assert.equal(cleanTaskTitle("检查 https://example.com/a/b/c Excel 下载问题"), "检查 Excel 下载问题");
 });
 
 test("a delayed history response cannot clear a newer typing state", async () => {
