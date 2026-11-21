@@ -22,11 +22,15 @@ import {
 } from "../shared/employee-avatars";
 import {
   PIXEL_GRID_SIZE,
+  RIG_PARTS,
   PIXEL_SPRITES,
   PIXEL_ROLE_IDS,
+  composeKeyframe,
   renderPixelFrame,
   pickRandomAnimation,
   getPixelSprite,
+  clearPixelFrameCache,
+  getPixelFrameCacheSize,
   shade,
 } from "../web/src/pixel-avatar.js";
 import { updateEmployeeAvatar } from "../server/core/employee-avatar";
@@ -62,8 +66,9 @@ test("all 12 zodiac presets are real square WebP assets and avatar URLs never ac
   }
 });
 
-test("32x32 pixel citizen avatars span diverse genders and professions, each with >= 5 distinct occupation animations (4-8 frames each)", () => {
-  assert.equal(PIXEL_GRID_SIZE, 32, "upgraded to 32×32 pixel grid");
+test("32x32 rigged pixel citizens expose 7 skeletal parts, 100 articulated keyframe animations, and (role,clip,frame,hex) caching", () => {
+  assert.equal(PIXEL_GRID_SIZE, 32, "32×32 pixel grid");
+  assert.deepEqual([...RIG_PARTS], ["head", "torso", "armL", "armR", "legL", "legR", "prop"]);
   assert(PIXEL_AVATAR_ROLES.length >= 20 && PIXEL_AVATAR_COLORS.length >= 12);
   assert.equal(new Set(PIXEL_AVATAR_ROLES.map(role => role.id)).size, PIXEL_AVATAR_ROLES.length);
   const females = PIXEL_AVATAR_ROLES.filter(role => role.gender === "female");
@@ -85,25 +90,53 @@ test("32x32 pixel citizen avatars span diverse genders and professions, each wit
     assert.equal(new Set(sprite.animations.map((c: any) => c.id)).size, sprite.animations.length, `${role.id} clip ids are unique`);
     assert.equal(new Set(sprite.animations.map((c: any) => c.name)).size, sprite.animations.length, `${role.id} clip names are unique`);
 
-    // Verify idle frame is valid 32×32 and renders cleanly
-    assert.equal(sprite.idle.length, PIXEL_GRID_SIZE);
-    for (const row of sprite.idle) assert.equal(row.length, PIXEL_GRID_SIZE);
+    // 1. Verify 7-part skeletal rig structure and 32×32 part assets
+    assert(sprite.rig, `${role.id} has skeletal rig`);
+    for (const part of RIG_PARTS) {
+      const variants = (sprite.rig as Record<string, Record<string, string[][]>>)[part];
+      assert(variants && typeof variants === "object", `${role.id}.rig.${part} exists`);
+      if (part !== "prop") assert(Object.keys(variants).length >= 3, `${role.id}.rig.${part} has multiple articulated variants`);
+      for (const [vName, mat] of Object.entries(variants)) {
+        assert.equal(mat.length, PIXEL_GRID_SIZE, `${role.id}.rig.${part}.${vName} height`);
+        for (const row of mat) assert.equal(row.length, PIXEL_GRID_SIZE, `${role.id}.rig.${part}.${vName} width`);
+      }
+    }
+
+    // 2. Verify idle keyframe covers all 7 parts and composes cleanly to 32×32
+    assert(sprite.idleKeyframe, `${role.id} has idleKeyframe`);
+    for (const part of RIG_PARTS) {
+      const tf = (sprite.idleKeyframe as any)[part];
+      assert(tf && typeof tf.dx === "number" && typeof tf.dy === "number" && typeof tf.variant === "string" && typeof tf.flip === "boolean" && typeof tf.visible === "boolean", `${role.id}.idleKeyframe.${part}`);
+    }
+    const idleMatrix = composeKeyframe(sprite.rig, sprite.idleKeyframe);
+    assert.equal(idleMatrix.length, PIXEL_GRID_SIZE);
     const idleRendered = renderPixelFrame(role.id, "#3878fb", 0, "idle");
     assert(idleRendered.layers.length >= 6, `${role.id} idle frame has rich shaded pixel layers`);
 
-    // Verify all 5 occupation clips for this role
+    // 3. Verify all 5 occupation keyframe clips & local part articulation
     const roleClipSignatures = new Set<string>();
     for (const clipObj of sprite.animations) {
       totalClips++;
-      assert(clipObj.frames.length >= 4 && clipObj.frames.length <= 8, `${role.id}:${clipObj.id} has 4-8 frames`);
-      assert.equal(clipObj.durations.length, clipObj.frames.length, `${role.id}:${clipObj.id} has per-frame timing`);
+      assert(Array.isArray(clipObj.keyframes), `${role.id}:${clipObj.id} stores keyframes table`);
+      assert(clipObj.keyframes.length >= 4 && clipObj.keyframes.length <= 8, `${role.id}:${clipObj.id} has 4-8 keyframes`);
+      assert.equal(clipObj.durations.length, clipObj.keyframes.length, `${role.id}:${clipObj.id} has per-frame timing`);
       for (const ms of clipObj.durations) assert(ms >= 80 && ms <= 500, `${role.id}:${clipObj.id} duration in range`);
 
       const frameHashes = new Set<string>();
-      for (let f = 0; f < clipObj.frames.length; f++) {
-        const matrix = clipObj.frames[f];
+      const partMotionSignatures = new Map<string, Set<string>>(RIG_PARTS.map((p) => [p, new Set<string>()]));
+
+      for (let f = 0; f < clipObj.keyframes.length; f++) {
+        const keyframe = clipObj.keyframes[f];
+        for (const part of RIG_PARTS) {
+          const tf = (keyframe as any)[part];
+          assert(tf && typeof tf.dx === "number" && typeof tf.dy === "number" && typeof tf.variant === "string" && typeof tf.flip === "boolean" && typeof tf.visible === "boolean", `${role.id}:${clipObj.id}[${f}].${part}`);
+          if (tf.visible) assert((sprite.rig as any)[part]?.[tf.variant], `${role.id}:${clipObj.id}[${f}].${part} variant "${tf.variant}" exists in rig`);
+          partMotionSignatures.get(part)!.add(`${tf.dx},${tf.dy},${tf.variant},${tf.flip},${tf.visible}`);
+        }
+        const matrix = composeKeyframe(sprite.rig, keyframe);
         assert.equal(matrix.length, PIXEL_GRID_SIZE, `${role.id}:${clipObj.id} frame ${f} height`);
         for (const row of matrix) assert.equal(row.length, PIXEL_GRID_SIZE, `${role.id}:${clipObj.id} frame ${f} width`);
+
         const rendered = renderPixelFrame(role.id, "#3878fb", f, clipObj.id);
         assert(rendered.layers.length >= 4, `${role.id}:${clipObj.id} frame ${f} renders multi-color pixel paths`);
         assert.match(rendered.bg, /^#[0-9a-f]{6}$/);
@@ -113,13 +146,17 @@ test("32x32 pixel citizen avatars span diverse genders and professions, each wit
         frameHashes.add(JSON.stringify(rendered.layers.map((l: { fill: string; d: string }) => [l.fill, l.d])));
       }
       assert(frameHashes.size >= 3, `${role.id}:${clipObj.id} visually animates across frames`);
+      // Verify at least 2 independent parts change across the clip (true local articulation, not static or uniform translation)
+      const movingParts = [...partMotionSignatures.values()].filter((s) => s.size > 1).length;
+      assert(movingParts >= 2, `${role.id}:${clipObj.id} articulates multiple skeletal parts independently`);
+
       const sig = [...frameHashes].join("|");
       roleClipSignatures.add(sig);
       allClipSignatures.add(sig);
     }
     assert.equal(roleClipSignatures.size, sprite.animations.length, `${role.id} all 5 clips are visually distinct`);
 
-    // Verify random picker selects from this role's clips and avoids immediate repeat when excluded
+    // 4. Verify random picker avoids immediate repeats and visits diverse clips
     const chosen = new Set<string>();
     let prev = "";
     for (let i = 0; i < 40; i++) {
@@ -141,9 +178,24 @@ test("32x32 pixel citizen avatars span diverse genders and professions, each wit
   assert.equal(totalClips, 100, "20 professions × 5 occupation animations = 100 total clips");
   assert.equal(allClipSignatures.size, totalClips, "every single occupation animation clip across all 20 roles is unique");
 
-  // Backward-compatible 3-arg renderPixelFrame still works
-  assert(renderPixelFrame("coder", "#3878fb", 0).layers.length >= 5);
-  assert(renderPixelFrame("unknown", "#3878fb", 0).layers.length >= 5);
+  // 5. Verify (role, clip, frame, hex) cache behavior & backward-compatible 3-arg API
+  clearPixelFrameCache();
+  assert.equal(getPixelFrameCacheSize(), 0);
+  const f1 = renderPixelFrame("coder", "#3878fb", 1, "typing");
+  const f1Again = renderPixelFrame("coder", "#3878fb", 1, "typing");
+  assert.equal(f1, f1Again, "identical (role, clip, frame, hex) returns exact cached object");
+  assert.equal(getPixelFrameCacheSize(), 1);
+  const fDiffHex = renderPixelFrame("coder", "#f2374a", 1, "typing");
+  const fDiffClip = renderPixelFrame("coder", "#3878fb", 1, "coffee");
+  const fDiffFrame = renderPixelFrame("coder", "#3878fb", 2, "typing");
+  const fIdle = renderPixelFrame("coder", "#3878fb", 0, "idle");
+  assert.notEqual(f1, fDiffHex);
+  assert.notEqual(f1, fDiffClip);
+  assert.notEqual(f1, fDiffFrame);
+  assert.notEqual(f1, fIdle);
+  assert.equal(getPixelFrameCacheSize(), 5);
+  assert(renderPixelFrame("coder", "#3878fb", 0).layers.length >= 5, "3-arg renderPixelFrame still works");
+  assert(renderPixelFrame("unknown", "#3878fb", 0).layers.length >= 5, "unknown role falls back gracefully");
 
   for (const value of [
     "pixel:", "pixel:coder", "pixel:coder:", "pixel:unknown:red", "pixel:coder:unknown",
@@ -151,7 +203,6 @@ test("32x32 pixel citizen avatars span diverse genders and professions, each wit
     "bot:", "bot:round", "bot:unknown:red", "bot:round:#ff0000",
   ]) assert.equal(isAvatarPreset(value), false, value);
 
-  // Legacy bot presets remain accepted and resolve cleanly to pixel citizens preserving their theme color.
   for (const shape of BOT_AVATAR_SHAPES) {
     const legacy = botAvatarPreset(shape.id, "teal");
     assert(isAvatarPreset(legacy), legacy);

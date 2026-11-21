@@ -58,7 +58,7 @@ function schedule(delay) {
     if (!playing.value) return;
     const clipObj = currentClip();
     const next = frameIndex.value + 1;
-    if (next < clipObj.frames.length) {
+    if (next < clipObj.keyframes.length) {
       frameIndex.value = next;
       schedule(clipObj.durations[next] ?? 180);
       return;
