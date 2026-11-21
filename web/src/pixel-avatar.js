@@ -1,6 +1,6 @@
-// Pixel citizen avatars: 20 rigged 32×32 pixel-art characters spanning diverse genders and professions.
+// Pixel citizen avatars: 20 rigged 64×64 pixel-art characters spanning diverse genders and professions.
 // Each character is composed of 7 independent skeletal parts (head, torso, armL, armR, legL, legR, prop)
-// and 5 independent occupation keyframe animation clips (100 clips total), cached per (role, clip, frame, hex).
+// and 5 smooth occupation keyframe animation clips (100 clips total, 12–20 frames each), cached per (role, clip, frame, hex).
 
 import { PIXEL_GRID_SIZE, RIG_PARTS, compileGrid, composeKeyframe, shade } from "./pixel-rig.js";
 import { ROLES_A } from "./pixel-roles-a.js";
@@ -31,7 +31,7 @@ export function getPixelFrameCacheSize() {
 }
 
 /**
- * Render (and cache) one frame of a rigged 32×32 pixel citizen as a soft tinted badge + crisp SVG pixel paths.
+ * Render (and cache) one frame of a rigged 64×64 pixel citizen as a soft tinted badge + crisp SVG pixel paths.
  * `clipId`: omit/"" for default clip 0 (backward compatible), `"idle"` for calm resting pose, or any clip id in `sprite.animations`.
  */
 export function renderPixelFrame(roleId, hex = "#3878fb", frameIndex = 0, clipId = "") {

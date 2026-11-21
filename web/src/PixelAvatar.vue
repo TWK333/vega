@@ -43,10 +43,11 @@ function chooseClip() {
 function startClip(clipObj, stagger = false) {
   activeClipId.value = clipObj.id;
   frameIndex.value = 0;
-  // Play 2 cycles of each gag animation before rotating to another random occupation clip.
-  loopsLeft = props.clip ? Number.POSITIVE_INFINITY : 2;
+  // Each 12–20 frame occupation story runs ~1.4–2.6s; play 1 full leisurely cycle (or 2 if fast) before rotating.
+  const totalMs = clipObj.durations.reduce((sum, ms) => sum + ms, 0);
+  loopsLeft = props.clip ? Number.POSITIVE_INFINITY : (totalMs < 1300 ? 2 : 1);
   emit("clip", { id: clipObj.id, name: clipObj.name });
-  const baseDelay = clipObj.durations[0] ?? 180;
+  const baseDelay = clipObj.durations[0] ?? 110;
   const firstDelay = stagger ? Math.round(baseDelay * (0.4 + Math.random() * 0.6)) : baseDelay;
   schedule(firstDelay);
 }
@@ -137,7 +138,7 @@ onBeforeUnmount(() => {
     role="img"
     aria-hidden="true"
   >
-    <rect x="0" y="0" :width="PIXEL_GRID_SIZE" :height="PIXEL_GRID_SIZE" rx="6.8" :fill="frame.bg" />
+    <rect x="0" y="0" :width="PIXEL_GRID_SIZE" :height="PIXEL_GRID_SIZE" :rx="PIXEL_GRID_SIZE * 0.2125" :fill="frame.bg" />
     <g shape-rendering="crispEdges">
       <path v-for="layer in frame.layers" :key="layer.key" :d="layer.d" :fill="layer.fill" />
     </g>

@@ -1,9 +1,9 @@
-// Rigged 32×32 pixel citizens (11–20): teacher, gardener, photographer, courier, wizard,
+// Rigged 64×64 pixel citizens (11–20): teacher, gardener, photographer, courier, wizard,
 // athlete, pilot, mechanic, baker, ninja — each with 7 articulated skeletal parts
 // and 5 independent gag keyframe animation clips (50 clips).
 
 import {
-  SKIN, blank, buildCharacterRig, clip, clone, fill, kf, makePalette, makeRiggedSprite, partPatch, px, stamp,
+  SKIN, blank, buildCharacterRig, clip, clone, fill, kf, makePalette, makeRiggedSprite, partPatch, px, stamp, stamp2x,
 } from "./pixel-rig.js";
 
 // ============================================================================
@@ -12,7 +12,7 @@ import {
 const teacherRig = buildCharacterRig({
   gender: "female", hairStyle: "bun", eyeStyle: "goldglasses", coat: "vest",
   props: {
-    default: (() => { const g = blank(); stamp(g, 3, 19, ["WWWWW", "WwWwW", "WWWWW"]); stamp(g, 23, 15, ["...b", "..b.", ".b..", "b..."]); return g; })(),
+    default: (() => { const g = blank(); stamp2x(g, 3, 19, ["WWWWW", "WwWwW", "WWWWW"], false); stamp2x(g, 23, 15, ["...b", "..b.", ".b..", "b..."], false); return g; })(),
     pointerUp: partPatch(23, 10, ["...b", "..b.", ".b..", "b..."]),
     book: partPatch(3, 19, ["WWWWW", "WwWwW", "WWWWW"]),
     starStamp: partPatch(21, 5, ["...Y...", "..YYY..", "YYYYYYY", ".YYWYY.", "..YYY..", ".Y...Y."]),
@@ -66,14 +66,14 @@ const teacher = makeRiggedSprite({
 // 12. 园丁 (男) — 巨花暴长 / 落叶暴雪 / 群蝶抢帽 / 拔出巨萝卜 / 彩虹洒水
 // ============================================================================
 const gardenerHat = (g) => {
-  stamp(g, 5, 2, ["......bbbbbbbb......", ".....bbbbbbbbbb.....", ".....ddAAAAAAdd.....", ".bbbbbbbbbbbbbbbbbb."]);
+  stamp2x(g, 5, 2, ["......bbbbbbbb......", ".....bbbbbbbbbb.....", ".....ddAAAAAAdd.....", ".bbbbbbbbbbbbbbbbbb."]);
 };
 const gardenerRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "overalls", boots: "brown",
   hatFn: gardenerHat,
-  beardFn(g) { stamp(g, 11, 15, ["BBBBBBBBBB"]); },
+  beardFn(g) { stamp2x(g, 11, 15, ["BBBBBBBBBB"], false); },
   props: {
-    default: (() => { const g = blank(); stamp(g, 22, 19, [".ggg.", "ggggg", ".ggg."]); stamp(g, 25, 25, [".V.", "vVv", ".v."]); return g; })(),
+    default: (() => { const g = blank(); stamp2x(g, 22, 19, [".ggg.", "ggggg", ".ggg."]); stamp2x(g, 25, 25, [".V.", "vVv", ".v."], false); return g; })(),
     sunflower: partPatch(22, 8, ["..YYYYY..", ".YYBBBYY.", "YYBWWWBYY", ".YYBBBYY.", "..YYYYY..", "....v....", "...vVv...", "....v....", "...vVv...", "....v...."]),
     shears: partPatch(23, 16, ["G.G", ".G.", "GGG"]),
     shearsShut: partPatch(23, 16, ["GG.", ".GG", "GGG"]),
@@ -187,7 +187,7 @@ const photographer = makeRiggedSprite({
 // ============================================================================
 const courierRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "jacket",
-  hatFn(g) { stamp(g, 8, 3, ["...AAAAAAAAAA...", "..aAAAAAAAAAAA..", ".AAAAAACCCCCCCC.", ".AAAAACWWWCCCCC.", ".dAAAACCCCCCCCC."]); },
+  hatFn(g) { stamp2x(g, 8, 3, ["...AAAAAAAAAA...", "..aAAAAAAAAAAA..", ".AAAAAACCCCCCCC.", ".AAAAACWWWCCCCC.", ".dAAAACCCCCCCCC."]); },
   props: {
     default: partPatch(20, 19, ["bbbbbbbb", "bbbBBbbb", "bbbbbbbb", "bbbbbbbb"]),
     boxHigh: partPatch(20, 10, ["bbbbbbbb", "bbbBBbbb", "bbbbbbbb"]),
@@ -244,7 +244,7 @@ const courier = makeRiggedSprite({
 const wizardRig = buildCharacterRig({
   gender: "female", hairStyle: "long", coat: "robe",
   hatFn(g) {
-    stamp(g, 7, 0, ["........A.......", ".......AAA......", "......AAYAA.....", ".....AAAAAAA....", "....AAAAAAAAA...", "..ddYYYYYYYYYdd."]);
+    stamp2x(g, 7, 0, ["........A.......", ".......AAA......", "......AAYAA.....", ".....AAAAAAA....", "....AAAAAAAAA...", "..ddYYYYYYYYYdd."]);
   },
   props: {
     default: partPatch(24, 12, [".CCC.", "CCWCC", ".CCC.", "..B..", "..B..", "..B..", "..B..", "..B..", "..B.."]),
@@ -302,7 +302,7 @@ const wizard = makeRiggedSprite({
 // ============================================================================
 const athleteRig = buildCharacterRig({
   gender: "male", hairStyle: "spiky", coat: "jersey", legs: "shorts", boots: "white",
-  hatFn(g) { fill(g, 10, 7, 12, 2, "A"); fill(g, 11, 7, 4, 1, "a"); },
+  hatFn(g) { fill(g, 20, 14, 24, 4, "A"); fill(g, 22, 14, 8, 2, "a"); },
   props: {
     default: partPatch(23, 21, [".FFF.", "FFBFF", "FBBBF", "FFBFF", ".FFF."]),
     ballHigh: partPatch(13, 2, [".FFF.", "FFBFF", "FBBBF", "FFBFF", ".FFF."]),
@@ -357,7 +357,7 @@ const athlete = makeRiggedSprite({
 // ============================================================================
 const pilotRig = buildCharacterRig({
   gender: "female", hairStyle: "bob", eyeStyle: "shades", coat: "pilot",
-  hatFn(g) { stamp(g, 9, 2, ["...AAAAAAAA...", "..AAAYYYYAAA..", ".ddAAAAAAAAAdd", ".OOOOOOOOOOOO."]); },
+  hatFn(g) { stamp2x(g, 9, 2, ["...AAAAAAAA...", "..AAAYYYYAAA..", ".ddAAAAAAAAAdd", ".OOOOOOOOOOOO."]); },
   props: {
     plane: partPatch(21, 13, ["...W..", "..WWW.", ".WWWWW", "w..W.."]),
     cloud: partPatch(2, 2, [".WW.", "WWWW"]),
@@ -412,10 +412,10 @@ const pilot = makeRiggedSprite({
 // ============================================================================
 const mechanicRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "overalls",
-  hatFn(g) { stamp(g, 8, 2, ["....YYYYYY....", "..YYYYYYYYYY..", ".YYYYyYYYYYYY.", "YYYYYYYYYYYYYY"]); },
+  hatFn(g) { stamp2x(g, 8, 2, ["....YYYYYY....", "..YYYYYYYYYY..", ".YYYYyYYYYYYY.", "YYYYYYYYYYYYYY"]); },
   extraHeads(normal) {
     const oil = clone(normal);
-    stamp(oil, 10, 10, ["OO.OO..OOO", "OWEOOOWEOO", "OEEOOOEEOO", ".OO..OOOO."]);
+    stamp2x(oil, 10, 10, ["OO.OO..OOO", "OWEOOOWEOO", "OEEOOOEEOO", ".OO..OOOO."], false);
     return { oil };
   },
   props: {
@@ -474,12 +474,14 @@ const mechanic = makeRiggedSprite({
 // ============================================================================
 const bakerRig = buildCharacterRig({
   gender: "female", hairStyle: "bob", coat: "apron",
-  hatFn(g) { stamp(g, 10, 2, ["AA......AA", "AAAaaAAaaa", "AA..aa..AA"]); },
+  hatFn(g) { stamp2x(g, 10, 2, ["AA......AA", "AAAaaAAaaa", "AA..aa..AA"]); },
   extraHeads(normal) {
-    const cream = clone(normal); stamp(cream, 12, 10, ["WW..W"]);
+    const cream = clone(normal); stamp2x(cream, 12, 10, ["WW..W"], false);
     const sugar = clone(normal);
-    stamp(sugar, 8, 2, ["..WWWWWWWWWW..", ".WWWWWWWWWWWW.", ".WWWWWWWWWWWW.", "WWwWWWWWWWWwWW", ".WWWWWWWWWWWW."]);
-    stamp(sugar, 11, 11, ["WW", "WE", "WW"]); stamp(sugar, 19, 11, ["WW", "EW", "WW"]);
+    stamp2x(sugar, 8, 2, ["..WWWWWWWWWW..", ".WWWWWWWWWWWW.", ".WWWWWWWWWWWW.", "WWwWWWWWWWWwWW", ".WWWWWWWWWWWW."]);
+    fill(sugar, 21, 22, 6, 5, "S"); fill(sugar, 37, 22, 6, 5, "S");
+    stamp(sugar, 22, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
+    stamp(sugar, 38, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
     return { cream, sugar };
   },
   props: {
@@ -541,19 +543,22 @@ const ninjaRig = buildCharacterRig({
   gender: "male", coat: "ninja",
   customHead() {
     const g = blank();
-    fill(g, 9, 5, 14, 12, "N");
-    fill(g, 10, 10, 12, 4, "S");
-    stamp(g, 11, 11, ["WE", "EE"]); stamp(g, 19, 11, ["WE", "EE"]);
-    fill(g, 10, 14, 12, 3, "N");
-    fill(g, 9, 8, 14, 2, "A"); fill(g, 13, 8, 6, 2, "G"); px(g, 15, 8, "W");
-    stamp(g, 3, 8, ["aAAd..", "aA....", "a....."]);
+    fill(g, 18, 10, 28, 24, "N");
+    fill(g, 18, 10, 2, 2, "."); fill(g, 44, 10, 2, 2, ".");
+    fill(g, 20, 20, 24, 8, "S");
+    stamp(g, 22, 22, ["WWEE", "WEEE", "EEEE", "EEkE"]);
+    stamp(g, 38, 22, ["WWEE", "WEEE", "EEEE", "EEkE"]);
+    fill(g, 20, 28, 24, 6, "N");
+    fill(g, 18, 16, 28, 4, "A"); fill(g, 26, 16, 12, 4, "G"); fill(g, 29, 16, 4, 2, "W");
+    stamp2x(g, 3, 8, ["aAAd..", "aA....", "a....."]);
     return g;
   },
   extraHeads(normal) {
     const scarfUp = clone(normal);
-    stamp(scarfUp, 3, 7, ["aAAd..", "a.....", "______", "______"]);
+    stamp2x(scarfUp, 3, 7, ["aAAd..", "a.....", "______", "______"]);
     const glowRed = clone(normal);
-    stamp(glowRed, 11, 11, ["RR", "RR"]); stamp(glowRed, 19, 11, ["RR", "RR"]);
+    fill(glowRed, 22, 22, 4, 4, "R"); fill(glowRed, 38, 22, 4, 4, "R");
+    px(glowRed, 23, 23, "Y"); px(glowRed, 39, 23, "Y");
     return { scarfUp, glowRed };
   },
   props: {
@@ -597,13 +602,15 @@ const ninja = makeRiggedSprite({
       kf({ head: "scarfUp", armL: "mid", armR: "mid", legL: "wide", legR: "wide", prop: "default" }, { fx: [[3, 4, ["w....w..............w....w"]]] }),
       kf({ head: "normal", armL: "down", armR: "down", prop: "default" }),
     ]),
-    // 影分身瞬步：四肢按疾跑不同相位摆动，躯干+四肢半透明青白影分身残影左右高频闪现！
-    clip("shadowstep", "影分身瞬步", [120, 100, 100, 120], [
+    // 影分身瞬步（6大拍→18帧完整叙事）：压低蓄力 → 左影闪现 → 右影闪现 → 双分身定格 → 飞镖收尾 → 稳落归位
+    clip("shadowstep", "影分身瞬步", [180, 110, 100, 110, 120, 170], [
+      kf({ head: { dy: 1, variant: "normal" }, torso: "leanL", armL: "forward", armR: "forward", legL: "crouch", legR: "crouch", prop: false }),
       kf({ head: { dx: -2, variant: "scarfUp" }, torso: { dx: -2, variant: "leanL" }, armL: { dx: -2, variant: "back" }, armR: { dx: -2, variant: "forward" }, legL: { dx: -2, variant: "step" }, legR: { dx: -2, variant: "kick" }, prop: false }, { afterimage: { dx: 7, dy: 0, tint: "c" } }),
       kf({ head: { dx: 2, variant: "glowRed" }, torso: { dx: 2, variant: "leanR" }, armL: { dx: 2, variant: "forward" }, armR: { dx: 2, variant: "back" }, legL: { dx: 2, variant: "kick" }, legR: { dx: 2, variant: "step" }, prop: false }, { afterimage: { dx: -7, dy: 0, tint: "c" }, fx: [[3, 4, ["..V......v.."]]] }),
       kf({ head: "normal", torso: "normal", armL: "mid", armR: "mid", legL: "wide", legR: "wide", prop: "default" }, { afterimage: [{ dx: -6, dy: 0, tint: "c" }, { dx: 6, dy: 0, tint: "w" }], fx: [[1, 14, ["CCCCCC................CCCCCC"]]] }),
       kf({ head: { dx: -1, variant: "scarfUp" }, torso: { dx: -1, variant: "leanL" }, armL: { dx: -1, variant: "forward" }, armR: { dx: -1, variant: "back" }, legL: { dx: -1, variant: "stand" }, legR: { dx: -1, variant: "step" }, prop: "shurikenX" }, { afterimage: { dx: 6, dy: 0, tint: "w" } }),
-    ]),
+      kf({ head: "normal", armL: "down", armR: "down", legL: "stand", legR: "stand", prop: "default" }),
+    ], { targetFrames: 18 }),
     // 替身术木桩：结印→白烟→全身部件隐藏只剩一截摇晃的带绿芽萌木桩→重新现身！
     clip("log", "替身术木桩", [160, 110, 230, 210, 170], [
       kf({ head: "glow", armL: "forward", armR: "forward", prop: false }),

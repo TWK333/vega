@@ -66,8 +66,8 @@ test("all 12 zodiac presets are real square WebP assets and avatar URLs never ac
   }
 });
 
-test("32x32 rigged pixel citizens expose 7 skeletal parts, 100 articulated keyframe animations, and (role,clip,frame,hex) caching", () => {
-  assert.equal(PIXEL_GRID_SIZE, 32, "32×32 pixel grid");
+test("64x64 rigged pixel citizens expose 7 skeletal parts with joint-arc poses, 100 smooth 12-20 frame keyframe animations, and (role,clip,frame,hex) caching", () => {
+  assert.equal(PIXEL_GRID_SIZE, 64, "upgraded to 64×64 pixel grid");
   assert.deepEqual([...RIG_PARTS], ["head", "torso", "armL", "armR", "legL", "legR", "prop"]);
   assert(PIXEL_AVATAR_ROLES.length >= 20 && PIXEL_AVATAR_COLORS.length >= 12);
   assert.equal(new Set(PIXEL_AVATAR_ROLES.map(role => role.id)).size, PIXEL_AVATAR_ROLES.length);
@@ -90,19 +90,29 @@ test("32x32 rigged pixel citizens expose 7 skeletal parts, 100 articulated keyfr
     assert.equal(new Set(sprite.animations.map((c: any) => c.id)).size, sprite.animations.length, `${role.id} clip ids are unique`);
     assert.equal(new Set(sprite.animations.map((c: any) => c.name)).size, sprite.animations.length, `${role.id} clip names are unique`);
 
-    // 1. Verify 7-part skeletal rig structure and 32×32 part assets
+    // 1. Verify 7-part skeletal rig structure, 64×64 part assets & intermediate joint-arc variants
     assert(sprite.rig, `${role.id} has skeletal rig`);
     for (const part of RIG_PARTS) {
       const variants = (sprite.rig as Record<string, Record<string, string[][]>>)[part];
       assert(variants && typeof variants === "object", `${role.id}.rig.${part} exists`);
-      if (part !== "prop") assert(Object.keys(variants).length >= 3, `${role.id}.rig.${part} has multiple articulated variants`);
+      if (part === "armL" || part === "armR") {
+        for (const arcPose of ["down", "lowOut", "mid", "highOut", "up", "forwardLow", "forward", "forwardHigh"]) {
+          assert(variants[arcPose], `${role.id}.rig.${part} includes intermediate arc pose ${arcPose}`);
+        }
+      } else if (part === "legL" || part === "legR") {
+        for (const stridePose of ["stand", "halfStep", "step", "halfWide", "wide", "halfCrouch", "crouch"]) {
+          assert(variants[stridePose], `${role.id}.rig.${part} includes intermediate stride pose ${stridePose}`);
+        }
+      } else if (part !== "prop") {
+        assert(Object.keys(variants).length >= 5, `${role.id}.rig.${part} has multiple articulated variants`);
+      }
       for (const [vName, mat] of Object.entries(variants)) {
         assert.equal(mat.length, PIXEL_GRID_SIZE, `${role.id}.rig.${part}.${vName} height`);
         for (const row of mat) assert.equal(row.length, PIXEL_GRID_SIZE, `${role.id}.rig.${part}.${vName} width`);
       }
     }
 
-    // 2. Verify idle keyframe covers all 7 parts and composes cleanly to 32×32
+    // 2. Verify idle keyframe covers all 7 parts and composes cleanly to 64×64
     assert(sprite.idleKeyframe, `${role.id} has idleKeyframe`);
     for (const part of RIG_PARTS) {
       const tf = (sprite.idleKeyframe as any)[part];
@@ -113,14 +123,14 @@ test("32x32 rigged pixel citizens expose 7 skeletal parts, 100 articulated keyfr
     const idleRendered = renderPixelFrame(role.id, "#3878fb", 0, "idle");
     assert(idleRendered.layers.length >= 6, `${role.id} idle frame has rich shaded pixel layers`);
 
-    // 3. Verify all 5 occupation keyframe clips & local part articulation
+    // 3. Verify all 5 occupation keyframe clips (12–20 frames each) & smooth local articulation
     const roleClipSignatures = new Set<string>();
     for (const clipObj of sprite.animations) {
       totalClips++;
       assert(Array.isArray(clipObj.keyframes), `${role.id}:${clipObj.id} stores keyframes table`);
-      assert(clipObj.keyframes.length >= 4 && clipObj.keyframes.length <= 8, `${role.id}:${clipObj.id} has 4-8 keyframes`);
+      assert(clipObj.keyframes.length >= 12 && clipObj.keyframes.length <= 20, `${role.id}:${clipObj.id} has 12-20 keyframes (got ${clipObj.keyframes.length})`);
       assert.equal(clipObj.durations.length, clipObj.keyframes.length, `${role.id}:${clipObj.id} has per-frame timing`);
-      for (const ms of clipObj.durations) assert(ms >= 80 && ms <= 500, `${role.id}:${clipObj.id} duration in range`);
+      for (const ms of clipObj.durations) assert(ms >= 50 && ms <= 300, `${role.id}:${clipObj.id} duration ${ms}ms in range`);
 
       const frameHashes = new Set<string>();
       const partMotionSignatures = new Map<string, Set<string>>(RIG_PARTS.map((p) => [p, new Set<string>()]));
@@ -145,8 +155,7 @@ test("32x32 rigged pixel citizens expose 7 skeletal parts, 100 articulated keyfr
         }
         frameHashes.add(JSON.stringify(rendered.layers.map((l: { fill: string; d: string }) => [l.fill, l.d])));
       }
-      assert(frameHashes.size >= 3, `${role.id}:${clipObj.id} visually animates across frames`);
-      // Verify at least 2 independent parts change across the clip (true local articulation, not static or uniform translation)
+      assert(frameHashes.size >= 6, `${role.id}:${clipObj.id} has smooth multi-frame progression`);
       const movingParts = [...partMotionSignatures.values()].filter((s) => s.size > 1).length;
       assert(movingParts >= 2, `${role.id}:${clipObj.id} articulates multiple skeletal parts independently`);
 

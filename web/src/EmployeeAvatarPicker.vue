@@ -142,7 +142,7 @@ async function upload(event) {
 .role-card { display: flex; flex-direction: column; align-items: center; gap: 3px; height: auto; min-height: 0; padding: 8px 4px 7px; border: 2px solid transparent; border-radius: 12px; background: var(--surface-2); color: var(--text); transition: background .12s, border-color .12s; }
 .role-card:hover:not(:disabled) { background: var(--accent-softer); }
 .role-card.selected { border-color: var(--accent); background: var(--accent-soft); }
-.role-sprite { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 10px; overflow: hidden; }
+.role-sprite { display: grid; place-items: center; width: 52px; height: 52px; border-radius: 11px; overflow: hidden; }
 .role-name { font-size: 12px; font-weight: 600; line-height: 1.25; }
 .role-action { color: var(--muted); font-size: 10px; line-height: 1.2; }
 .avatar-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 0; }

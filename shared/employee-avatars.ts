@@ -26,7 +26,7 @@ export const PIXEL_AVATAR_GENDERS = [
   { id: "male", name: "男生" },
 ] as const;
 
-/** Pixel citizen roles across genders and professions; 32×32 sprites & 5+ per-role animation sets live in web/src/pixel-avatar.js. */
+/** Pixel citizen roles across genders and professions; 64×64 sprites & 5+ per-role animation sets live in web/src/pixel-avatar.js. */
 export const PIXEL_AVATAR_ROLES = [
   { id: "coder", name: "程序员", gender: "male" as PixelGender, action: "敲到冒火", actions: ["敲到冒火", "咖啡续命", "全绿庆祝", "蓝屏瘫倒", "疯狂抓虫"] as const, defaultColor: "blue" },
   { id: "doctor", name: "医生", gender: "female" as PixelGender, action: "听诊弹飞", actions: ["听诊弹飞", "狂写病历", "巨型针筒", "电击除颤", "挂瓶回血"] as const, defaultColor: "teal" },

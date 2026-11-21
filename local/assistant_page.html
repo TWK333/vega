@@ -385,15 +385,15 @@
 </div>
 
 <script>
-/* 热心市民像素小人头像：与 web/src/pixel-rig.js + pixel-roles-*.js + pixel-avatar.js（32×32 骨骼拆分 + 每职业 5 组关键帧动画）同步，暴露 window.PixelAvatar。 */
+/* 热心市民像素小人头像：与 web/src/pixel-rig.js + pixel-roles-*.js + pixel-avatar.js（64×64 骨骼拆分 + 每职业 5 组 12–20 帧流畅关键帧动画）同步，暴露 window.PixelAvatar。 */
 (function () {
-// 32×32 Skeletal Pixel Rig & Keyframe Compositor Engine.
-// Each character is split into 7 independent parts:
-//   head (hair/hat/face expression), torso, armL, armR, legL, legR, prop.
-// Each animation clip stores a table of per-part keyframes { dx, dy, variant, flip, visible }
-// so limbs, head, torso and props move with true local articulation instead of whole-body sliding.
+// 64×64 Skeletal Pixel Rig & Smooth Keyframe Arc-Interpolation Engine.
+// Each character consists of 7 independent 64×64 skeletal parts:
+//   head (hair/hat/expression), torso, armL, armR, legL, legR, prop.
+// Each animation clip stores 12–20 per-part keyframes { dx, dy, variant, flip, visible }
+// generated with anatomical joint-arc transitions and smooth eased trajectories.
 
-const PIXEL_GRID_SIZE = 32;
+const PIXEL_GRID_SIZE = 64;
 const RIG_PARTS = Object.freeze(["head", "torso", "armL", "armR", "legL", "legR", "prop"]);
 
 /** Mix a #rrggbb color toward white (amount > 0) or black (amount < 0). */
@@ -405,11 +405,11 @@ function shade(hex, amount) {
 }
 
 // ============================================================================
-// Low-level 32×32 Grid Primitives
+// Low-level 64×64 Grid Primitives & Pixel-Art 2× Bevel Upscaler
 // ============================================================================
 
-function blank() {
-  return Array.from({ length: PIXEL_GRID_SIZE }, () => Array(PIXEL_GRID_SIZE).fill("."));
+function blank(size = PIXEL_GRID_SIZE) {
+  return Array.from({ length: size }, () => Array(size).fill("."));
 }
 
 function clone(src) {
@@ -417,29 +417,31 @@ function clone(src) {
 }
 
 function px(g, x, y, ch) {
-  if (x >= 0 && x < PIXEL_GRID_SIZE && y >= 0 && y < PIXEL_GRID_SIZE) g[y][x] = ch;
+  if (x >= 0 && x < g.length && y >= 0 && y < g.length) g[y][x] = ch;
   return g;
 }
 
 function fill(g, x, y, w, h, ch) {
+  const n = g.length;
   for (let r = y; r < y + h; r++) {
-    if (r < 0 || r >= PIXEL_GRID_SIZE) continue;
+    if (r < 0 || r >= n) continue;
     for (let c = x; c < x + w; c++) {
-      if (c >= 0 && c < PIXEL_GRID_SIZE) g[r][c] = ch;
+      if (c >= 0 && c < n) g[r][c] = ch;
     }
   }
   return g;
 }
 
-/** Stamp an ASCII art patch at (ox, oy). `.` keeps existing pixel, `_` erases to transparent. */
+/** Stamp a native-resolution ASCII patch at (ox, oy). `.` keeps existing pixel, `_` erases to transparent. */
 function stamp(target, ox, oy, lines) {
+  const n = target.length;
   for (let r = 0; r < lines.length; r++) {
     const y = oy + r;
-    if (y < 0 || y >= PIXEL_GRID_SIZE) continue;
+    if (y < 0 || y >= n) continue;
     const row = lines[r];
     for (let c = 0; c < row.length; c++) {
       const x = ox + c;
-      if (x < 0 || x >= PIXEL_GRID_SIZE) continue;
+      if (x < 0 || x >= n) continue;
       const ch = row[c];
       if (ch === ".") continue;
       target[y][x] = ch === "_" ? "." : ch;
@@ -448,50 +450,112 @@ function stamp(target, ox, oy, lines) {
   return target;
 }
 
-/** Create a 32×32 part sprite from an ASCII patch at (ox, oy). */
-function partPatch(ox, oy, lines) {
-  return stamp(blank(), ox, oy, lines);
+/**
+ * Stamp a 64×64-coordinate ASCII art patch into 64×64 space using EPX-style pixel-art corner beveling,
+ * turning chunky diagonal staircases into crisp, organic 64×64 pixel curves while staying 100% pixel art.
+ */
+function stamp2x(target, ox32, oy32, lines, smooth = true) {
+  const h = lines.length, w = Math.max(0, ...lines.map((l) => l.length));
+  const at = (c, r) => (r >= 0 && r < h && c >= 0 && c < lines[r].length ? lines[r][c] : ".");
+  const solid = (ch) => ch !== "." && ch !== "_";
+  for (let r = 0; r < h; r++) {
+    for (let c = 0; c < lines[r].length; c++) {
+      const P = at(c, r);
+      if (P === ".") continue;
+      const x = (ox32 + c) * 2, y = (oy32 + r) * 2;
+      if (P === "_") {
+        fill(target, x, y, 2, 2, ".");
+        continue;
+      }
+      if (!smooth) {
+        fill(target, x, y, 2, 2, P);
+        continue;
+      }
+      const U = at(c, r - 1), D = at(c, r + 1), L = at(c - 1, r), R = at(c + 1, r);
+      let q0 = P, q1 = P, q2 = P, q3 = P;
+      // EPX corner smoothing: blend inner corners where orthogonal neighbors match & differ from opposite pair
+      if (U === L && U !== D && L !== R && solid(U)) q0 = U;
+      if (U === R && U !== D && R !== L && solid(U)) q1 = U;
+      if (D === L && D !== U && L !== R && solid(D)) q2 = D;
+      if (D === R && D !== U && R !== L && solid(D)) q3 = D;
+      // Outer silhouette corner chamfer: soften isolated 90° protruding corners on multi-pixel shapes
+      const count = (solid(U) ? 1 : 0) + (solid(D) ? 1 : 0) + (solid(L) ? 1 : 0) + (solid(R) ? 1 : 0);
+      if (count >= 2) {
+        if (!solid(U) && !solid(L) && solid(D) && solid(R)) q0 = ".";
+        if (!solid(U) && !solid(R) && solid(D) && solid(L)) q1 = ".";
+        if (!solid(D) && !solid(L) && solid(U) && solid(R)) q2 = ".";
+        if (!solid(D) && !solid(R) && solid(U) && solid(L)) q3 = ".";
+      }
+      if (q0 !== ".") px(target, x, y, q0);
+      if (q1 !== ".") px(target, x + 1, y, q1);
+      if (q2 !== ".") px(target, x, y + 1, q2);
+      if (q3 !== ".") px(target, x + 1, y + 1, q3);
+    }
+  }
+  return target;
 }
 
-/** Horizontally flip a 32×32 part around the sprite center axis (x ↔ 31 - x). */
+/** Stamp a 32-space FX patch directly at native 64×64 pixel offset (ox64, oy64) so 1px 64×64 drift is crisp. */
+function stamp2xAt64(target, ox64, oy64, lines) {
+  for (let r = 0; r < lines.length; r++) {
+    const row = lines[r];
+    for (let c = 0; c < row.length; c++) {
+      const ch = row[c];
+      if (ch === ".") continue;
+      fill(target, ox64 + c * 2, oy64 + r * 2, 2, 2, ch === "_" ? "." : ch);
+    }
+  }
+  return target;
+}
+
+/** Create a 64×64 part sprite from a 32-space patch (with EPX pixel beveling for smooth 64×64 pixel craft). */
+function partPatch(ox32, oy32, lines, smooth = true) {
+  return stamp2x(blank(), ox32, oy32, lines, smooth);
+}
+
+/** Create a 64×64 part sprite directly from native 64×64 coordinates. */
+function partNative(ox64, oy64, lines) {
+  return stamp(blank(), ox64, oy64, lines);
+}
+
+/** Horizontally flip a 64×64 part around the center axis (x ↔ 63 - x). */
 function flipMatrixH(src) {
-  const out = blank();
-  for (let y = 0; y < PIXEL_GRID_SIZE; y++) {
-    for (let x = 0; x < PIXEL_GRID_SIZE; x++) {
+  const n = src.length, out = blank(n);
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
       const ch = src[y][x];
-      if (ch !== ".") out[y][PIXEL_GRID_SIZE - 1 - x] = ch;
+      if (ch !== ".") out[y][n - 1 - x] = ch;
     }
   }
   return out;
 }
 
-/** Blit a 32×32 part matrix onto `target` with local offset `(dx, dy)` and optional horizontal flip. */
 function blitPart(target, src, dx = 0, dy = 0, flip = false) {
   if (!src) return;
-  const mat = flip ? flipMatrixH(src) : src;
-  for (let y = 0; y < PIXEL_GRID_SIZE; y++) {
+  const n = target.length, mat = flip ? flipMatrixH(src) : src;
+  for (let y = 0; y < n; y++) {
     const ny = y + dy;
-    if (ny < 0 || ny >= PIXEL_GRID_SIZE) continue;
+    if (ny < 0 || ny >= n) continue;
     const row = mat[y];
-    for (let x = 0; x < PIXEL_GRID_SIZE; x++) {
+    for (let x = 0; x < n; x++) {
       const ch = row[x];
       if (ch === ".") continue;
       const nx = x + dx;
-      if (nx >= 0 && nx < PIXEL_GRID_SIZE) target[ny][nx] = ch;
+      if (nx >= 0 && nx < n) target[ny][nx] = ch;
     }
   }
 }
 
-/** Add a crisp 1px dark-ink silhouette outline around solid body/prop pixels (skipping shadow `Z`). */
+/** Add a delicate, crisp 1px native-64×64 dark-ink outline around solid body/prop pixels (skipping `Z`). */
 function outline(src, ch = "O") {
-  const out = clone(src);
+  const n = src.length, out = clone(src);
   const solid = (x, y) => {
-    if (x < 0 || x >= PIXEL_GRID_SIZE || y < 0 || y >= PIXEL_GRID_SIZE) return false;
+    if (x < 0 || x >= n || y < 0 || y >= n) return false;
     const c = src[y][x];
     return c !== "." && c !== "Z" && c !== ch;
   };
-  for (let y = 0; y < PIXEL_GRID_SIZE; y++) {
-    for (let x = 0; x < PIXEL_GRID_SIZE; x++) {
+  for (let y = 0; y < n; y++) {
+    for (let x = 0; x < n; x++) {
       if (src[y][x] !== ".") continue;
       if (solid(x - 1, y) || solid(x + 1, y) || solid(x, y - 1) || solid(x, y + 1)) out[y][x] = ch;
     }
@@ -499,21 +563,20 @@ function outline(src, ch = "O") {
   return out;
 }
 
-/** Overlay a translucent/tinted silhouette copy of `src` shifted by (dx, dy) BEHIND `target`. */
 function blitAfterimage(target, src, dx, dy, tint = "c") {
-  for (let y = 0; y < PIXEL_GRID_SIZE; y++) {
+  const n = target.length;
+  for (let y = 0; y < n; y++) {
     const ny = y + dy;
-    if (ny < 0 || ny >= PIXEL_GRID_SIZE) continue;
-    for (let x = 0; x < PIXEL_GRID_SIZE; x++) {
+    if (ny < 0 || ny >= n) continue;
+    for (let x = 0; x < n; x++) {
       const ch = src[y][x];
       if (ch === "." || ch === "Z") continue;
       const nx = x + dx;
-      if (nx >= 0 && nx < PIXEL_GRID_SIZE && target[ny][nx] === ".") target[ny][nx] = tint;
+      if (nx >= 0 && nx < n && target[ny][nx] === ".") target[ny][nx] = tint;
     }
   }
 }
 
-/** Gintama-style petrified grayscale despair transform. */
 function petrifyMatrix(src) {
   const map = {
     S: "w", s: "G", P: "w", m: "g", A: "G", a: "w", d: "g", H: "g", h: "G", k: "O",
@@ -522,13 +585,17 @@ function petrifyMatrix(src) {
   return src.map((row) => row.map((c) => map[c] || c));
 }
 
-/** Shrink a 32×32 articulated pose to 50% anchored on the floor (for scientist shrink gag). */
-function miniMatrix(src) {
-  const out = blank();
-  for (let y = 0; y < 16; y++) {
-    for (let x = 0; x < 16; x++) {
-      const c = src[y * 2]?.[x * 2];
-      if (c && c !== "." && c !== "Z") out[y + 13][x + 8] = c;
+function scaleMatrix(src, factor) {
+  const n = src.length, out = blank(n);
+  const dstSize = Math.max(8, Math.round(n * factor));
+  const ox = Math.floor((n - dstSize) / 2);
+  const oy = Math.min(n - 6 - dstSize, Math.round(58 - dstSize));
+  for (let y = 0; y < dstSize; y++) {
+    const sy = Math.min(n - 1, Math.floor(y / factor));
+    for (let x = 0; x < dstSize; x++) {
+      const sx = Math.min(n - 1, Math.floor(x / factor));
+      const c = src[sy][sx];
+      if (c && c !== "." && c !== "Z") px(out, ox + x, oy + y, c);
     }
   }
   return out;
@@ -547,7 +614,7 @@ const SKIN = {
 };
 
 const BASE_PALETTE = {
-  O: "#1d2133", E: "#141826", N: "#2c3954", n: "#415273",
+  O: "#1c2033", E: "#141826", N: "#2c3954", n: "#44567a",
   W: "#ffffff", w: "#cbd5e1", G: "#94a3b8", g: "#475569",
   B: "#7a472a", b: "#dba86c", K: "#4e2d1a",
   R: "#ef4444", r: "#b91c1c", Y: "#fbbf24", y: "#fef08a",
@@ -569,81 +636,127 @@ function makePalette(skin, hair, extra = {}) {
 }
 
 // ============================================================================
-// Articulated Skeletal Part Builders (head, torso, armL, armR, legL, legR)
+// Native 64×64 Skeletal Part Builders (head, torso, armL, armR, legL, legR)
 // ============================================================================
 
-function drawBaseHead({ gender = "male", hairStyle = "short", eyeStyle, hatFn, beardFn } = {}) {
+function drawBaseHead64({ gender = "male", hairStyle = "short", eyeStyle, hatFn, beardFn } = {}) {
   const g = blank();
   const isF = gender === "female";
 
-  // Back hair layer
+  // 1. Back hair silhouettes (native 64×64 curves & layered locks)
   if (hairStyle === "long") {
-    fill(g, 8, 9, 16, 10, "H");
-    fill(g, 8, 15, 2, 5, "k"); fill(g, 22, 15, 2, 5, "k");
+    fill(g, 16, 18, 32, 21, "H");
+    fill(g, 15, 22, 34, 15, "H");
+    fill(g, 16, 31, 4, 9, "k"); fill(g, 44, 31, 4, 9, "k");
+    px(g, 15, 37, "k"); px(g, 48, 37, "k");
   } else if (hairStyle === "wavy") {
-    fill(g, 7, 9, 18, 9, "H");
-    stamp(g, 7, 16, ["HH..............HH", "kH..............Hk", ".k..............k."]);
+    fill(g, 15, 18, 34, 19, "H");
+    fill(g, 13, 23, 38, 13, "H");
+    fill(g, 14, 34, 5, 6, "k"); fill(g, 45, 34, 5, 6, "k");
+    fill(g, 15, 39, 3, 2, "k"); fill(g, 46, 39, 3, 2, "k");
   } else if (hairStyle === "ponytail") {
-    stamp(g, 22, 9, ["HHH.", ".HHH", "..Hk", "..kk", "...k"]);
+    stamp(g, 44, 17, [
+      "HHHHH..", ".HHHHHH", "..HHHHH", "...HHHk", "...HHkk", "....kkk", ".....kk",
+    ]);
+    px(g, 44, 18, "h"); px(g, 45, 18, "h");
   } else if (hairStyle === "bob") {
-    fill(g, 8, 9, 16, 9, "H");
-    fill(g, 8, 16, 2, 2, "k"); fill(g, 22, 16, 2, 2, "k");
+    fill(g, 16, 18, 32, 18, "H");
+    fill(g, 15, 22, 34, 12, "H");
+    fill(g, 16, 32, 4, 4, "k"); fill(g, 44, 32, 4, 4, "k");
   }
 
-  // Face & ears
-  fill(g, 10, 9, 12, 7, "S");
-  fill(g, 11, 16, 10, 1, "s");
-  px(g, 10, 15, "s"); px(g, 21, 15, "s");
-  px(g, 9, 12, "S"); px(g, 9, 13, "s");
-  px(g, 22, 12, "S"); px(g, 22, 13, "s");
+  // 2. Sculpted 64×64 Chibi Face (x=20..43, y=18..33) with chamfered jaw & soft ears
+  fill(g, 20, 18, 24, 14, "S");
+  fill(g, 22, 32, 20, 2, "S");
+  fill(g, 23, 33, 18, 1, "s"); // delicate chin shadow
+  px(g, 20, 31, "s"); px(g, 21, 32, "s"); px(g, 43, 31, "s"); px(g, 42, 32, "s");
+  px(g, 20, 31, "."); px(g, 43, 31, "."); // rounded cheeks
+  // Rounded ears
+  fill(g, 18, 24, 2, 4, "S"); px(g, 18, 24, "."); px(g, 19, 27, "s");
+  fill(g, 44, 24, 2, 4, "S"); px(g, 45, 24, "."); px(g, 44, 27, "s");
 
-  // Crown & bangs
+  // 3. Native 64×64 Layered Hair Crown & Specular Shine
   if (hairStyle === "spiky") {
-    stamp(g, 9, 5, [
-      "...H...HH..H..", "..HHHHHHHHHH..", ".HHhhhHHhhhHH.",
-      ".HHHHHHHHHHHH.", ".HkkHSSSSSkkH.", ".Hk........kH.",
+    fill(g, 19, 13, 26, 7, "H");
+    fill(g, 21, 11, 22, 3, "H");
+    // Dynamic hair spikes
+    stamp(g, 20, 8, [
+      "..HH.....HHH...HH...",
+      ".HHHH...HHHHH.HHHH..",
+      "HHHHHHHHHHHHHHHHHHHH",
     ]);
+    // Curved highlight band + bangs
+    fill(g, 23, 14, 6, 2, "h"); fill(g, 34, 14, 6, 2, "h");
+    fill(g, 18, 18, 3, 6, "H"); fill(g, 43, 18, 3, 6, "H");
+    fill(g, 20, 19, 4, 2, "k"); fill(g, 27, 19, 4, 2, "k"); fill(g, 35, 19, 4, 2, "k"); fill(g, 41, 19, 3, 2, "k");
   } else if (hairStyle === "bun") {
-    stamp(g, 12, 3, ["..HHHH..", ".HHhhHH.", ".HHHHHH."]);
-    stamp(g, 9, 6, [
-      "..HHHHHHHHHH..", ".HHhhHHHHhhHH.", ".HHHHHHHHHHHH.",
-      ".HkkHHHHHHkkH.", ".Hk........kH.",
-    ]);
+    // High top bun with curved highlight
+    fill(g, 26, 6, 12, 7, "H");
+    px(g, 26, 6, "."); px(g, 37, 6, "."); px(g, 26, 12, "."); px(g, 37, 12, ".");
+    fill(g, 28, 7, 6, 2, "h");
+    fill(g, 19, 13, 26, 7, "H"); fill(g, 21, 11, 22, 3, "H");
+    fill(g, 23, 14, 7, 2, "h"); fill(g, 34, 14, 6, 2, "h");
+    fill(g, 18, 18, 3, 6, "H"); fill(g, 43, 18, 3, 6, "H");
+    fill(g, 20, 19, 24, 1, "k");
   } else if (hairStyle === "fluffy") {
-    stamp(g, 8, 5, [
-      "...HHHHHHHHHH...", ".HHHhhhHHhhhHHH.", ".HHHHHHHHHHHHHH.",
-      "HHkHHkHHHHkHHkHH", "Hk............kH",
-    ]);
+    fill(g, 17, 12, 30, 8, "H"); fill(g, 20, 10, 24, 3, "H");
+    px(g, 17, 12, "."); px(g, 46, 12, ".");
+    fill(g, 21, 13, 8, 2, "h"); fill(g, 34, 13, 8, 2, "h");
+    fill(g, 16, 18, 4, 6, "H"); fill(g, 44, 18, 4, 6, "H");
+    fill(g, 20, 19, 5, 2, "k"); fill(g, 29, 19, 6, 2, "k"); fill(g, 39, 19, 5, 2, "k");
   } else {
-    stamp(g, 9, 6, [
-      "..HHHHHHHHHH..", ".HHhhhHHhhhHH.", ".HHHHHHHHHHHH.",
-      ".HkkHHkHHkHkH.", ".Hk........kH.",
-    ]);
+    fill(g, 19, 13, 26, 7, "H"); fill(g, 21, 11, 22, 3, "H");
+    px(g, 19, 13, "."); px(g, 44, 13, ".");
+    fill(g, 23, 14, 7, 2, "h"); fill(g, 34, 14, 7, 2, "h");
+    fill(g, 18, 18, 3, 6, "H"); fill(g, 43, 18, 3, 6, "H");
+    fill(g, 20, 19, 5, 2, "k"); fill(g, 28, 19, 5, 2, "k"); fill(g, 37, 19, 6, 2, "k");
   }
 
-  // Default eyes & mouth
+  // 4. Native 64×64 Expressive Anime Eyes, Brows, Blush & Smile
   const eStyle = eyeStyle || (isF ? "sparkle" : "crisp");
   if (eStyle === "sparkle") {
-    stamp(g, 11, 11, ["WE", "EE", "kE"]); stamp(g, 19, 11, ["WE", "EE", "Ek"]);
-    stamp(g, 10, 13, ["P", "P"]); stamp(g, 21, 13, ["P", "P"]);
-    stamp(g, 15, 14, ["mm"]);
+    // 4×5 sparkling anime eyes with top lash, bright catchlight, and soft rosy cheeks
+    stamp(g, 22, 22, ["EEEE", "WWEE", "WEEE", "EEWE", "kEEk"]);
+    stamp(g, 38, 22, ["EEEE", "WWEE", "WEEE", "EEWE", "kEEk"]);
+    fill(g, 20, 27, 3, 2, "P"); fill(g, 41, 27, 3, 2, "P");
+    stamp(g, 29, 29, ["m....m", ".mmmm."]);
   } else if (eStyle === "crisp") {
-    stamp(g, 11, 10, ["kk"]); stamp(g, 19, 10, ["kk"]);
-    stamp(g, 11, 11, ["WE", "EE"]); stamp(g, 19, 11, ["WE", "EE"]);
-    stamp(g, 15, 14, ["mm"]);
+    // Sculpted male brows + 4×4 crisp eyes with catchlight
+    fill(g, 22, 20, 4, 1, "k"); fill(g, 38, 20, 4, 1, "k");
+    stamp(g, 22, 22, ["WWEE", "WEEE", "EEEE", "EEkE"]);
+    stamp(g, 38, 22, ["WWEE", "WEEE", "EEEE", "EEkE"]);
+    stamp(g, 29, 29, [".mmmm."]);
   } else if (eStyle === "glasses") {
-    stamp(g, 10, 10, ["OOOO..OOOO"]);
-    stamp(g, 10, 11, ["OWEOOOOWEO", "OEEO..OEEO", "OOOO..OOOO"]);
-    stamp(g, 15, 14, ["mm"]);
+    stamp(g, 20, 21, [
+      ".OOOOOOO........OOOOOOO.",
+      "OcWWEEccOOOOOOOOccWWEEcO",
+      "OcWEEEccO......OccWEEEcO",
+      "OcEEEEccO......OccEEEEcO",
+      "OccEEcccO......OcccEEccO",
+      ".OOOOOOO........OOOOOOO.",
+    ]);
+    stamp(g, 29, 29, [".mmmm."]);
   } else if (eStyle === "goldglasses") {
-    stamp(g, 10, 10, ["YYYY..YYYY"]);
-    stamp(g, 10, 11, ["YWEYYYYWEY", "YEEY..YEEY", "YYYY..YYYY"]);
-    px(g, 10, 14, "P"); px(g, 21, 14, "P");
-    stamp(g, 15, 14, ["mm"]);
+    stamp(g, 20, 21, [
+      ".YYYYYYY........YYYYYYY.",
+      "YcWWEEccYYYYYYYYccWWEEcY",
+      "YcWEEEccY......YccWEEEcY",
+      "YcEEEEccY......YccEEEEcY",
+      "YccEEcccY......YcccEEccY",
+      ".YYYYYYY........YYYYYYY.",
+    ]);
+    fill(g, 20, 27, 3, 2, "P"); fill(g, 41, 27, 3, 2, "P");
+    stamp(g, 29, 29, ["m....m", ".mmmm."]);
   } else if (eStyle === "shades") {
-    stamp(g, 10, 11, ["OOOO..OOOO", "OgOO..OOgO", ".OO....OO."]);
-    px(g, 10, 14, "P"); px(g, 21, 14, "P");
-    stamp(g, 15, 14, ["mm"]);
+    stamp(g, 20, 21, [
+      ".OOOOOOO........OOOOOOO.",
+      "OOWgOOOOOOOOOOOOOWgOOOOO",
+      "OWgOOOOOO......OWgOOOOOO",
+      ".OOOOOOO........OOOOOOO.",
+      "..OOOOO..........OOOOO..",
+    ]);
+    fill(g, 20, 27, 3, 2, "P"); fill(g, 41, 27, 3, 2, "P");
+    stamp(g, 29, 29, [".mmmm."]);
   }
 
   if (beardFn) beardFn(g);
@@ -651,31 +764,64 @@ function drawBaseHead({ gender = "male", hairStyle = "short", eyeStyle, hatFn, b
   return g;
 }
 
-/** Build the full dictionary of head expression & gag variants for a character. */
+/** Build the full dictionary of native 64×64 head expression & gag variants. */
 function buildHeadParts(spec) {
-  const normal = spec.customHead ? spec.customHead() : drawBaseHead(spec);
+  const normal = spec.customHead ? spec.customHead() : drawBaseHead64(spec);
   const mod = (fn) => { const c = clone(normal); fn(c); return c; };
+  const hasGlasses = spec.eyeStyle === "glasses" || spec.eyeStyle === "goldglasses";
+  const eyeFill = hasGlasses ? "c" : "S";
+  const eyeH = hasGlasses ? 4 : 5;
+  const clearEyes = (g) => { fill(g, 22, 22, 4, eyeH, eyeFill); fill(g, 38, 22, 4, eyeH, eyeFill); };
   const parts = {
     normal,
-    blink: mod((g) => { stamp(g, 11, 11, ["SS", "kk", "SS"]); stamp(g, 19, 11, ["SS", "kk", "SS"]); }),
-    happy: mod((g) => { stamp(g, 11, 11, ["EE", "SS", "SS"]); stamp(g, 19, 11, ["EE", "SS", "SS"]); stamp(g, 15, 14, ["mm", "WW"]); }),
-    glow: mod((g) => { stamp(g, 11, 11, ["YY", "YY"]); stamp(g, 19, 11, ["YY", "YY"]); }),
-    glowF: mod((g) => { stamp(g, 11, 11, ["FF", "FF"]); stamp(g, 19, 11, ["FF", "FF"]); stamp(g, 14, 14, [".RR.", "RWW."]); }),
-    glowC: mod((g) => { stamp(g, 11, 11, ["CC", "CC"]); stamp(g, 19, 11, ["CC", "CC"]); }),
-    glowV: mod((g) => { stamp(g, 11, 11, ["VV", "VV"]); stamp(g, 19, 11, ["VV", "VV"]); }),
-    glowM: mod((g) => { stamp(g, 11, 11, ["MM", "MM"]); stamp(g, 19, 11, ["MM", "MM"]); }),
-    glowR: mod((g) => { stamp(g, 11, 11, ["RR", "RR"]); stamp(g, 19, 11, ["RR", "RR"]); }),
-    shock: mod((g) => { stamp(g, 11, 11, ["WW", "WE", "WW"]); stamp(g, 19, 11, ["WW", "EW", "WW"]); stamp(g, 15, 14, ["OO", "RR"]); }),
-    dizzy: mod((g) => { stamp(g, 11, 11, ["EW", "WE"]); stamp(g, 19, 11, ["WE", "EW"]); stamp(g, 15, 14, ["mm", "SS"]); }),
-    shout: mod((g) => { stamp(g, 14, 14, [".RR.", "RWW."]); }),
-    flash: mod((g) => { stamp(g, 10, 11, ["WWWWWWWWWWWW", ".WWWWWWWWWW."]); }),
+    blink: mod((g) => {
+      clearEyes(g);
+      fill(g, 22, 24, 4, 1, "k"); fill(g, 38, 24, 4, 1, "k");
+    }),
+    happy: mod((g) => {
+      clearEyes(g);
+      stamp(g, 22, 23, [".EE.", "E..E"]); stamp(g, 38, 23, [".EE.", "E..E"]);
+      stamp(g, 29, 28, ["mmmmmm", "mWWWWm", ".mmmm."]);
+    }),
+    glow: mod((g) => { fill(g, 22, 22, 4, 4, "Y"); fill(g, 38, 22, 4, 4, "Y"); px(g, 23, 23, "W"); px(g, 39, 23, "W"); }),
+    glowF: mod((g) => {
+      fill(g, 22, 22, 4, 4, "F"); fill(g, 38, 22, 4, 4, "F");
+      px(g, 23, 23, "Y"); px(g, 39, 23, "Y");
+      stamp(g, 28, 28, [".RRRRRR.", "RWWWWWWR", ".RRRRRR."]);
+    }),
+    glowC: mod((g) => { fill(g, 22, 22, 4, 4, "C"); fill(g, 38, 22, 4, 4, "C"); px(g, 23, 23, "W"); px(g, 39, 23, "W"); }),
+    glowV: mod((g) => { fill(g, 22, 22, 4, 4, "V"); fill(g, 38, 22, 4, 4, "V"); px(g, 23, 23, "W"); px(g, 39, 23, "W"); }),
+    glowM: mod((g) => { fill(g, 22, 22, 4, 4, "M"); fill(g, 38, 22, 4, 4, "M"); px(g, 23, 23, "W"); px(g, 39, 23, "W"); }),
+    glowR: mod((g) => { fill(g, 22, 22, 4, 4, "R"); fill(g, 38, 22, 4, 4, "R"); px(g, 23, 23, "Y"); px(g, 39, 23, "Y"); }),
+    shock: mod((g) => {
+      clearEyes(g);
+      stamp(g, 22, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
+      stamp(g, 38, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
+      stamp(g, 29, 28, [".OOOO.", "ORRRRO", "ORRRRO", ".OOOO."]);
+    }),
+    dizzy: mod((g) => {
+      clearEyes(g);
+      stamp(g, 22, 22, ["E..E", ".EE.", ".EE.", "E..E"]);
+      stamp(g, 38, 22, ["E..E", ".EE.", ".EE.", "E..E"]);
+      stamp(g, 29, 29, ["m.mm.m"]);
+    }),
+    shout: mod((g) => {
+      stamp(g, 28, 28, [".RRRRRR.", "RWWWWWWR", "RRRRRRRR", "..RRRR.."]);
+    }),
+    flash: mod((g) => {
+      // Classic Gintama blinding white reflection bar across eyes/glasses!
+      fill(g, 20, 22, 24, 3, "W");
+      fill(g, 22, 25, 20, 1, "c");
+    }),
   };
   if (spec.hatFn) {
-    // Hatless variant for hilarious hat-popping gags (chef, artist, detective, gardener)
-    parts.hatless = drawBaseHead({ ...spec, hatFn: null });
+    parts.hatless = drawBaseHead64({ ...spec, hatFn: null });
     parts.hatlessShock = (() => {
       const c = clone(parts.hatless);
-      stamp(c, 11, 11, ["WW", "WE", "WW"]); stamp(c, 19, 11, ["WW", "EW", "WW"]); stamp(c, 15, 14, ["OO", "RR"]);
+      clearEyes(c);
+      stamp(c, 22, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
+      stamp(c, 38, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
+      stamp(c, 29, 28, [".OOOO.", "ORRRRO", "ORRRRO", ".OOOO."]);
       return c;
     })();
   }
@@ -683,171 +829,172 @@ function buildHeadParts(spec) {
   return parts;
 }
 
-/** Build the torso part (with normal + slight lean/crouch variants). */
+/** Build native 64×64 detailed occupation torso with 5 smooth lean variants (normal, leanL1, leanL, leanR1, leanR). */
 function buildTorsoParts(coat = "hoodie", extraTorso) {
   const g = blank();
-  fill(g, 14, 17, 4, 1, "s"); // neck
+  fill(g, 28, 33, 8, 3, "s"); // neck
 
   if (coat === "hoodie") {
-    fill(g, 10, 18, 12, 7, "A"); fill(g, 10, 18, 3, 2, "a"); fill(g, 19, 20, 3, 5, "d"); fill(g, 10, 24, 12, 1, "d");
-    px(g, 14, 19, "W"); px(g, 14, 20, "W"); px(g, 17, 19, "W"); px(g, 17, 20, "W");
-    fill(g, 12, 22, 8, 2, "d"); fill(g, 13, 22, 6, 1, "A");
+    fill(g, 20, 36, 24, 14, "A"); fill(g, 20, 36, 6, 4, "a"); fill(g, 38, 40, 6, 10, "d"); fill(g, 20, 48, 24, 2, "d");
+    fill(g, 28, 37, 2, 5, "W"); fill(g, 34, 37, 2, 5, "W");
+    fill(g, 24, 44, 16, 4, "d"); fill(g, 26, 44, 12, 2, "A");
   } else if (coat === "labcoat") {
-    fill(g, 10, 18, 12, 7, "W"); fill(g, 13, 18, 6, 7, "A"); fill(g, 13, 18, 2, 2, "a");
-    fill(g, 10, 23, 3, 2, "w"); fill(g, 19, 23, 3, 2, "w");
-    px(g, 11, 21, "w"); px(g, 20, 21, "w");
+    fill(g, 20, 36, 24, 14, "W"); fill(g, 26, 36, 12, 14, "A"); fill(g, 26, 36, 4, 4, "a");
+    fill(g, 20, 46, 6, 4, "w"); fill(g, 38, 46, 6, 4, "w");
+    fill(g, 21, 42, 4, 1, "w"); fill(g, 39, 42, 4, 1, "w"); // pockets
   } else if (coat === "chef") {
-    fill(g, 10, 18, 12, 7, "W"); fill(g, 19, 20, 3, 5, "w"); fill(g, 10, 24, 12, 1, "w");
-    stamp(g, 13, 17, ["aAAAAd", ".AAd.."]);
-    px(g, 14, 20, "g"); px(g, 17, 20, "g"); px(g, 14, 22, "g"); px(g, 17, 22, "g");
+    fill(g, 20, 36, 24, 14, "W"); fill(g, 38, 40, 6, 10, "w"); fill(g, 20, 48, 24, 2, "w");
+    stamp(g, 26, 34, ["..aaaaaaaa..", "aaAAAAAAAAdd", "..AAAAdddd..", "....AAdd...."]);
+    fill(g, 27, 40, 2, 2, "g"); fill(g, 35, 40, 2, 2, "g");
+    fill(g, 27, 44, 2, 2, "g"); fill(g, 35, 44, 2, 2, "g");
   } else if (coat === "apron") {
-    fill(g, 10, 18, 12, 7, "W"); fill(g, 12, 18, 8, 7, "A"); fill(g, 12, 18, 2, 2, "a");
-    fill(g, 18, 20, 2, 5, "d"); fill(g, 10, 23, 2, 2, "w"); fill(g, 20, 23, 2, 2, "w");
+    fill(g, 20, 36, 24, 14, "W"); fill(g, 24, 36, 16, 14, "A"); fill(g, 24, 36, 4, 4, "a");
+    fill(g, 36, 40, 4, 10, "d"); fill(g, 20, 46, 4, 4, "w"); fill(g, 40, 46, 4, 4, "w");
+    fill(g, 27, 44, 10, 3, "d"); fill(g, 28, 44, 8, 2, "a"); // front pocket
   } else if (coat === "cafe") {
-    fill(g, 10, 18, 12, 7, "W"); fill(g, 12, 19, 8, 6, "B");
-    fill(g, 12, 18, 1, 2, "B"); fill(g, 19, 18, 1, 2, "B");
-    fill(g, 14, 21, 4, 2, "A"); fill(g, 18, 20, 2, 5, "K");
+    fill(g, 20, 36, 24, 14, "W"); fill(g, 24, 38, 16, 12, "B");
+    fill(g, 24, 36, 2, 4, "B"); fill(g, 38, 36, 2, 4, "B");
+    fill(g, 28, 42, 8, 4, "A"); fill(g, 29, 43, 6, 2, "a"); fill(g, 36, 40, 4, 10, "K");
   } else if (coat === "trench") {
-    fill(g, 10, 18, 12, 7, "b"); fill(g, 14, 18, 4, 3, "W"); fill(g, 15, 18, 2, 4, "A");
-    fill(g, 10, 22, 12, 1, "B"); px(g, 15, 22, "Y"); px(g, 16, 22, "Y"); fill(g, 19, 20, 3, 5, "B");
+    fill(g, 20, 36, 24, 14, "b"); fill(g, 28, 36, 8, 6, "W"); fill(g, 30, 36, 4, 8, "A");
+    fill(g, 20, 44, 24, 2, "B"); fill(g, 30, 44, 4, 2, "Y"); fill(g, 38, 40, 6, 10, "B");
   } else if (coat === "fire") {
-    fill(g, 10, 18, 12, 7, "A"); fill(g, 19, 20, 3, 5, "d");
-    fill(g, 10, 20, 12, 1, "Y"); fill(g, 10, 23, 12, 1, "Y"); fill(g, 15, 18, 2, 7, "g");
+    fill(g, 20, 36, 24, 14, "A"); fill(g, 38, 40, 6, 10, "d");
+    fill(g, 20, 40, 24, 2, "Y"); fill(g, 20, 46, 24, 2, "Y"); fill(g, 30, 36, 4, 14, "g");
   } else if (coat === "vest") {
-    fill(g, 10, 18, 12, 7, "W"); fill(g, 11, 18, 10, 7, "A");
-    fill(g, 14, 18, 4, 2, "W"); px(g, 15, 19, "d"); px(g, 16, 19, "d"); fill(g, 19, 20, 2, 5, "d");
+    fill(g, 20, 36, 24, 14, "W"); fill(g, 22, 36, 20, 14, "A");
+    fill(g, 28, 36, 8, 4, "W"); fill(g, 30, 38, 4, 2, "d"); fill(g, 38, 40, 4, 10, "d");
   } else if (coat === "overalls") {
-    fill(g, 10, 18, 12, 7, "W"); fill(g, 11, 20, 10, 5, "A");
-    fill(g, 12, 18, 2, 2, "A"); fill(g, 18, 18, 2, 2, "A");
-    px(g, 12, 20, "Y"); px(g, 19, 20, "Y"); fill(g, 14, 22, 4, 2, "d");
+    fill(g, 20, 36, 24, 14, "W"); fill(g, 22, 40, 20, 10, "A");
+    fill(g, 24, 36, 4, 4, "A"); fill(g, 36, 36, 4, 4, "A");
+    fill(g, 25, 40, 2, 2, "Y"); fill(g, 37, 40, 2, 2, "Y"); fill(g, 28, 44, 8, 4, "d");
   } else if (coat === "robe") {
-    fill(g, 9, 18, 14, 8, "A"); fill(g, 9, 18, 3, 2, "a"); fill(g, 20, 20, 3, 6, "d");
-    fill(g, 14, 18, 4, 8, "d"); px(g, 15, 20, "Y"); px(g, 16, 22, "Y"); px(g, 15, 24, "Y");
+    fill(g, 18, 36, 28, 16, "A"); fill(g, 18, 36, 6, 4, "a"); fill(g, 40, 40, 6, 12, "d");
+    fill(g, 28, 36, 8, 16, "d"); fill(g, 30, 40, 4, 2, "Y"); fill(g, 30, 44, 4, 2, "Y"); fill(g, 30, 48, 4, 2, "Y");
   } else if (coat === "jersey") {
-    fill(g, 10, 18, 12, 7, "A"); fill(g, 10, 18, 3, 2, "a"); fill(g, 19, 20, 3, 5, "d");
-    fill(g, 14, 18, 4, 1, "W"); stamp(g, 14, 20, ["WWWW", ".WW.", ".WW."]);
+    fill(g, 20, 36, 24, 14, "A"); fill(g, 20, 36, 6, 4, "a"); fill(g, 38, 40, 6, 10, "d");
+    fill(g, 27, 36, 10, 2, "W"); stamp(g, 28, 40, ["WWWWWWWW", "..WWWW..", "..WWWW..", "..WWWW..", "..WWWW.."]);
   } else if (coat === "pilot") {
-    fill(g, 10, 18, 12, 7, "A"); fill(g, 10, 18, 3, 1, "Y"); fill(g, 19, 18, 3, 1, "Y");
-    fill(g, 14, 18, 4, 4, "W"); fill(g, 15, 18, 2, 4, "O"); fill(g, 19, 20, 3, 5, "d");
-    px(g, 12, 20, "Y"); px(g, 13, 20, "Y");
+    fill(g, 20, 36, 24, 14, "A"); fill(g, 20, 36, 6, 2, "Y"); fill(g, 38, 36, 6, 2, "Y");
+    fill(g, 28, 36, 8, 8, "W"); fill(g, 30, 36, 4, 8, "O"); fill(g, 38, 40, 6, 10, "d");
+    fill(g, 23, 40, 4, 2, "Y");
   } else if (coat === "ninja") {
-    fill(g, 10, 18, 12, 7, "N"); fill(g, 19, 20, 3, 5, "O");
-    stamp(g, 12, 19, ["aA....Aa", "..aAAa..", "....AA.."]); fill(g, 10, 23, 12, 1, "A");
+    fill(g, 20, 36, 24, 14, "N"); fill(g, 38, 40, 6, 10, "O");
+    stamp2x(g, 12, 19, ["aA....Aa", "..aAAa..", "....AA.."], false);
+    fill(g, 20, 46, 24, 2, "A");
   } else if (coat === "spacesuit") {
-    fill(g, 9, 17, 14, 9, "W"); fill(g, 20, 19, 3, 7, "w");
-    fill(g, 11, 17, 10, 2, "A");
-    fill(g, 13, 20, 6, 3, "g"); px(g, 14, 21, "R"); px(g, 16, 21, "V"); px(g, 17, 21, "C");
-    fill(g, 9, 24, 14, 2, "A");
+    fill(g, 18, 34, 28, 18, "W"); fill(g, 40, 38, 6, 14, "w");
+    fill(g, 22, 34, 20, 4, "A");
+    fill(g, 26, 40, 12, 6, "g"); fill(g, 28, 42, 2, 2, "R"); fill(g, 32, 42, 2, 2, "V"); fill(g, 35, 42, 2, 2, "C");
+    fill(g, 18, 48, 28, 4, "A");
   } else {
-    // jacket
-    fill(g, 10, 18, 12, 7, "A"); fill(g, 10, 18, 3, 2, "a"); fill(g, 14, 18, 4, 7, "W"); fill(g, 19, 20, 3, 5, "d");
+    fill(g, 20, 36, 24, 14, "A"); fill(g, 20, 36, 6, 4, "a"); fill(g, 28, 36, 8, 14, "W"); fill(g, 38, 40, 6, 10, "d");
   }
 
   if (extraTorso) extraTorso(g);
-  // Subtle lean variants shift upper chest by 1px while keeping waist anchored!
-  const leanL = blank(), leanR = blank();
-  for (let y = 17; y <= 25; y++) {
-    const shift = y <= 21 ? -1 : 0;
-    for (let x = 0; x < PIXEL_GRID_SIZE; x++) {
-      if (g[y][x] !== ".") {
-        if (x + shift >= 0) leanL[y][x + shift] = g[y][x];
-        if (x - shift < PIXEL_GRID_SIZE) leanR[y][x - shift] = g[y][x];
+
+  const makeLean = (dir, mag) => {
+    const out = blank();
+    for (let y = 33; y <= 51; y++) {
+      const shift = y <= 41 ? dir * mag : y <= 45 ? dir * Math.trunc(mag / 2) : 0;
+      for (let x = 0; x < PIXEL_GRID_SIZE; x++) {
+        if (g[y][x] !== ".") px(out, x + shift, y, g[y][x]);
       }
     }
-  }
-  return { normal: g, leanL, leanR };
+    return out;
+  };
+  return {
+    normal: g,
+    leanL1: makeLean(-1, 1),
+    leanL: makeLean(-1, 2),
+    leanR1: makeLean(1, 1),
+    leanR: makeLean(1, 2),
+  };
 }
 
-/** Build articulated left & right arm pose variants anchored to shoulders (8..9,18) & (22..23,18). */
+/**
+ * Build 10 articulated 64×64 left-arm poses & 11 right-arm poses with smooth intermediate arc angles!
+ * Arc order: back ↔ down ↔ lowOut ↔ mid ↔ highOut ↔ up; down ↔ forwardLow ↔ forward ↔ forwardHigh ↔ salute.
+ */
 function buildArmParts({ sleeveL = "A", sleeveR = "d", hand = "S", cuff = null } = {}) {
-  const makeL = (fn) => { const g = blank(); fn(g, sleeveL, hand); return g; };
-  const makeR = (fn) => { const g = blank(); fn(g, sleeveR, hand); return g; };
+  const drawLimb = (g, segments, s, h) => {
+    for (const [x, y, w, hh, col] of segments) fill(g, x, y, w, hh, col === "s" ? s : col === "h" ? h : col);
+  };
+  const mkL = (segs) => { const g = blank(); drawLimb(g, segs, sleeveL, hand); return g; };
+  const mkR = (segs) => { const g = blank(); drawLimb(g, segs, sleeveR, hand); return g; };
+  const cL = cuff ? [[16, 42, 4, 2, cuff]] : [];
+  const cR = cuff ? [[44, 42, 4, 2, cuff]] : [];
 
   const armL = {
-    down: makeL((g, s, h) => {
-      fill(g, 8, 18, 2, 4, s); if (cuff) fill(g, 8, 21, 2, 1, cuff); fill(g, 8, 22, 2, 2, h);
-    }),
-    up: makeL((g, s, h) => {
-      fill(g, 6, 12, 2, 2, h); fill(g, 6, 14, 2, 3, s); fill(g, 7, 17, 3, 2, s);
-      if (cuff) fill(g, 6, 14, 2, 1, cuff);
-    }),
-    mid: makeL((g, s, h) => {
-      fill(g, 4, 18, 2, 2, h); fill(g, 6, 18, 4, 2, s); if (cuff) fill(g, 6, 18, 1, 2, cuff);
-    }),
-    forward: makeL((g, s, h) => {
-      fill(g, 8, 18, 2, 3, s); fill(g, 9, 20, 3, 2, s); fill(g, 11, 21, 2, 2, h);
-    }),
-    back: makeL((g, s, h) => {
-      fill(g, 7, 18, 3, 2, s); fill(g, 6, 20, 2, 3, s); fill(g, 5, 22, 2, 2, h);
-    }),
-    flex: makeL((g, s, h) => {
-      fill(g, 5, 14, 2, 2, h); fill(g, 5, 16, 2, 3, s); fill(g, 7, 18, 3, 2, s);
-    }),
+    back: mkL([[15, 36, 5, 4, "s"], [13, 40, 4, 5, "s"], [11, 44, 4, 4, "h"]]),
+    down: mkL([[16, 36, 4, 8, "s"], ...cL, [16, 44, 4, 4, "h"]]),
+    lowOut: mkL([[15, 36, 5, 4, "s"], [12, 39, 5, 4, "s"], [10, 42, 4, 4, "h"]]),
+    mid: mkL([[12, 36, 8, 4, "s"], [8, 36, 4, 4, "h"]]),
+    highOut: mkL([[15, 34, 5, 4, "s"], [12, 30, 4, 5, "s"], [9, 27, 4, 4, "h"]]),
+    up: mkL([[14, 34, 6, 4, "s"], [12, 28, 4, 6, "s"], [12, 24, 4, 4, "h"]]),
+    forwardLow: mkL([[16, 36, 4, 5, "s"], [18, 40, 4, 4, "s"], [20, 43, 4, 4, "h"]]),
+    forward: mkL([[16, 36, 4, 6, "s"], [18, 40, 6, 4, "s"], [22, 41, 4, 4, "h"]]),
+    forwardHigh: mkL([[16, 36, 4, 5, "s"], [18, 37, 5, 4, "s"], [21, 35, 4, 4, "h"]]),
+    flex: mkL([[14, 36, 6, 4, "s"], [10, 32, 4, 6, "s"], [10, 28, 4, 4, "h"]]),
   };
 
   const armR = {
-    down: makeR((g, s, h) => {
-      fill(g, 22, 18, 2, 4, s); if (cuff) fill(g, 22, 21, 2, 1, cuff); fill(g, 22, 22, 2, 2, h);
-    }),
-    up: makeR((g, s, h) => {
-      fill(g, 24, 12, 2, 2, h); fill(g, 24, 14, 2, 3, s); fill(g, 22, 17, 3, 2, s);
-      if (cuff) fill(g, 24, 14, 2, 1, cuff);
-    }),
-    mid: makeR((g, s, h) => {
-      fill(g, 26, 18, 2, 2, h); fill(g, 22, 18, 4, 2, s); if (cuff) fill(g, 25, 18, 1, 2, cuff);
-    }),
-    forward: makeR((g, s, h) => {
-      fill(g, 22, 18, 2, 3, s); fill(g, 20, 20, 3, 2, s); fill(g, 19, 21, 2, 2, h);
-    }),
-    back: makeR((g, s, h) => {
-      fill(g, 22, 18, 3, 2, s); fill(g, 24, 20, 2, 3, s); fill(g, 25, 22, 2, 2, h);
-    }),
-    salute: makeR((g, s, h) => {
-      fill(g, 22, 18, 3, 2, s); fill(g, 24, 14, 2, 4, s); fill(g, 22, 11, 3, 3, h);
-    }),
-    flex: makeR((g, s, h) => {
-      fill(g, 25, 14, 2, 2, h); fill(g, 25, 16, 2, 3, s); fill(g, 22, 18, 3, 2, s);
-    }),
+    back: mkR([[44, 36, 5, 4, "s"], [47, 40, 4, 5, "s"], [49, 44, 4, 4, "h"]]),
+    down: mkR([[44, 36, 4, 8, "s"], ...cR, [44, 44, 4, 4, "h"]]),
+    lowOut: mkR([[44, 36, 5, 4, "s"], [47, 39, 5, 4, "s"], [50, 42, 4, 4, "h"]]),
+    mid: mkR([[44, 36, 8, 4, "s"], [52, 36, 4, 4, "h"]]),
+    highOut: mkR([[44, 34, 5, 4, "s"], [48, 30, 4, 5, "s"], [51, 27, 4, 4, "h"]]),
+    up: mkR([[44, 34, 6, 4, "s"], [48, 28, 4, 6, "s"], [48, 24, 4, 4, "h"]]),
+    forwardLow: mkR([[44, 36, 4, 5, "s"], [42, 40, 4, 4, "s"], [40, 43, 4, 4, "h"]]),
+    forward: mkR([[44, 36, 4, 6, "s"], [40, 40, 6, 4, "s"], [38, 41, 4, 4, "h"]]),
+    forwardHigh: mkR([[44, 36, 4, 5, "s"], [41, 37, 5, 4, "s"], [39, 35, 4, 4, "h"]]),
+    flex: mkR([[44, 36, 6, 4, "s"], [50, 32, 4, 6, "s"], [50, 28, 4, 4, "h"]]),
+    salute: mkR([[44, 36, 6, 4, "s"], [48, 28, 4, 8, "s"], [44, 22, 6, 6, "h"]]),
   };
 
   return { armL, armR };
 }
 
-/** Build articulated left & right leg+boot variants anchored at hips (11..14,25) & (17..20,25). */
+/** Build 8 articulated 64×64 leg+boot variants per side (with intermediate halfStep/halfWide/halfCrouch). */
 function buildLegParts({ legs = "pants", boots = "dark", pants = "N", pantsHi = "n" } = {}) {
   const bMain = boots === "white" ? "W" : boots === "brown" ? "B" : boots === "space" ? "W" : "g";
   const bSole = boots === "white" ? "w" : boots === "space" ? "g" : "O";
   const drawLeg = (g, x, y, h, footDx, isLeft) => {
     if (legs === "shorts") {
-      fill(g, x, y, 4, 1, pants);
-      fill(g, x, y + 1, 4, Math.max(1, h - 1), isLeft ? "S" : "s");
+      fill(g, x, y, 8, 2, pants);
+      fill(g, x, y + 2, 8, Math.max(2, h - 2), isLeft ? "S" : "s");
     } else {
-      fill(g, x, y, 4, h, pants);
-      if (isLeft) fill(g, x, y, 2, h, pantsHi);
+      fill(g, x, y, 8, h, pants);
+      if (isLeft) fill(g, x, y, 4, h, pantsHi);
     }
-    fill(g, x + footDx, y + h, 4, 1, bMain);
-    fill(g, x + footDx + (isLeft ? -1 : 0), y + h + 1, 5, 1, bSole);
+    fill(g, x + footDx, y + h, 8, 2, bMain);
+    fill(g, x + footDx + (isLeft ? -2 : 0), y + h + 2, 10, 2, bSole);
   };
-
   const mk = (fn) => { const g = blank(); fn(g); return g; };
   const legL = {
-    stand: mk((g) => drawLeg(g, 11, 25, 2, 0, true)),
-    step: mk((g) => drawLeg(g, 10, 24, 1, -1, true)),
-    wide: mk((g) => drawLeg(g, 9, 25, 2, -1, true)),
-    kick: mk((g) => drawLeg(g, 8, 24, 1, -1, true)),
-    crouch: mk((g) => drawLeg(g, 10, 26, 1, 0, true)),
+    stand: mk((g) => drawLeg(g, 22, 50, 4, 0, true)),
+    halfStep: mk((g) => drawLeg(g, 21, 49, 3, -1, true)),
+    step: mk((g) => drawLeg(g, 20, 48, 2, -2, true)),
+    kick: mk((g) => drawLeg(g, 16, 47, 2, -2, true)),
+    halfWide: mk((g) => drawLeg(g, 20, 50, 4, -1, true)),
+    wide: mk((g) => drawLeg(g, 18, 50, 4, -2, true)),
+    halfCrouch: mk((g) => drawLeg(g, 21, 51, 3, 0, true)),
+    crouch: mk((g) => drawLeg(g, 20, 52, 2, 0, true)),
   };
   const legR = {
-    stand: mk((g) => drawLeg(g, 17, 25, 2, 0, false)),
-    step: mk((g) => drawLeg(g, 18, 24, 1, 1, false)),
-    wide: mk((g) => drawLeg(g, 19, 25, 2, 1, false)),
-    kick: mk((g) => drawLeg(g, 20, 24, 1, 1, false)),
-    crouch: mk((g) => drawLeg(g, 18, 26, 1, 0, false)),
+    stand: mk((g) => drawLeg(g, 34, 50, 4, 0, false)),
+    halfStep: mk((g) => drawLeg(g, 35, 49, 3, 1, false)),
+    step: mk((g) => drawLeg(g, 36, 48, 2, 2, false)),
+    kick: mk((g) => drawLeg(g, 40, 47, 2, 2, false)),
+    halfWide: mk((g) => drawLeg(g, 36, 50, 4, 1, false)),
+    wide: mk((g) => drawLeg(g, 38, 50, 4, 2, false)),
+    halfCrouch: mk((g) => drawLeg(g, 35, 51, 3, 0, false)),
+    crouch: mk((g) => drawLeg(g, 36, 52, 2, 0, false)),
   };
   return { legL, legR };
 }
 
-/** Build a complete 7-part skeletal rig for a citizen. */
+/** Build a complete 7-part native 64×64 skeletal rig for a citizen. */
 function buildCharacterRig(spec) {
   const sleeveMap = {
     hoodie: ["A", "d"], labcoat: ["W", "w"], chef: ["W", "w"], apron: ["W", "w"],
@@ -867,22 +1014,15 @@ function buildCharacterRig(spec) {
     pants: spec.coat === "spacesuit" ? "W" : "N",
     pantsHi: spec.coat === "spacesuit" ? "W" : "n",
   });
-  const prop = spec.props || {};
-  return { head, torso, armL, armR, legL, legR, prop };
+  return { head, torso, armL, armR, legL, legR, prop: spec.props || {} };
 }
 
 // ============================================================================
-// Keyframe Authoring & Articulated Skeletal Compositor
+// Keyframe Normalization & Smooth Joint-Arc Interpolation (12–20 Frames/Clip)
 // ============================================================================
 
 const DEFAULT_PART_VARIANTS = {
-  head: "normal",
-  torso: "normal",
-  armL: "down",
-  armR: "down",
-  legL: "stand",
-  legR: "stand",
-  prop: "default",
+  head: "normal", torso: "normal", armL: "down", armR: "down", legL: "stand", legR: "stand", prop: "default",
 };
 
 function normPart(partName, input, defaultVisible = true) {
@@ -903,39 +1043,203 @@ function normPart(partName, input, defaultVisible = true) {
 }
 
 /**
- * Create a normalized skeletal keyframe covering all 7 parts:
- * head, torso, armL, armR, legL, legR, prop — each with { dx, dy, variant, flip, visible }.
- * Optional frame extras: { fx, afterimage, petrify, scale, shadow, propZ }.
+ * Create one normalized 64×64 skeletal keyframe covering all 7 parts.
+ * Note: `dx`/`dy` in `kf(...)` are accepted in 32-unit convenience coordinates (auto-scaled ×2 to 64×64)
+ * unless `extras.native64 === true`, so hand-authored beats & interpolated sub-steps align cleanly!
  */
 function kf(parts = {}, extras = {}) {
+  const s = extras.native64 ? 1 : 2;
+  const scalePart = (name, val) => {
+    const p = normPart(name, val);
+    return { dx: Math.round(p.dx * s), dy: Math.round(p.dy * s), variant: p.variant, flip: p.flip, visible: p.visible };
+  };
   const frame = {
-    head: normPart("head", parts.head),
-    torso: normPart("torso", parts.torso),
-    armL: normPart("armL", parts.armL),
-    armR: normPart("armR", parts.armR),
-    legL: normPart("legL", parts.legL),
-    legR: normPart("legR", parts.legR),
-    prop: normPart("prop", parts.prop, parts.prop !== undefined ? true : true),
+    head: scalePart("head", parts.head),
+    torso: scalePart("torso", parts.torso),
+    armL: scalePart("armL", parts.armL),
+    armR: scalePart("armR", parts.armR),
+    legL: scalePart("legL", parts.legL),
+    legR: scalePart("legR", parts.legR),
+    prop: scalePart("prop", parts.prop),
     shadow: extras.shadow ?? "keep",
     propZ: extras.propZ ?? "front",
   };
-  if (extras.fx) frame.fx = extras.fx;
-  if (extras.afterimage) frame.afterimage = extras.afterimage;
+  if (extras.fx) {
+    frame.fx = extras.native64 ? extras.fx : extras.fx.map(([ox, oy, lines]) => [ox * 2, oy * 2, lines, true]);
+  }
+  if (extras.afterimage) {
+    const list = Array.isArray(extras.afterimage) ? extras.afterimage : [extras.afterimage];
+    frame.afterimage = list.map((a) => ({ dx: Math.round((a.dx ?? 0) * s), dy: Math.round((a.dy ?? 0) * s), tint: a.tint ?? "c" }));
+  }
   if (extras.petrify) frame.petrify = true;
   if (extras.scale) frame.scale = extras.scale;
   return frame;
 }
 
-/** Helper to define one occupation animation clip from durations & skeletal keyframes. */
-function clip(id, name, durations, keyframes) {
-  if (keyframes.length < 4 || keyframes.length > 8) throw Error(`Clip ${id} expected 4-8 keyframes, got ${keyframes.length}`);
-  if (durations.length !== keyframes.length) throw Error(`Clip ${id} durations length mismatch`);
-  return { id, name, durations, keyframes };
+// Anatomical joint-arc transition graphs (BFS shortest path between any two limb variants!)
+const ARM_GRAPH = {
+  back: ["down"],
+  down: ["back", "lowOut", "forwardLow"],
+  lowOut: ["down", "mid"],
+  mid: ["lowOut", "highOut", "flex", "forward"],
+  highOut: ["mid", "up", "forwardHigh"],
+  up: ["highOut", "salute"],
+  forwardLow: ["down", "forward"],
+  forward: ["forwardLow", "forwardHigh", "mid"],
+  forwardHigh: ["forward", "highOut", "salute"],
+  flex: ["mid", "highOut"],
+  salute: ["forwardHigh", "up"],
+};
+
+const LEG_GRAPH = {
+  stand: ["halfStep", "halfWide", "halfCrouch"],
+  halfStep: ["stand", "step"],
+  step: ["halfStep", "kick"],
+  kick: ["step"],
+  halfWide: ["stand", "wide", "halfCrouch"],
+  wide: ["halfWide", "crouch"],
+  halfCrouch: ["stand", "crouch", "halfWide"],
+  crouch: ["halfCrouch", "wide"],
+};
+
+const TORSO_GRAPH = {
+  leanL: ["leanL1"],
+  leanL1: ["leanL", "normal"],
+  normal: ["leanL1", "leanR1"],
+  leanR1: ["normal", "leanR"],
+  leanR: ["leanR1"],
+};
+
+const pathCache = new Map();
+
+function shortestArc(graph, from, to) {
+  if (from === to || !graph[from] || !graph[to]) return [from, to];
+  const key = `${from}>${to}`;
+  if (pathCache.has(key)) return pathCache.get(key);
+  const queue = [[from]], seen = new Set([from]);
+  while (queue.length) {
+    const path = queue.shift();
+    const last = path[path.length - 1];
+    if (last === to) { pathCache.set(key, path); return path; }
+    for (const nxt of graph[last] || []) {
+      if (!seen.has(nxt)) { seen.add(nxt); queue.push([...path, nxt]); }
+    }
+  }
+  return [from, to];
+}
+
+function pickArcVariant(partName, fromV, toV, t) {
+  if (fromV === toV) return fromV;
+  const graph = partName === "armL" || partName === "armR" ? ARM_GRAPH
+    : partName === "legL" || partName === "legR" ? LEG_GRAPH
+    : partName === "torso" ? TORSO_GRAPH : null;
+  if (!graph) return t < 0.55 ? fromV : toV;
+  const path = shortestArc(graph, fromV, toV);
+  const idx = Math.min(path.length - 1, Math.floor(t * path.length));
+  return path[idx];
+}
+
+/** Smooth cubic ease-in-out for natural acceleration & deceleration across joint arcs. */
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+}
+
+/** Create one interpolated intermediate 64×64 keyframe between keyframe `a` and keyframe `b` at progress `t ∈ (0, 1)`. */
+function tweenKeyframe(a, b, t) {
+  const e = easeInOut(t);
+  const out = {
+    shadow: t < 0.5 ? a.shadow : b.shadow,
+    propZ: t < 0.5 ? a.propZ : b.propZ,
+  };
+  for (const part of RIG_PARTS) {
+    const pa = a[part], pb = b[part];
+    const visible = pa.visible && pb.visible ? true : (t < 0.5 ? pa.visible : pb.visible);
+    out[part] = {
+      dx: Math.round(pa.dx + (pb.dx - pa.dx) * e),
+      dy: Math.round(pa.dy + (pb.dy - pa.dy) * e),
+      variant: visible ? pickArcVariant(part, pa.variant, pb.variant, t) : (t < 0.5 ? pa.variant : pb.variant),
+      flip: t < 0.5 ? pa.flip : pb.flip,
+      visible,
+    };
+  }
+  if (a.petrify && b.petrify) out.petrify = true;
+  else if (a.petrify || b.petrify) out.petrify = t < 0.5 ? !!a.petrify : !!b.petrify;
+  if (a.scale || b.scale) {
+    const sa = a.scale ?? 1, sb = b.scale ?? 1;
+    const sc = sa + (sb - sa) * e;
+    if (sc < 0.98) out.scale = Math.round(sc * 100) / 100;
+  }
+  // Interpolate articulated afterimages smoothly too!
+  if (a.afterimage || b.afterimage) {
+    const src = t < 0.5 ? (a.afterimage || b.afterimage) : (b.afterimage || a.afterimage);
+    const scaleA = a.afterimage && b.afterimage ? 1 : (t < 0.5 ? 0.7 : 0.85);
+    out.afterimage = src.map((g) => ({ dx: Math.round(g.dx * scaleA), dy: Math.round(g.dy * scaleA), tint: g.tint }));
+  }
+  // Carry luminous FX with subtle upward drift on transition frames so sparks/flames/steam feel alive!
+  const fxSrc = t < 0.5 ? a.fx : b.fx;
+  if (fxSrc) {
+    const driftY = t < 0.5 ? -1 : 1;
+    out.fx = fxSrc.map(([ox, oy, lines, is2x]) => [ox, oy + driftY, lines, is2x]);
+  }
+  return out;
 }
 
 /**
- * Compose a 32×32 pixel matrix from a character's 7-part skeletal rig and one keyframe.
- * Respects anatomical Z-order, crisp 1px silhouette outlining, articulated afterimages, and un-outlined FX.
+ * Expand a story of major keyframe beats into a fluid **12–20 frame** skeletal animation clip!
+ * Automatically inserts:
+ *   - Smooth anatomical joint-arc transitions (`lowOut`/`highOut`, `halfStep`/`halfWide`, `leanL1`/`leanR1`)
+ *   - Sub-beat 64×64 integer coordinate interpolation with cubic easing
+ *   - Rhythmic pacing: slower anticipation & follow-through beats, crisp fast climax transitions, plus smooth settle-to-loop!
+ */
+function clip(id, name, beatDurations, beats, options = {}) {
+  if (beats.length < 4) throw Error(`Clip ${id} needs at least 4 story beats`);
+  if (beatDurations.length !== beats.length) throw Error(`Clip ${id} durations length mismatch`);
+
+  // Target 14–18 smooth keyframes (strictly within 12–20 frames)
+  const desired = options.targetFrames ?? (beats.length === 4 ? 14 : 16);
+  const segments = beats.length; // including smooth wrap-around transition from last beat back to beat 0!
+  const totalInBetweens = Math.max(12 - beats.length, Math.min(20 - beats.length, desired - beats.length));
+
+  const keyframes = [];
+  const durations = [];
+  let remaining = totalInBetweens;
+
+  for (let i = 0; i < segments; i++) {
+    const curr = beats[i];
+    const next = beats[(i + 1) % beats.length];
+    const segLeft = segments - i;
+    const tweens = Math.round(remaining / segLeft);
+    remaining -= tweens;
+
+    // Preserve dramatic hold pacing on beats (anticipation / peak hold longer, fast hits shorter)
+    const beatMs = Math.max(70, Math.min(240, Math.round(beatDurations[i] * 0.72)));
+    keyframes.push(curr);
+    durations.push(beatMs);
+
+    // Insert smooth intermediate arc frames between `curr` and `next`
+    const tweenMs = Math.max(60, Math.min(150, Math.round(beatDurations[i] * 0.45)));
+    for (let step = 1; step <= tweens; step++) {
+      const t = step / (tweens + 1);
+      keyframes.push(tweenKeyframe(curr, next, t));
+      durations.push(tweenMs);
+    }
+  }
+
+  if (keyframes.length < 12 || keyframes.length > 20) {
+    throw Error(`Clip ${id} expanded to ${keyframes.length} frames, expected 12–20`);
+  }
+  return { id, name, durations, keyframes };
+}
+
+// ============================================================================
+// 64×64 Articulated Skeletal Compositor & SVG Path Compiler
+// ============================================================================
+
+const FORWARD_ARMS = new Set(["forward", "forwardLow", "forwardHigh"]);
+
+/**
+ * Compose a 64×64 pixel matrix from a character's 7-part skeletal rig and one keyframe.
+ * Preserves anatomical Z-order, delicate 1px 64×64 outlining, articulated afterimages, and crisp un-outlined FX.
  */
 function composeKeyframe(rig, keyframe) {
   const body = blank();
@@ -948,25 +1252,24 @@ function composeKeyframe(rig, keyframe) {
     if (mat) blitPart(body, mat, t.dx, t.dy, t.flip);
   };
 
-  // Z-order: back-prop → legs → torso → non-forward arms → head → forward arms → front-prop
+  // Z-order: back-prop → legs → torso → side/up/back arms → head → forward arms → front-prop
   if (keyframe.propZ === "back") draw("prop");
   draw("legL");
   draw("legR");
   draw("torso");
-  if (keyframe.armL.variant !== "forward") draw("armL");
-  if (keyframe.armR.variant !== "forward") draw("armR");
+  if (!FORWARD_ARMS.has(keyframe.armL.variant)) draw("armL");
+  if (!FORWARD_ARMS.has(keyframe.armR.variant)) draw("armR");
   draw("head");
-  if (keyframe.armL.variant === "forward") draw("armL");
-  if (keyframe.armR.variant === "forward") draw("armR");
+  if (FORWARD_ARMS.has(keyframe.armL.variant)) draw("armL");
+  if (FORWARD_ARMS.has(keyframe.armR.variant)) draw("armR");
   if (keyframe.propZ !== "back") draw("prop");
 
   let processed = body;
   if (keyframe.petrify) processed = petrifyMatrix(processed);
-  if (keyframe.scale && keyframe.scale < 1) processed = miniMatrix(processed);
+  if (keyframe.scale && keyframe.scale < 1) processed = scaleMatrix(processed, keyframe.scale);
 
   const composed = outline(processed);
 
-  // Articulated afterimage copies (e.g. ninja shadow-clones, courier sonic dash, drill vibration)
   if (keyframe.afterimage) {
     const list = Array.isArray(keyframe.afterimage) ? keyframe.afterimage : [keyframe.afterimage];
     for (const ghost of list) {
@@ -974,34 +1277,38 @@ function composeKeyframe(rig, keyframe) {
     }
   }
 
-  // Ground shadow
+  // Tapered 64×64 pixel ground shadow across y=58..59
   const sh = keyframe.shadow ?? "keep";
-  if (sh === "keep") {
-    for (let x = 9; x < 23; x++) if (composed[29][x] === ".") composed[29][x] = "Z";
-  } else if (sh === "shrink") {
-    for (let x = 11; x < 21; x++) if (composed[29][x] === ".") composed[29][x] = "Z";
-  } else if (sh === "tiny") {
-    for (let x = 13; x < 19; x++) if (composed[29][x] === ".") composed[29][x] = "Z";
-  }
+  const drawShadow = (x0, x1) => {
+    for (let x = x0; x < x1; x++) if (composed[58][x] === ".") composed[58][x] = "Z";
+    for (let x = x0 + 2; x < x1 - 2; x++) if (composed[59][x] === ".") composed[59][x] = "Z";
+  };
+  if (sh === "keep") drawShadow(18, 46);
+  else if (sh === "shrink") drawShadow(22, 42);
+  else if (sh === "tiny") drawShadow(26, 38);
 
-  // Un-outlined luminous FX patches: array of [ox, oy, lines]
+  // Un-outlined luminous FX particles
   if (keyframe.fx) {
-    for (const [ox, oy, lines] of keyframe.fx) stamp(composed, ox, oy, lines);
+    for (const item of keyframe.fx) {
+      const [ox, oy, lines, is2x] = item;
+      if (is2x) stamp2xAt64(composed, ox, oy, lines);
+      else stamp(composed, ox, oy, lines);
+    }
   }
   return composed;
 }
 
-/** Compile a 32×32 character matrix into compact horizontal-run SVG paths grouped by color. */
+/** Compile a 64×64 character matrix into compact horizontal-run SVG paths grouped by color. */
 function compileGrid(matrix, paletteMap) {
-  const runs = new Map();
-  for (let y = 0; y < PIXEL_GRID_SIZE; y++) {
+  const n = matrix.length, runs = new Map();
+  for (let y = 0; y < n; y++) {
     const row = matrix[y];
     let x = 0;
-    while (x < PIXEL_GRID_SIZE) {
+    while (x < n) {
       const ch = row[x];
       if (ch === "." || !paletteMap[ch]) { x++; continue; }
       let end = x + 1;
-      while (end < PIXEL_GRID_SIZE && row[end] === ch) end++;
+      while (end < n && row[end] === ch) end++;
       const fillColor = paletteMap[ch];
       const seg = `M${x} ${y}h${end - x}v1h${x - end}z`;
       const existing = runs.get(fillColor);
@@ -1018,7 +1325,7 @@ function compileGrid(matrix, paletteMap) {
   return layers;
 }
 
-/** Build a sprite entry with skeletal `rig`, `idleKeyframe`, and keyframe-based `animations`. */
+/** Build a sprite entry with native 64×64 skeletal `rig`, `idleKeyframe`, and 12–20 frame keyframe `animations`. */
 function makeRiggedSprite({ id, name, gender, palette, rig, idleKeyframe, animations }) {
   const idle = idleKeyframe || kf({ prop: rig.prop.default ? "default" : false });
   return {
@@ -1036,7 +1343,7 @@ function makeRiggedSprite({ id, name, gender, palette, rig, idleKeyframe, animat
 }
 
 
-// Rigged 32×32 pixel citizens (1–10): coder, doctor, chef, artist, scientist,
+// Rigged 64×64 pixel citizens (1–10): coder, doctor, chef, artist, scientist,
 // astronaut, barista, detective, musician, firefighter — each with 7 articulated skeletal parts
 // and 5 independent gag keyframe animation clips (50 clips).
 
@@ -1059,13 +1366,15 @@ const coder = makeRiggedSprite({
   rig: coderRig,
   idleKeyframe: kf({ armL: "forward", armR: "forward", prop: "default" }),
   animations: [
-    clip("typing", "敲到冒火", [130, 110, 100, 110, 140], [
+    // 敲到冒火（6大拍→18帧完整叙事）：蓄力俯身 → 绿屏狂敲 → 火星四起 → 烈焰暴走 → 惊呼后仰 → 冒烟眨眼收势
+    clip("typing", "敲到冒火", [220, 120, 100, 95, 130, 190], [
+      kf({ head: { dy: 0, variant: "normal" }, armL: "forwardLow", armR: "forwardLow", prop: "default" }),
       kf({ head: { dy: 1, variant: "normal" }, armL: { dy: -1, variant: "forward" }, armR: { dy: 1, variant: "forward" }, prop: "laptopGreen" }, { fx: [[9, 1, ["V........V"]]] }),
-      kf({ head: { dy: 1, variant: "glowF" }, armL: { dy: 1, variant: "forward" }, armR: { dy: -1, variant: "forward" }, prop: { dy: -1, variant: "laptopFire" } }, { fx: [[11, 15, ["..F....F..", ".FYF..FYF.", "FFYFFYFF.."]]] }),
-      kf({ head: { dy: 0, variant: "glowF" }, torso: "leanL", armL: { dx: 1, dy: -1, variant: "forward" }, armR: { dx: -1, dy: 1, variant: "forward" }, prop: { dy: 0, variant: "laptopFire" } }, { fx: [[10, 13, ["...Y..F..Y..", "..FYRFFRYF..", ".FFYYYYYYFF.", ".FRRYYYYRRF."]], [6, 1, ["F...V....Y...F"]]] }),
-      kf({ head: { dy: 1, variant: "glow" }, torso: "leanR", armL: { dy: 1, variant: "forward" }, armR: { dy: -1, variant: "forward" }, prop: { dy: -1, variant: "laptopFire" } }, { fx: [[11, 13, ["...F..Y..F..", "..FFYYYYFF..", ".FFRYYYYRFF."]], [8, 0, ["Y....F....V"]]] }),
+      kf({ head: { dy: 1, variant: "glowF" }, torso: "leanL", armL: { dy: 1, variant: "forwardHigh" }, armR: { dy: -1, variant: "forward" }, prop: { dy: -1, variant: "laptopFire" } }, { fx: [[11, 15, ["..F....F..", ".FYF..FYF.", "FFYFFYFF.."]]] }),
+      kf({ head: { dy: 0, variant: "glowF" }, torso: "leanR", armL: { dx: 1, dy: -1, variant: "forward" }, armR: { dx: -1, dy: 1, variant: "forwardHigh" }, prop: { dy: 0, variant: "laptopFire" } }, { fx: [[10, 13, ["...Y..F..Y..", "..FYRFFRYF..", ".FFYYYYYYFF.", ".FRRYYYYRRF."]], [6, 1, ["F...V....Y...F"]]] }),
+      kf({ head: { dy: -1, variant: "shock" }, torso: "leanL", armL: "highOut", armR: "highOut", legL: "wide", legR: "wide", prop: { dy: -1, variant: "laptopFire" } }, { fx: [[11, 13, ["...F..Y..F..", "..FFYYYYFF.."]], [8, 0, ["Y....F....V"]]] }),
       kf({ head: { dy: 0, variant: "blink" }, armL: "forward", armR: "forward", prop: "default" }, { fx: [[11, 16, [".w...w...w..", "..w....w...."]]] }),
-    ]),
+    ], { targetFrames: 18 }),
     clip("coffee", "咖啡续命", [200, 160, 140, 140, 190], [
       kf({ head: "normal", armL: "down", armR: "mid", prop: { dx: 1, dy: 0, variant: "coffee" } }, { fx: [[24, 14, [".W.", "..W"]]] }),
       kf({ head: { dy: 1, variant: "blink" }, armL: "down", armR: { dx: -1, dy: -2, variant: "salute" }, prop: { dx: -3, dy: -4, variant: "coffee" } }, { fx: [[21, 10, [".W..W."]]] }),
@@ -1099,16 +1408,16 @@ const coder = makeRiggedSprite({
 // 2. 医生 (女) — 听诊弹飞 / 狂写病历 / 巨型针筒 / 电击除颤 / 挂瓶回血
 const doctorRig = buildCharacterRig({
   gender: "female", hairStyle: "ponytail", coat: "labcoat",
-  hatFn(g) { stamp(g, 11, 4, ["..WWWWWW..", ".WWWRRWWW.", ".WWWRRWWW."]); },
-  extraTorso(g) { stamp(g, 13, 18, ["g....g", "g....g", ".g..g.", "..gg..", "..GG.."]); },
+  hatFn(g) { stamp2x(g, 11, 4, ["..WWWWWW..", ".WWWRRWWW.", ".WWWRRWWW."]); },
+  extraTorso(g) { stamp2x(g, 13, 18, ["g....g", "g....g", ".g..g.", "..gg..", "..GG.."], false); },
   props: {
     default: partPatch(23, 18, [".g.", "gGg", ".g."]),
-    patient: partPatch(24, 17, [".SS.", "SESS", ".SS.", "CCCC", "CCCC", "N..N"]),
-    patientShock: partPatch(24, 17, [".SS.", "SWSW", ".SS.", "CCCC", "N..N"]),
-    chart: partPatch(22, 16, ["WWWWW", "WgggW", "WggWW", "WWWWW"]),
-    syringe: partPatch(22, 8, ["..G..", ".ggg.", "WVVVW", "WVCVW", "WVVVW", ".ggg.", "..g.."]),
-    defib: (() => { const g = blank(); stamp(g, 3, 17, ["ggg", "gCg", "ggg"]); stamp(g, 25, 17, ["ggg", "gCg", "ggg"]); return g; })(),
-    iv: partPatch(24, 4, ["ggggg", "..g..", ".WVW.", ".WVW.", "..V..", "..g..", "..g..", "..g.."]),
+    patient: partPatch(24, 17, [".SS.", "SESS", ".SS.", "CCCC", "CCCC", "N..N"], false),
+    patientShock: partPatch(24, 17, [".SS.", "SWSW", ".SS.", "CCCC", "N..N"], false),
+    chart: partPatch(22, 16, ["WWWWW", "WgggW", "WggWW", "WWWWW"], false),
+    syringe: partPatch(22, 8, ["..G..", ".ggg.", "WVVVW", "WVCVW", "WVVVW", ".ggg.", "..g.."], false),
+    defib: (() => { const g = blank(); stamp2x(g, 3, 17, ["ggg", "gCg", "ggg"], false); stamp2x(g, 25, 17, ["ggg", "gCg", "ggg"], false); return g; })(),
+    iv: partPatch(24, 4, ["ggggg", "..g..", ".WVW.", ".WVW.", "..V..", "..g..", "..g..", "..g.."], false),
   },
 });
 const doctor = makeRiggedSprite({
@@ -1153,12 +1462,12 @@ const doctor = makeRiggedSprite({
 
 // 3. 厨师 (男) — 烈焰颠勺 / 撒盐暴雪 / 小当家金光 / 残影快刀 / 帽飞起锅
 const chefHat = (g) => {
-  stamp(g, 10, 1, ["..WWWWWWWW..", ".WWWWWWWWWW.", ".WWwWWWWwWW.", ".WWWWWWWWWW.", "..wwwwwwww.."]);
+  stamp2x(g, 10, 1, ["..WWWWWWWW..", ".WWWWWWWWWW.", ".WWwWWWWwWW.", ".WWWWWWWWWW.", "..wwwwwwww.."]);
 };
 const chefRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "chef",
   hatFn: chefHat,
-  beardFn(g) { stamp(g, 13, 13, ["HH..HH"]); },
+  beardFn(g) { stamp2x(g, 13, 13, ["HH..HH"], false); },
   props: {
     default: partPatch(22, 21, ["gggggg", ".gggg."]),
     wokUp: partPatch(22, 18, ["ggggggg", ".ggggg."]),
@@ -1171,13 +1480,15 @@ const chef = makeRiggedSprite({
   palette: makePalette(SKIN.warm, { H: "#4a3228", h: "#755141", k: "#2b1c16" }),
   rig: chefRig,
   animations: [
-    clip("wok", "烈焰颠勺", [150, 120, 110, 130, 170], [
+    // 烈焰颠勺（6大拍→18帧完整叙事）：扎马步蓄力 → 猛然颠锅 → 冲天龙焰+煎蛋飞空 → 凌空接蛋 → 完美收锅点赞
+    clip("wok", "烈焰颠勺", [210, 130, 110, 110, 140, 190], [
+      kf({ head: { dy: 1, variant: "normal" }, armL: "back", armR: "lowOut", legL: "crouch", legR: "crouch", prop: "default" }),
       kf({ head: "normal", armL: "back", armR: "mid", legL: "wide", legR: "wide", prop: "default" }, { fx: [[22, 16, ["..F..", ".FYF."]]] }),
       kf({ head: { dy: -1, variant: "shout" }, torso: "leanL", armL: "mid", armR: "up", legL: "wide", legR: "wide", prop: { dy: -2, variant: "wokUp" } }, { fx: [[23, 3, [".WW.", "WYYW", ".WW."]], [21, 9, ["...Y...", "..FYF..", ".FFYFF.", ".FRYRF.", ".FFFFF."]]] }),
       kf({ head: "glowF", torso: "leanL", armL: "up", armR: { dy: -1, variant: "up" }, legL: "wide", legR: "stand", prop: { dy: -3, variant: "wokUp" } }, { fx: [[22, 0, [".WW.", "WYYW", ".WW."]], [20, 6, ["....Y....", "...FYF...", "..FFYFF..", "..FRYRF..", ".FFYYYFF.", ".FRRRRRF."]]] }),
       kf({ head: "normal", armL: "down", armR: "mid", prop: "wokUp" }, { fx: [[23, 8, [".WW.", "WYYW", ".WW."]], [21, 13, ["..FYF..", ".FFYFF."]]] }),
       kf({ head: "happy", armL: "down", armR: "down", prop: "default" }, { fx: [[23, 17, [".W..W.", "W....W"]]] }),
-    ]),
+    ], { targetFrames: 18 }),
     clip("salt", "撒盐暴雪", [170, 140, 140, 170], [
       kf({ head: "normal", armL: "back", armR: "salute", prop: "default" }, { fx: [[24, 13, ["W", ".Y"]]] }),
       kf({ head: { dx: -1, variant: "blink" }, torso: "leanL", armL: "back", armR: { dx: 1, dy: -1, variant: "up" }, legL: "wide", legR: "stand", prop: false }, { fx: [[22, 12, ["..W.Y.W.", ".Y.W.y.W", "..W.Y.W.", ".y.W.Y.."]]] }),
@@ -1207,19 +1518,21 @@ const chef = makeRiggedSprite({
 
 // 4. 画家 (女) — 颜料狂轰 / 灵感帽飞 / 七彩旋涡 / 灵魂画作 / 颜料糊脸
 const artistHat = (g) => {
-  stamp(g, 9, 2, ["......d......", "..aaAAAAAAA..", ".AAAAAAAAAAA.", ".ddAAAAAAAAdd"]);
+  stamp2x(g, 9, 2, ["......d......", "..aaAAAAAAA..", ".AAAAAAAAAAA.", ".ddAAAAAAAAdd"]);
 };
 const artistRig = buildCharacterRig({
   gender: "female", hairStyle: "wavy", coat: "apron",
   hatFn: artistHat,
   extraHeads(normal) {
     const paint = clone(normal);
-    stamp(paint, 11, 11, ["EW", "WE"]); stamp(paint, 19, 11, ["WE", "EW"]);
-    stamp(paint, 10, 10, ["M...C..Y..", "....R.....", "Y......M..", "..C..R..C.", "...M...Y.."]);
+    fill(paint, 21, 22, 6, 5, "S"); fill(paint, 37, 22, 6, 5, "S");
+    stamp(paint, 22, 22, ["E..E", ".EE.", ".EE.", "E..E"]);
+    stamp(paint, 38, 22, ["E..E", ".EE.", ".EE.", "E..E"]);
+    stamp2x(paint, 10, 10, ["M...C..Y..", "....R.....", "Y......M..", "..C..R..C.", "...M...Y.."], false);
     return { paint };
   },
   props: {
-    default: (() => { const g = blank(); stamp(g, 3, 20, [".bBBb", "bRYBb", "bVCBb", ".bBBb"]); stamp(g, 24, 17, ["..M", ".b.", "b..", "B.."]); return g; })(),
+    default: (() => { const g = blank(); stamp2x(g, 3, 20, [".bBBb", "bRYBb", "bVCBb", ".bBBb"]); stamp2x(g, 24, 17, ["..M", ".b.", "b..", "B.."], false); return g; })(),
     brushHigh: partPatch(23, 10, ["..M", ".b.", "b..", "B.."]),
     beretFloat: partPatch(10, 0, ["..aAAAAAAA..", ".AAAAAAAAAAA."]),
     canvas: partPatch(21, 9, ["bbbbbbbb", "bWWWWWWb", "bWROORWb", "bW.MM.Wb", "bW.CC.Wb", "bbbbbbbb"]),
@@ -1267,19 +1580,23 @@ const artist = makeRiggedSprite({
 // 5. 科学家 (女) — 毒液喷泉 / 护目反光 / 炸成爆炸头 / 迷你变身 / 公式刷屏
 const scientistRig = buildCharacterRig({
   gender: "female", hairStyle: "fluffy", coat: "labcoat",
-  hatFn(g) { stamp(g, 10, 6, ["ggCCCggCCCgg", "ggCWWggCWWgg", "gggggggggggg"]); },
+  hatFn(g) { stamp2x(g, 10, 6, ["ggCCCggCCCgg", "ggCWWggCWWgg", "gggggggggggg"], false); },
   extraHeads(normal) {
     const goggleFlash = clone(normal);
-    stamp(goggleFlash, 10, 6, ["ggWWWggWWWgg", "ggWWWggWWWgg"]);
+    stamp2x(goggleFlash, 10, 6, ["ggWWWggWWWgg", "ggWWWggWWWgg"], false);
     const afro = clone(normal);
-    stamp(afro, 6, 1, [
+    stamp2x(afro, 6, 1, [
       "....OOOOOOOOOOOO....", "..OOkOOOkOOOkOOOOO..", ".OOOOOkOOOOOkOOOOOO.",
       ".OOkOOOOOOOOOOOkOOO.", ".OOOOOOOOOOOOOOOOOO.", "..OOOOOOOOOOOOOOOO..",
     ]);
-    stamp(afro, 11, 11, ["WW", "WE", "WW"]); stamp(afro, 19, 11, ["WW", "EW", "WW"]);
-    stamp(afro, 15, 14, ["OO", "RR"]);
+    fill(afro, 21, 22, 6, 5, "S"); fill(afro, 37, 22, 6, 5, "S");
+    stamp(afro, 22, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
+    stamp(afro, 38, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
+    stamp(afro, 29, 28, [".OOOO.", "ORRRRO", "ORRRRO", ".OOOO."]);
     const afroDizzy = clone(afro);
-    stamp(afroDizzy, 11, 11, ["EW", "WE", "SS"]); stamp(afroDizzy, 19, 11, ["WE", "EW", "SS"]);
+    fill(afroDizzy, 21, 22, 6, 5, "S"); fill(afroDizzy, 37, 22, 6, 5, "S");
+    stamp(afroDizzy, 22, 22, ["E..E", ".EE.", ".EE.", "E..E"]);
+    stamp(afroDizzy, 38, 22, ["E..E", ".EE.", ".EE.", "E..E"]);
     return { goggleFlash, afro, afroDizzy };
   },
   props: {
@@ -1332,17 +1649,20 @@ const astronautRig = buildCharacterRig({
   gender: "male", coat: "spacesuit",
   customHead() {
     const g = blank();
-    fill(g, 8, 4, 16, 13, "W");
-    px(g, 8, 4, "."); px(g, 23, 4, "."); px(g, 8, 16, "."); px(g, 23, 16, ".");
-    fill(g, 21, 6, 3, 9, "w");
-    fill(g, 10, 6, 12, 8, "N");
-    fill(g, 11, 7, 3, 2, "C"); px(g, 11, 7, "W");
+    fill(g, 16, 8, 32, 26, "W");
+    fill(g, 16, 8, 3, 3, "."); fill(g, 45, 8, 3, 3, ".");
+    fill(g, 16, 31, 3, 3, "."); fill(g, 45, 31, 3, 3, ".");
+    px(g, 18, 10, "W"); px(g, 45, 10, "W"); px(g, 18, 31, "W"); px(g, 45, 31, "W");
+    fill(g, 42, 12, 6, 18, "w");
+    fill(g, 20, 12, 24, 16, "N");
+    px(g, 20, 12, "W"); px(g, 43, 12, "w"); px(g, 20, 27, "W"); px(g, 43, 27, "w");
+    fill(g, 22, 14, 6, 4, "C"); fill(g, 22, 14, 3, 2, "W");
     return g;
   },
   extraHeads(normal) {
-    const sweep1 = clone(normal); stamp(sweep1, 13, 7, ["CWW", ".CC"]);
-    const sweep2 = clone(normal); stamp(sweep2, 16, 7, ["CWW", ".CC"]);
-    const visorHappy = clone(normal); stamp(visorHappy, 12, 9, ["WW..WW"]);
+    const sweep1 = clone(normal); stamp2x(sweep1, 13, 7, ["CWW", ".CC"], false);
+    const sweep2 = clone(normal); stamp2x(sweep2, 16, 7, ["CWW", ".CC"], false);
+    const visorHappy = clone(normal); stamp2x(visorHappy, 12, 9, ["WW..WW"], false);
     return { sweep1, sweep2, visorHappy };
   },
   props: {
@@ -1394,7 +1714,7 @@ const astronaut = makeRiggedSprite({
 // 7. 咖啡师 (女) — 香雾冲天 / 豆子机枪 / 圣光特调 / 奶泡山崩 / 浓缩觉醒
 const baristaRig = buildCharacterRig({
   gender: "female", hairStyle: "bun", coat: "cafe", boots: "brown",
-  hatFn(g) { fill(g, 10, 6, 12, 2, "A"); fill(g, 11, 6, 4, 1, "a"); },
+  hatFn(g) { fill(g, 20, 12, 24, 4, "A"); fill(g, 22, 12, 8, 2, "a"); },
   props: {
     default: partPatch(23, 20, ["BBBB", "WWWWw", "WWWw"]),
     grinder: partPatch(22, 17, ["..gg.", "BBBBB", "BKKKB", "BBBBB"]),
@@ -1442,15 +1762,15 @@ const barista = makeRiggedSprite({
 
 // 8. 侦探 (男) — 死光放大镜 / 真相只有一个 / 问号弹幕 / 烟圈推理 / 瞬间变装
 const detectiveHat = (g) => {
-  stamp(g, 7, 2, ["....bbbbbbbb....", "...bbbbbbbbbb...", "...ddAAAAAAdd...", ".bbbbbbbbbbbbbb."]);
+  stamp2x(g, 7, 2, ["....bbbbbbbb....", "...bbbbbbbbbb...", "...ddAAAAAAdd...", ".bbbbbbbbbbbbbb."]);
 };
 const detectiveRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "trench", boots: "brown",
   hatFn: detectiveHat,
   extraHeads(normal) {
     const disguise = clone(normal);
-    stamp(disguise, 9, 10, ["OOOOO..OOOOO", "OWOOO..OWOOO", ".OOO....OOO."]);
-    stamp(disguise, 10, 14, [".KKKKKKKKKK.", "KKKkkkkkkKKK", "..KKKKKKKK.."]);
+    stamp2x(disguise, 9, 10, ["OOOOO..OOOOO", "OWOOO..OWOOO", ".OOO....OOO."], false);
+    stamp2x(disguise, 10, 14, [".KKKKKKKKKK.", "KKKkkkkkkKKK", "..KKKKKKKK.."]);
     return { disguise };
   },
   props: {
@@ -1504,7 +1824,7 @@ const detective = makeRiggedSprite({
 const musicianRig = buildCharacterRig({
   gender: "female", hairStyle: "long", coat: "jacket",
   hatFn(g) {
-    stamp(g, 8, 4, ["...AAAAAAAAAA...", "..AA........AA..", ".AA..........AA.", "AA............AA", "AA............AA", "dd............dd"]);
+    stamp2x(g, 8, 4, ["...AAAAAAAAAA...", "..AA........AA..", ".AA..........AA.", "AA............AA", "AA............AA", "dd............dd"]);
   },
   props: {
     default: partPatch(10, 19, ["........bbb.", ".....bbBYBbb", "....bbBBBBB.", ".....bbbb..."]),
@@ -1553,7 +1873,7 @@ const musician = makeRiggedSprite({
 // 10. 消防员 (男) — 暴走水炮 / 迪斯科警灯 / 浓烟点赞 / 极速攀梯 / 泡沫狂喷
 const firefighterRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "fire",
-  hatFn(g) { stamp(g, 7, 2, [".....YYYYYY.....", "...YYYYYYYYYY...", "..YYYYAAAAYYYY..", ".YYYYYYYYYYYYYY."]); },
+  hatFn(g) { stamp2x(g, 7, 2, [".....YYYYYY.....", "...YYYYYYYYYY...", "..YYYYAAAAYYYY..", ".YYYYYYYYYYYYYY."]); },
   props: {
     default: partPatch(22, 20, ["gggY", "gggY"]),
     ladder: partPatch(24, 3, ["G..G", "GGGG", "G..G", "GGGG", "G..G", "GGGG", "G..G", "GGGG", "G..G", "GGGG", "G..G", "GGGG"]),
@@ -1601,7 +1921,7 @@ const firefighter = makeRiggedSprite({
 const ROLES_A = { coder, doctor, chef, artist, scientist, astronaut, barista, detective, musician, firefighter };
 
 
-// Rigged 32×32 pixel citizens (11–20): teacher, gardener, photographer, courier, wizard,
+// Rigged 64×64 pixel citizens (11–20): teacher, gardener, photographer, courier, wizard,
 // athlete, pilot, mechanic, baker, ninja — each with 7 articulated skeletal parts
 // and 5 independent gag keyframe animation clips (50 clips).
 
@@ -1612,7 +1932,7 @@ const ROLES_A = { coder, doctor, chef, artist, scientist, astronaut, barista, de
 const teacherRig = buildCharacterRig({
   gender: "female", hairStyle: "bun", eyeStyle: "goldglasses", coat: "vest",
   props: {
-    default: (() => { const g = blank(); stamp(g, 3, 19, ["WWWWW", "WwWwW", "WWWWW"]); stamp(g, 23, 15, ["...b", "..b.", ".b..", "b..."]); return g; })(),
+    default: (() => { const g = blank(); stamp2x(g, 3, 19, ["WWWWW", "WwWwW", "WWWWW"], false); stamp2x(g, 23, 15, ["...b", "..b.", ".b..", "b..."], false); return g; })(),
     pointerUp: partPatch(23, 10, ["...b", "..b.", ".b..", "b..."]),
     book: partPatch(3, 19, ["WWWWW", "WwWwW", "WWWWW"]),
     starStamp: partPatch(21, 5, ["...Y...", "..YYY..", "YYYYYYY", ".YYWYY.", "..YYY..", ".Y...Y."]),
@@ -1666,14 +1986,14 @@ const teacher = makeRiggedSprite({
 // 12. 园丁 (男) — 巨花暴长 / 落叶暴雪 / 群蝶抢帽 / 拔出巨萝卜 / 彩虹洒水
 // ============================================================================
 const gardenerHat = (g) => {
-  stamp(g, 5, 2, ["......bbbbbbbb......", ".....bbbbbbbbbb.....", ".....ddAAAAAAdd.....", ".bbbbbbbbbbbbbbbbbb."]);
+  stamp2x(g, 5, 2, ["......bbbbbbbb......", ".....bbbbbbbbbb.....", ".....ddAAAAAAdd.....", ".bbbbbbbbbbbbbbbbbb."]);
 };
 const gardenerRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "overalls", boots: "brown",
   hatFn: gardenerHat,
-  beardFn(g) { stamp(g, 11, 15, ["BBBBBBBBBB"]); },
+  beardFn(g) { stamp2x(g, 11, 15, ["BBBBBBBBBB"], false); },
   props: {
-    default: (() => { const g = blank(); stamp(g, 22, 19, [".ggg.", "ggggg", ".ggg."]); stamp(g, 25, 25, [".V.", "vVv", ".v."]); return g; })(),
+    default: (() => { const g = blank(); stamp2x(g, 22, 19, [".ggg.", "ggggg", ".ggg."]); stamp2x(g, 25, 25, [".V.", "vVv", ".v."], false); return g; })(),
     sunflower: partPatch(22, 8, ["..YYYYY..", ".YYBBBYY.", "YYBWWWBYY", ".YYBBBYY.", "..YYYYY..", "....v....", "...vVv...", "....v....", "...vVv...", "....v...."]),
     shears: partPatch(23, 16, ["G.G", ".G.", "GGG"]),
     shearsShut: partPatch(23, 16, ["GG.", ".GG", "GGG"]),
@@ -1787,7 +2107,7 @@ const photographer = makeRiggedSprite({
 // ============================================================================
 const courierRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "jacket",
-  hatFn(g) { stamp(g, 8, 3, ["...AAAAAAAAAA...", "..aAAAAAAAAAAA..", ".AAAAAACCCCCCCC.", ".AAAAACWWWCCCCC.", ".dAAAACCCCCCCCC."]); },
+  hatFn(g) { stamp2x(g, 8, 3, ["...AAAAAAAAAA...", "..aAAAAAAAAAAA..", ".AAAAAACCCCCCCC.", ".AAAAACWWWCCCCC.", ".dAAAACCCCCCCCC."]); },
   props: {
     default: partPatch(20, 19, ["bbbbbbbb", "bbbBBbbb", "bbbbbbbb", "bbbbbbbb"]),
     boxHigh: partPatch(20, 10, ["bbbbbbbb", "bbbBBbbb", "bbbbbbbb"]),
@@ -1844,7 +2164,7 @@ const courier = makeRiggedSprite({
 const wizardRig = buildCharacterRig({
   gender: "female", hairStyle: "long", coat: "robe",
   hatFn(g) {
-    stamp(g, 7, 0, ["........A.......", ".......AAA......", "......AAYAA.....", ".....AAAAAAA....", "....AAAAAAAAA...", "..ddYYYYYYYYYdd."]);
+    stamp2x(g, 7, 0, ["........A.......", ".......AAA......", "......AAYAA.....", ".....AAAAAAA....", "....AAAAAAAAA...", "..ddYYYYYYYYYdd."]);
   },
   props: {
     default: partPatch(24, 12, [".CCC.", "CCWCC", ".CCC.", "..B..", "..B..", "..B..", "..B..", "..B..", "..B.."]),
@@ -1902,7 +2222,7 @@ const wizard = makeRiggedSprite({
 // ============================================================================
 const athleteRig = buildCharacterRig({
   gender: "male", hairStyle: "spiky", coat: "jersey", legs: "shorts", boots: "white",
-  hatFn(g) { fill(g, 10, 7, 12, 2, "A"); fill(g, 11, 7, 4, 1, "a"); },
+  hatFn(g) { fill(g, 20, 14, 24, 4, "A"); fill(g, 22, 14, 8, 2, "a"); },
   props: {
     default: partPatch(23, 21, [".FFF.", "FFBFF", "FBBBF", "FFBFF", ".FFF."]),
     ballHigh: partPatch(13, 2, [".FFF.", "FFBFF", "FBBBF", "FFBFF", ".FFF."]),
@@ -1957,7 +2277,7 @@ const athlete = makeRiggedSprite({
 // ============================================================================
 const pilotRig = buildCharacterRig({
   gender: "female", hairStyle: "bob", eyeStyle: "shades", coat: "pilot",
-  hatFn(g) { stamp(g, 9, 2, ["...AAAAAAAA...", "..AAAYYYYAAA..", ".ddAAAAAAAAAdd", ".OOOOOOOOOOOO."]); },
+  hatFn(g) { stamp2x(g, 9, 2, ["...AAAAAAAA...", "..AAAYYYYAAA..", ".ddAAAAAAAAAdd", ".OOOOOOOOOOOO."]); },
   props: {
     plane: partPatch(21, 13, ["...W..", "..WWW.", ".WWWWW", "w..W.."]),
     cloud: partPatch(2, 2, [".WW.", "WWWW"]),
@@ -2012,10 +2332,10 @@ const pilot = makeRiggedSprite({
 // ============================================================================
 const mechanicRig = buildCharacterRig({
   gender: "male", hairStyle: "short", coat: "overalls",
-  hatFn(g) { stamp(g, 8, 2, ["....YYYYYY....", "..YYYYYYYYYY..", ".YYYYyYYYYYYY.", "YYYYYYYYYYYYYY"]); },
+  hatFn(g) { stamp2x(g, 8, 2, ["....YYYYYY....", "..YYYYYYYYYY..", ".YYYYyYYYYYYY.", "YYYYYYYYYYYYYY"]); },
   extraHeads(normal) {
     const oil = clone(normal);
-    stamp(oil, 10, 10, ["OO.OO..OOO", "OWEOOOWEOO", "OEEOOOEEOO", ".OO..OOOO."]);
+    stamp2x(oil, 10, 10, ["OO.OO..OOO", "OWEOOOWEOO", "OEEOOOEEOO", ".OO..OOOO."], false);
     return { oil };
   },
   props: {
@@ -2074,12 +2394,14 @@ const mechanic = makeRiggedSprite({
 // ============================================================================
 const bakerRig = buildCharacterRig({
   gender: "female", hairStyle: "bob", coat: "apron",
-  hatFn(g) { stamp(g, 10, 2, ["AA......AA", "AAAaaAAaaa", "AA..aa..AA"]); },
+  hatFn(g) { stamp2x(g, 10, 2, ["AA......AA", "AAAaaAAaaa", "AA..aa..AA"]); },
   extraHeads(normal) {
-    const cream = clone(normal); stamp(cream, 12, 10, ["WW..W"]);
+    const cream = clone(normal); stamp2x(cream, 12, 10, ["WW..W"], false);
     const sugar = clone(normal);
-    stamp(sugar, 8, 2, ["..WWWWWWWWWW..", ".WWWWWWWWWWWW.", ".WWWWWWWWWWWW.", "WWwWWWWWWWWwWW", ".WWWWWWWWWWWW."]);
-    stamp(sugar, 11, 11, ["WW", "WE", "WW"]); stamp(sugar, 19, 11, ["WW", "EW", "WW"]);
+    stamp2x(sugar, 8, 2, ["..WWWWWWWWWW..", ".WWWWWWWWWWWW.", ".WWWWWWWWWWWW.", "WWwWWWWWWWWwWW", ".WWWWWWWWWWWW."]);
+    fill(sugar, 21, 22, 6, 5, "S"); fill(sugar, 37, 22, 6, 5, "S");
+    stamp(sugar, 22, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
+    stamp(sugar, 38, 22, ["WWWW", "WEEW", "WEEW", "WWWW"]);
     return { cream, sugar };
   },
   props: {
@@ -2141,19 +2463,22 @@ const ninjaRig = buildCharacterRig({
   gender: "male", coat: "ninja",
   customHead() {
     const g = blank();
-    fill(g, 9, 5, 14, 12, "N");
-    fill(g, 10, 10, 12, 4, "S");
-    stamp(g, 11, 11, ["WE", "EE"]); stamp(g, 19, 11, ["WE", "EE"]);
-    fill(g, 10, 14, 12, 3, "N");
-    fill(g, 9, 8, 14, 2, "A"); fill(g, 13, 8, 6, 2, "G"); px(g, 15, 8, "W");
-    stamp(g, 3, 8, ["aAAd..", "aA....", "a....."]);
+    fill(g, 18, 10, 28, 24, "N");
+    fill(g, 18, 10, 2, 2, "."); fill(g, 44, 10, 2, 2, ".");
+    fill(g, 20, 20, 24, 8, "S");
+    stamp(g, 22, 22, ["WWEE", "WEEE", "EEEE", "EEkE"]);
+    stamp(g, 38, 22, ["WWEE", "WEEE", "EEEE", "EEkE"]);
+    fill(g, 20, 28, 24, 6, "N");
+    fill(g, 18, 16, 28, 4, "A"); fill(g, 26, 16, 12, 4, "G"); fill(g, 29, 16, 4, 2, "W");
+    stamp2x(g, 3, 8, ["aAAd..", "aA....", "a....."]);
     return g;
   },
   extraHeads(normal) {
     const scarfUp = clone(normal);
-    stamp(scarfUp, 3, 7, ["aAAd..", "a.....", "______", "______"]);
+    stamp2x(scarfUp, 3, 7, ["aAAd..", "a.....", "______", "______"]);
     const glowRed = clone(normal);
-    stamp(glowRed, 11, 11, ["RR", "RR"]); stamp(glowRed, 19, 11, ["RR", "RR"]);
+    fill(glowRed, 22, 22, 4, 4, "R"); fill(glowRed, 38, 22, 4, 4, "R");
+    px(glowRed, 23, 23, "Y"); px(glowRed, 39, 23, "Y");
     return { scarfUp, glowRed };
   },
   props: {
@@ -2197,13 +2522,15 @@ const ninja = makeRiggedSprite({
       kf({ head: "scarfUp", armL: "mid", armR: "mid", legL: "wide", legR: "wide", prop: "default" }, { fx: [[3, 4, ["w....w..............w....w"]]] }),
       kf({ head: "normal", armL: "down", armR: "down", prop: "default" }),
     ]),
-    // 影分身瞬步：四肢按疾跑不同相位摆动，躯干+四肢半透明青白影分身残影左右高频闪现！
-    clip("shadowstep", "影分身瞬步", [120, 100, 100, 120], [
+    // 影分身瞬步（6大拍→18帧完整叙事）：压低蓄力 → 左影闪现 → 右影闪现 → 双分身定格 → 飞镖收尾 → 稳落归位
+    clip("shadowstep", "影分身瞬步", [180, 110, 100, 110, 120, 170], [
+      kf({ head: { dy: 1, variant: "normal" }, torso: "leanL", armL: "forward", armR: "forward", legL: "crouch", legR: "crouch", prop: false }),
       kf({ head: { dx: -2, variant: "scarfUp" }, torso: { dx: -2, variant: "leanL" }, armL: { dx: -2, variant: "back" }, armR: { dx: -2, variant: "forward" }, legL: { dx: -2, variant: "step" }, legR: { dx: -2, variant: "kick" }, prop: false }, { afterimage: { dx: 7, dy: 0, tint: "c" } }),
       kf({ head: { dx: 2, variant: "glowRed" }, torso: { dx: 2, variant: "leanR" }, armL: { dx: 2, variant: "forward" }, armR: { dx: 2, variant: "back" }, legL: { dx: 2, variant: "kick" }, legR: { dx: 2, variant: "step" }, prop: false }, { afterimage: { dx: -7, dy: 0, tint: "c" }, fx: [[3, 4, ["..V......v.."]]] }),
       kf({ head: "normal", torso: "normal", armL: "mid", armR: "mid", legL: "wide", legR: "wide", prop: "default" }, { afterimage: [{ dx: -6, dy: 0, tint: "c" }, { dx: 6, dy: 0, tint: "w" }], fx: [[1, 14, ["CCCCCC................CCCCCC"]]] }),
       kf({ head: { dx: -1, variant: "scarfUp" }, torso: { dx: -1, variant: "leanL" }, armL: { dx: -1, variant: "forward" }, armR: { dx: -1, variant: "back" }, legL: { dx: -1, variant: "stand" }, legR: { dx: -1, variant: "step" }, prop: "shurikenX" }, { afterimage: { dx: 6, dy: 0, tint: "w" } }),
-    ]),
+      kf({ head: "normal", armL: "down", armR: "down", legL: "stand", legR: "stand", prop: "default" }),
+    ], { targetFrames: 18 }),
     // 替身术木桩：结印→白烟→全身部件隐藏只剩一截摇晃的带绿芽萌木桩→重新现身！
     clip("log", "替身术木桩", [160, 110, 230, 210, 170], [
       kf({ head: "glow", armL: "forward", armR: "forward", prop: false }),
@@ -2225,9 +2552,9 @@ const ninja = makeRiggedSprite({
 const ROLES_B = { teacher, gardener, photographer, courier, wizard, athlete, pilot, mechanic, baker, ninja };
 
 
-// Pixel citizen avatars: 20 rigged 32×32 pixel-art characters spanning diverse genders and professions.
+// Pixel citizen avatars: 20 rigged 64×64 pixel-art characters spanning diverse genders and professions.
 // Each character is composed of 7 independent skeletal parts (head, torso, armL, armR, legL, legR, prop)
-// and 5 independent occupation keyframe animation clips (100 clips total), cached per (role, clip, frame, hex).
+// and 5 smooth occupation keyframe animation clips (100 clips total, 12–20 frames each), cached per (role, clip, frame, hex).
 
 
 
@@ -2254,7 +2581,7 @@ function getPixelFrameCacheSize() {
 }
 
 /**
- * Render (and cache) one frame of a rigged 32×32 pixel citizen as a soft tinted badge + crisp SVG pixel paths.
+ * Render (and cache) one frame of a rigged 64×64 pixel citizen as a soft tinted badge + crisp SVG pixel paths.
  * `clipId`: omit/"" for default clip 0 (backward compatible), `"idle"` for calm resting pose, or any clip id in `sprite.animations`.
  */
 function renderPixelFrame(roleId, hex = "#3878fb", frameIndex = 0, clipId = "") {
@@ -2368,13 +2695,13 @@ const initials = (name) => (String(name || "").trim().slice(0, 1) || "·");
 function pixelPathsHTML(layers) {
   return layers.map((l) => `<path d="${l.d}" fill="${l.fill}"/>`).join("");
 }
-/** 一个头像的 SVG 标记。employee 头像渲染为 32×32 像素小人，用户头像仍是字母块。
+/** 一个头像的 SVG 标记。employee 头像渲染为 64×64 像素小人，用户头像仍是字母块。
     animate=true 的头像渲染后由 driveAvatars() 从该职业的 5 组独立动画中随机抽取播放。 */
 function avatarHTML(preset, seed, animate, wrap = "ta-avatar") {
   const pixel = PixelAvatar.resolvePixelAvatar(preset, seed || "");
-  const size = PixelAvatar.PIXEL_GRID_SIZE || 32;
+  const size = PixelAvatar.PIXEL_GRID_SIZE || 64;
   const frame = PixelAvatar.renderPixelFrame(pixel.role, pixel.hex, 0, "idle");
-  const svg = `<svg class="pixel-avatar" data-pixel="1" ${animate ? 'data-animate="1" ' : ""}data-role="${esc(pixel.role)}" data-color="${esc(pixel.hex)}" viewBox="0 0 ${size} ${size}" role="img" aria-hidden="true"><rect x="0" y="0" width="${size}" height="${size}" rx="6.8" fill="${frame.bg}"/><g data-layers="1" shape-rendering="crispEdges">${pixelPathsHTML(frame.layers)}</g></svg>`;
+  const svg = `<svg class="pixel-avatar" data-pixel="1" ${animate ? 'data-animate="1" ' : ""}data-role="${esc(pixel.role)}" data-color="${esc(pixel.hex)}" viewBox="0 0 ${size} ${size}" role="img" aria-hidden="true"><rect x="0" y="0" width="${size}" height="${size}" rx="13.6" fill="${frame.bg}"/><g data-layers="1" shape-rendering="crispEdges">${pixelPathsHTML(frame.layers)}</g></svg>`;
   return `<span class="${wrap} bot">${svg}</span>`;
 }
 
@@ -2392,7 +2719,7 @@ function driveAvatars() {
     if (!group) continue;
     let activeClip = PixelAvatar.pickRandomAnimation(role, avatarAnim.lastByRole.get(role) || "");
     avatarAnim.lastByRole.set(role, activeClip.id);
-    let index = 0, loopsLeft = 2;
+    let index = 0, loopsLeft = activeClip.durations.reduce((s, d) => s + d, 0) < 1300 ? 2 : 1;
     const renderCurrent = (clipId, frameIdx) => {
       const frame = PixelAvatar.renderPixelFrame(role, hex, frameIdx, clipId);
       group.innerHTML = pixelPathsHTML(frame.layers);
@@ -2417,7 +2744,7 @@ function driveAvatars() {
         if (!svg.isConnected) return;
         activeClip = PixelAvatar.pickRandomAnimation(role, activeClip.id);
         avatarAnim.lastByRole.set(role, activeClip.id);
-        index = 0; loopsLeft = 2;
+        index = 0; loopsLeft = activeClip.durations.reduce((s, d) => s + d, 0) < 1300 ? 2 : 1;
         renderCurrent(activeClip.id, 0);
         avatarAnim.timers.push(setTimeout(step, activeClip.durations[0] ?? 160));
       }, 240 + Math.round(Math.random() * 200)));
