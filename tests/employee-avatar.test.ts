@@ -20,7 +20,15 @@ import {
   bubbleTint,
   avatarBubble,
 } from "../shared/employee-avatars";
-import { PIXEL_GRID_SIZE, PIXEL_SPRITES, PIXEL_ROLE_IDS, renderPixelFrame, shade } from "../web/src/pixel-avatar.js";
+import {
+  PIXEL_GRID_SIZE,
+  PIXEL_SPRITES,
+  PIXEL_ROLE_IDS,
+  renderPixelFrame,
+  pickRandomAnimation,
+  getPixelSprite,
+  shade,
+} from "../web/src/pixel-avatar.js";
 import { updateEmployeeAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
 import { Store } from "../server/core/store";
@@ -54,40 +62,74 @@ test("all 12 zodiac presets are real square WebP assets and avatar URLs never ac
   }
 });
 
-test("pixel citizen avatars span diverse genders and professions, each with its own independent multi-frame pixel animation", () => {
+test("32x32 pixel citizen avatars span diverse genders and professions, each with >= 5 distinct occupation animations (4-8 frames each)", () => {
+  assert.equal(PIXEL_GRID_SIZE, 32, "upgraded to 32×32 pixel grid");
   assert(PIXEL_AVATAR_ROLES.length >= 20 && PIXEL_AVATAR_COLORS.length >= 12);
   assert.equal(new Set(PIXEL_AVATAR_ROLES.map(role => role.id)).size, PIXEL_AVATAR_ROLES.length);
-  assert.equal(new Set(PIXEL_AVATAR_ROLES.map(role => role.action)).size, PIXEL_AVATAR_ROLES.length, "every role has a distinct animation name");
   const females = PIXEL_AVATAR_ROLES.filter(role => role.gender === "female");
   const males = PIXEL_AVATAR_ROLES.filter(role => role.gender === "male");
   assert(females.length >= 8 && males.length >= 8, "both genders are well represented");
   assert.deepEqual(PIXEL_AVATAR_GENDERS.map(g => g.id), ["all", "female", "male"]);
   assert.deepEqual(PIXEL_ROLE_IDS, PIXEL_AVATAR_ROLES.map(role => role.id));
 
-  const animationSignatures = new Set<string>();
-  for (const role of PIXEL_AVATAR_ROLES) {
-    const sprite = (PIXEL_SPRITES as Record<string, any>)[role.id];
-    assert(sprite, role.id);
-    assert.equal(sprite.gender, role.gender, role.id);
-    assert(sprite.frames.length >= 4, `${role.id} has multi-frame animation`);
-    assert.equal(sprite.durations.length, sprite.frames.length, `${role.id} has per-frame cadence`);
-    for (const ms of sprite.durations) assert(ms >= 100 && ms <= 600, `${role.id} duration in range`);
+  const allClipSignatures = new Set<string>();
+  let totalClips = 0;
 
-    const frameHashes = new Set<string>();
-    for (let f = 0; f < sprite.frames.length; f++) {
-      const grid = sprite.frames[f];
-      assert.equal(grid.length, PIXEL_GRID_SIZE, `${role.id} frame ${f} height`);
-      for (const row of grid) assert.equal(row.length, PIXEL_GRID_SIZE, `${role.id} frame ${f} width`);
-      const rendered = renderPixelFrame(role.id, "#3878fb", f);
-      assert(rendered.layers.length >= 5, `${role.id} frame ${f} has multi-color pixel layers`);
-      assert.match(rendered.bg, /^#[0-9a-f]{6}$/);
-      for (const layer of rendered.layers) {
-        assert.match(layer.d, /^M\d+ \d+h\d+v1h-\d+z/, `${role.id} valid pixel path`);
+  for (const role of PIXEL_AVATAR_ROLES) {
+    const sprite = getPixelSprite(role.id);
+    assert.equal(sprite.id, role.id);
+    assert.equal(sprite.gender, role.gender, role.id);
+    assert(role.actions.length >= 5, `${role.id} defines >= 5 actions in shared metadata`);
+    assert(sprite.animations.length >= 5, `${role.id} has >= 5 independent animations`);
+    assert.deepEqual(sprite.actions, [...role.actions], `${role.id} sprite actions match shared metadata`);
+    assert.equal(new Set(sprite.animations.map((c: any) => c.id)).size, sprite.animations.length, `${role.id} clip ids are unique`);
+    assert.equal(new Set(sprite.animations.map((c: any) => c.name)).size, sprite.animations.length, `${role.id} clip names are unique`);
+
+    // Verify idle frame is valid 32×32 and renders cleanly
+    assert.equal(sprite.idle.length, PIXEL_GRID_SIZE);
+    for (const row of sprite.idle) assert.equal(row.length, PIXEL_GRID_SIZE);
+    const idleRendered = renderPixelFrame(role.id, "#3878fb", 0, "idle");
+    assert(idleRendered.layers.length >= 6, `${role.id} idle frame has rich shaded pixel layers`);
+
+    // Verify all 5 occupation clips for this role
+    const roleClipSignatures = new Set<string>();
+    for (const clipObj of sprite.animations) {
+      totalClips++;
+      assert(clipObj.frames.length >= 4 && clipObj.frames.length <= 8, `${role.id}:${clipObj.id} has 4-8 frames`);
+      assert.equal(clipObj.durations.length, clipObj.frames.length, `${role.id}:${clipObj.id} has per-frame timing`);
+      for (const ms of clipObj.durations) assert(ms >= 80 && ms <= 500, `${role.id}:${clipObj.id} duration in range`);
+
+      const frameHashes = new Set<string>();
+      for (let f = 0; f < clipObj.frames.length; f++) {
+        const matrix = clipObj.frames[f];
+        assert.equal(matrix.length, PIXEL_GRID_SIZE, `${role.id}:${clipObj.id} frame ${f} height`);
+        for (const row of matrix) assert.equal(row.length, PIXEL_GRID_SIZE, `${role.id}:${clipObj.id} frame ${f} width`);
+        const rendered = renderPixelFrame(role.id, "#3878fb", f, clipObj.id);
+        assert(rendered.layers.length >= 4, `${role.id}:${clipObj.id} frame ${f} renders multi-color pixel paths`);
+        assert.match(rendered.bg, /^#[0-9a-f]{6}$/);
+        for (const layer of rendered.layers) {
+          assert.match(layer.d, /^M\d+ \d+h\d+v1h-\d+z/, `${role.id}:${clipObj.id} valid pixel path`);
+        }
+        frameHashes.add(JSON.stringify(rendered.layers.map((l: { fill: string; d: string }) => [l.fill, l.d])));
       }
-      frameHashes.add(JSON.stringify(rendered.layers.map((l: { fill: string; d: string }) => [l.fill, l.d])));
+      assert(frameHashes.size >= 3, `${role.id}:${clipObj.id} visually animates across frames`);
+      const sig = [...frameHashes].join("|");
+      roleClipSignatures.add(sig);
+      allClipSignatures.add(sig);
     }
-    assert(frameHashes.size >= 3, `${role.id} animation frames visually change across its cycle`);
-    animationSignatures.add([...frameHashes].join("|"));
+    assert.equal(roleClipSignatures.size, sprite.animations.length, `${role.id} all 5 clips are visually distinct`);
+
+    // Verify random picker selects from this role's clips and avoids immediate repeat when excluded
+    const chosen = new Set<string>();
+    let prev = "";
+    for (let i = 0; i < 40; i++) {
+      const next = pickRandomAnimation(role.id, prev);
+      assert(next.id !== prev, `${role.id} avoids repeating the same clip immediately`);
+      assert(sprite.animations.some((c: any) => c.id === next.id));
+      chosen.add(next.id);
+      prev = next.id;
+    }
+    assert(chosen.size >= 4, `${role.id} random picker visits diverse occupation animations`);
 
     for (const color of PIXEL_AVATAR_COLORS) {
       const value = pixelAvatarPreset(role.id, color.id);
@@ -96,7 +138,12 @@ test("pixel citizen avatars span diverse genders and professions, each with its 
       assert.equal(employeeAvatarURL("employee", value), "", "pixel avatars render inline, never as a URL");
     }
   }
-  assert.equal(animationSignatures.size, PIXEL_AVATAR_ROLES.length, "every citizen has a unique independent animation");
+  assert.equal(totalClips, 100, "20 professions × 5 occupation animations = 100 total clips");
+  assert.equal(allClipSignatures.size, totalClips, "every single occupation animation clip across all 20 roles is unique");
+
+  // Backward-compatible 3-arg renderPixelFrame still works
+  assert(renderPixelFrame("coder", "#3878fb", 0).layers.length >= 5);
+  assert(renderPixelFrame("unknown", "#3878fb", 0).layers.length >= 5);
 
   for (const value of [
     "pixel:", "pixel:coder", "pixel:coder:", "pixel:unknown:red", "pixel:coder:unknown",
@@ -208,7 +255,6 @@ test("invalid, oversized and disguised image uploads leave the current avatar an
 });
 
 test("my own message bubbles take the color of the employee I am talking to, one color per employee", () => {
-  // 用户气泡一律白字：亮色（橙、琥珀、天蓝）压暗而不是换成黑字。
   assert.equal(bubbleTint("#1d1d21").fill, "#1d1d21", "deep fills keep their exact color");
   assert.notEqual(bubbleTint("#ffa424").fill, "#ffa424");
   assert.equal(bubbleTint("#ffa424").ink, "#fff");
@@ -224,7 +270,6 @@ test("my own message bubbles take the color of the employee I am talking to, one
     const [light, dark] = [luminance(fill), luminance(ink)].sort((a, b) => b - a);
     assert((light + 0.05) / (dark + 0.05) >= 4.5, `${color.id} bubble text is below WCAG AA`);
   }
-  // The bubble follows the avatar that employee actually shows: pixel preset, legacy bot preset, else default pixel citizen.
   assert.deepEqual(avatarBubble("pixel:doctor:teal", "any"), bubbleTint("#0fb4a3"));
   assert.deepEqual(avatarBubble("bot:cloud:teal", "any"), bubbleTint("#0fb4a3"));
   assert.deepEqual(avatarBubble("pixel:doctor:teal", "another"), avatarBubble("pixel:doctor:teal", "any"));

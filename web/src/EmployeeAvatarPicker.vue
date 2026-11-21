@@ -1,8 +1,9 @@
 <script setup vapor>
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import Icon from "./Icon.vue";
 import EmployeeAvatar from "./EmployeeAvatar.vue";
 import PixelAvatar from "./PixelAvatar.vue";
+import { getPixelSprite } from "./pixel-avatar.js";
 import {
   PIXEL_AVATAR_COLORS,
   PIXEL_AVATAR_GENDERS,
@@ -14,14 +15,17 @@ import {
 
 const props = defineProps({ api: Function, employeeId: String, avatar: String, name: String });
 const emit = defineEmits(["change"]);
-const busy = ref(false), error = ref(""), fileInput = ref(null), genderFilter = ref("all");
+const busy = ref(false), error = ref(""), fileInput = ref(null), genderFilter = ref("all"), previewClip = ref(""), playingAction = ref("");
 
 // The color row and character grid edit one `pixel:<role>:<color>` preset; start from the current resolved citizen.
 const current = computed(() => parsePixelAvatar(props.avatar));
 const draft = computed(() => resolvePixelAvatar(props.avatar, props.employeeId || props.name || ""));
 const activeRole = computed(() => PIXEL_AVATAR_ROLES.find((item) => item.id === draft.value.role) || PIXEL_AVATAR_ROLES[0]);
+const activeClips = computed(() => getPixelSprite(draft.value.role).animations);
 const colorHex = computed(() => PIXEL_AVATAR_COLORS.find((color) => color.id === draft.value.color)?.hex || "#3878fb");
 const visibleRoles = computed(() => genderFilter.value === "all" ? PIXEL_AVATAR_ROLES : PIXEL_AVATAR_ROLES.filter((role) => role.gender === genderFilter.value));
+
+watch(() => draft.value.role, () => { previewClip.value = ""; playingAction.value = ""; });
 
 function defaultHexOf(role) {
   return PIXEL_AVATAR_COLORS.find((color) => color.id === role.defaultColor)?.hex || colorHex.value;
@@ -31,6 +35,9 @@ function cardHex(role) {
 }
 function genderCount(id) {
   return id === "all" ? PIXEL_AVATAR_ROLES.length : PIXEL_AVATAR_ROLES.filter((role) => role.gender === id).length;
+}
+function togglePreviewClip(id) {
+  previewClip.value = previewClip.value === id ? "" : id;
 }
 
 async function save(payload) {
@@ -61,13 +68,19 @@ async function upload(event) {
 <template>
   <section class="card avatar-picker" aria-label="热心市民头像" :aria-busy="busy">
     <div class="avatar-head">
-      <span class="avatar-current" aria-hidden="true"><EmployeeAvatar :employee-id="employeeId" :name="name" :avatar="avatar" :animate="true" /></span>
+      <span class="avatar-current" aria-hidden="true">
+        <EmployeeAvatar v-if="!previewClip" :employee-id="employeeId" :name="name" :avatar="avatar" :animate="true" @clip="playingAction = $event.name" />
+        <PixelAvatar v-else :role="draft.role" :hex="colorHex" :animate="true" :clip="previewClip" @clip="playingAction = $event.name" />
+      </span>
       <div class="avatar-text">
         <div class="avatar-title-row">
           <h3>像素小人头像</h3>
-          <span class="role-badge">{{ activeRole.name }} · {{ activeRole.gender === "female" ? "女" : "男" }} · {{ activeRole.action }}</span>
+          <span class="role-badge">{{ activeRole.name }} · {{ activeRole.gender === "female" ? "女" : "男" }} · {{ playingAction || activeRole.action }}</span>
         </div>
-        <p class="hint">挑选不同性别与职业的像素小人（每位都有独立动画）和主题色，或上传自定义图片，立即生效。</p>
+        <p class="hint">每位像素小人都有 {{ activeClips.length }} 组职业专属恶搞动画，任务运行中会随机切换播放。</p>
+        <div class="clip-pills" role="group" aria-label="预览职业动画">
+          <button v-for="item in activeClips" :key="item.id" type="button" :class="['clip-pill', { selected: previewClip === item.id }]" :aria-pressed="previewClip === item.id" @click="togglePreviewClip(item.id)">{{ item.name }}</button>
+        </div>
       </div>
     </div>
 
@@ -87,13 +100,13 @@ async function upload(event) {
         :class="['role-card', { selected: current?.role === role.id }]"
         :aria-pressed="current?.role === role.id"
         :aria-label="'使用' + role.name + '像素小人'"
-        :title="role.name + '（' + (role.gender === 'female' ? '女' : '男') + ' · ' + role.action + '）'"
+        :title="role.name + '（' + (role.gender === 'female' ? '女' : '男') + ' · ' + role.actions.join(' / ') + '）'"
         :disabled="busy"
         @click="pickRole(role)"
       >
         <span class="role-sprite" aria-hidden="true"><PixelAvatar :role="role.id" :hex="cardHex(role)" :animate="true" /></span>
         <span class="role-name">{{ role.name }}</span>
-        <span class="role-action">{{ role.action }}</span>
+        <span class="role-action">{{ role.actions.length }} 组动画</span>
       </button>
     </div>
 
@@ -107,12 +120,16 @@ async function upload(event) {
   </section>
 </template>
 <style scoped>
-.avatar-head { display: flex; align-items: center; gap: 12px; }
-.avatar-current { display: grid; place-items: center; flex: none; width: 56px; height: 56px; overflow: hidden; border-radius: 14px; background: var(--accent-soft); color: var(--accent-text); font-size: 22px; font-weight: 600; }
-.avatar-text { min-width: 0; }
+.avatar-head { display: flex; align-items: flex-start; gap: 12px; }
+.avatar-current { display: grid; place-items: center; flex: none; width: 64px; height: 64px; overflow: hidden; border-radius: 14px; background: var(--accent-soft); color: var(--accent-text); font-size: 22px; font-weight: 600; }
+.avatar-text { min-width: 0; flex: 1; }
 .avatar-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; margin-bottom: 2px; }
 .avatar-text h3 { font-size: 14px; }
 .role-badge { padding: 1px 7px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); font-size: 11px; font-weight: 500; }
+.clip-pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.clip-pill { height: 22px; min-height: 0; padding: 0 7px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text-2); font-size: 11px; font-weight: 400; }
+.clip-pill:hover:not(:disabled) { border-color: var(--accent); color: var(--accent-text); }
+.clip-pill.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-text); font-weight: 500; }
 .color-row { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 6px 4px; margin: 14px 0 12px; }
 .swatch { justify-self: center; width: 28px; height: 28px; min-height: 0; padding: 0; border: 0; border-radius: 50%; background: var(--swatch); box-shadow: inset 0 0 0 1px rgb(0 0 0 / .08); }
 .swatch.selected { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--swatch); }
@@ -125,7 +142,7 @@ async function upload(event) {
 .role-card { display: flex; flex-direction: column; align-items: center; gap: 3px; height: auto; min-height: 0; padding: 8px 4px 7px; border: 2px solid transparent; border-radius: 12px; background: var(--surface-2); color: var(--text); transition: background .12s, border-color .12s; }
 .role-card:hover:not(:disabled) { background: var(--accent-softer); }
 .role-card.selected { border-color: var(--accent); background: var(--accent-soft); }
-.role-sprite { display: grid; place-items: center; width: 44px; height: 44px; border-radius: 10px; overflow: hidden; }
+.role-sprite { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 10px; overflow: hidden; }
 .role-name { font-size: 12px; font-weight: 600; line-height: 1.25; }
 .role-action { color: var(--muted); font-size: 10px; line-height: 1.2; }
 .avatar-actions { display: flex; gap: 6px; flex-wrap: wrap; margin: 12px 0 0; }
