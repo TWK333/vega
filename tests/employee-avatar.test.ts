@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import sharp from "sharp";
@@ -23,6 +24,7 @@ import {
 import {
   PIXEL_GRID_SIZE,
   RIG_PARTS,
+  RIG_ANGLES,
   PIXEL_SPRITES,
   PIXEL_ROLE_IDS,
   composeKeyframe,
@@ -32,6 +34,7 @@ import {
   clearPixelFrameCache,
   getPixelFrameCacheSize,
   shade,
+  shadePaletteForAngle,
 } from "../web/src/pixel-avatar.js";
 import { updateEmployeeAvatar } from "../server/core/employee-avatar";
 import { Employee, type EmployeeRuntime } from "../server/core/employee";
@@ -66,9 +69,10 @@ test("all 12 zodiac presets are real square WebP assets and avatar URLs never ac
   }
 });
 
-test("64x64 rigged pixel citizens expose 7 skeletal parts with joint-arc poses, 100 smooth 12-20 frame keyframe animations, and (role,clip,frame,hex) caching", () => {
+test("64x64 multi-angle rigged pixel citizens expose 7 skeletal parts across front/side/back views, 100 rich 20-30 frame (3-6s) keyframe animations, and (role,clip,frame,hex) caching", () => {
   assert.equal(PIXEL_GRID_SIZE, 64, "upgraded to 64×64 pixel grid");
   assert.deepEqual([...RIG_PARTS], ["head", "torso", "armL", "armR", "legL", "legR", "prop"]);
+  assert.deepEqual([...RIG_ANGLES], ["front", "side", "back"]);
   assert(PIXEL_AVATAR_ROLES.length >= 20 && PIXEL_AVATAR_COLORS.length >= 12);
   assert.equal(new Set(PIXEL_AVATAR_ROLES.map(role => role.id)).size, PIXEL_AVATAR_ROLES.length);
   const females = PIXEL_AVATAR_ROLES.filter(role => role.gender === "female");
@@ -79,6 +83,12 @@ test("64x64 rigged pixel citizens expose 7 skeletal parts with joint-arc poses, 
 
   const allClipSignatures = new Set<string>();
   let totalClips = 0;
+  let clipsUsingSide = 0;
+  let clipsUsingBack = 0;
+  let clipsSwitchingAngles = 0;
+  let clipsUsingLeftFacing = 0;
+
+  const matrixHash = (mat: string[][]) => mat.map((r) => r.join("")).join("\n");
 
   for (const role of PIXEL_AVATAR_ROLES) {
     const sprite = getPixelSprite(role.id);
@@ -90,27 +100,46 @@ test("64x64 rigged pixel citizens expose 7 skeletal parts with joint-arc poses, 
     assert.equal(new Set(sprite.animations.map((c: any) => c.id)).size, sprite.animations.length, `${role.id} clip ids are unique`);
     assert.equal(new Set(sprite.animations.map((c: any) => c.name)).size, sprite.animations.length, `${role.id} clip names are unique`);
 
-    // 1. Verify 7-part skeletal rig structure, 64×64 part assets & intermediate joint-arc variants
-    assert(sprite.rig, `${role.id} has skeletal rig`);
-    for (const part of RIG_PARTS) {
-      const variants = (sprite.rig as Record<string, Record<string, string[][]>>)[part];
-      assert(variants && typeof variants === "object", `${role.id}.rig.${part} exists`);
-      if (part === "armL" || part === "armR") {
-        for (const arcPose of ["down", "lowOut", "mid", "highOut", "up", "forwardLow", "forward", "forwardHigh"]) {
-          assert(variants[arcPose], `${role.id}.rig.${part} includes intermediate arc pose ${arcPose}`);
+    // 1. Verify 7-part skeletal rig structure across all 3 angles (front/side/back), 64×64 assets & intermediate joint-arc variants
+    assert(sprite.rig && sprite.rig.angles, `${role.id} has multi-angle skeletal rig`);
+    for (const angle of RIG_ANGLES) {
+      const angleRig = (sprite.rig.angles as Record<string, Record<string, Record<string, string[][]>>>)[angle];
+      assert(angleRig && typeof angleRig === "object", `${role.id}.rig.angles.${angle} exists`);
+      for (const part of RIG_PARTS) {
+        const variants = angleRig[part];
+        assert(variants && typeof variants === "object", `${role.id}.rig.angles.${angle}.${part} exists`);
+        if (part === "armL" || part === "armR") {
+          for (const arcPose of ["down", "lowOut", "mid", "highOut", "up", "forwardLow", "forward", "forwardHigh"]) {
+            assert(variants[arcPose], `${role.id}.rig.angles.${angle}.${part} includes arc pose ${arcPose}`);
+          }
+        } else if (part === "legL" || part === "legR") {
+          for (const stridePose of ["stand", "halfStep", "step", "halfWide", "wide", "halfCrouch", "crouch"]) {
+            assert(variants[stridePose], `${role.id}.rig.angles.${angle}.${part} includes stride pose ${stridePose}`);
+          }
+        } else if (part !== "prop") {
+          assert(Object.keys(variants).length >= 5, `${role.id}.rig.angles.${angle}.${part} has multiple articulated variants`);
         }
-      } else if (part === "legL" || part === "legR") {
-        for (const stridePose of ["stand", "halfStep", "step", "halfWide", "wide", "halfCrouch", "crouch"]) {
-          assert(variants[stridePose], `${role.id}.rig.${part} includes intermediate stride pose ${stridePose}`);
+        for (const [vName, mat] of Object.entries(variants)) {
+          assert.equal(mat.length, PIXEL_GRID_SIZE, `${role.id}.rig.angles.${angle}.${part}.${vName} height`);
+          for (const row of mat) assert.equal(row.length, PIXEL_GRID_SIZE, `${role.id}.rig.angles.${angle}.${part}.${vName} width`);
         }
-      } else if (part !== "prop") {
-        assert(Object.keys(variants).length >= 5, `${role.id}.rig.${part} has multiple articulated variants`);
-      }
-      for (const [vName, mat] of Object.entries(variants)) {
-        assert.equal(mat.length, PIXEL_GRID_SIZE, `${role.id}.rig.${part}.${vName} height`);
-        for (const row of mat) assert.equal(row.length, PIXEL_GRID_SIZE, `${role.id}.rig.${part}.${vName} width`);
       }
     }
+    // Verify front, side (right/left), and back actually produce visually distinct 64×64 poses + directional palette shading
+    const frontMat = matrixHash(composeKeyframe(sprite.rig, { ...sprite.idleKeyframe, angle: "front", facing: "right" }));
+    const sideRMat = matrixHash(composeKeyframe(sprite.rig, { ...sprite.idleKeyframe, angle: "side", facing: "right" }));
+    const sideLMat = matrixHash(composeKeyframe(sprite.rig, { ...sprite.idleKeyframe, angle: "side", facing: "left" }));
+    const backMat = matrixHash(composeKeyframe(sprite.rig, { ...sprite.idleKeyframe, angle: "back", facing: "right" }));
+    assert.notEqual(frontMat, sideRMat, `${role.id} side view differs from front view`);
+    assert.notEqual(frontMat, backMat, `${role.id} back view differs from front view`);
+    assert.notEqual(sideRMat, backMat, `${role.id} side view differs from back view`);
+    assert.notEqual(sideRMat, sideLMat, `${role.id} side facing left flips horizontally vs right`);
+    const basePal = sprite.palette("#3878fb");
+    const sidePal = shadePaletteForAngle(basePal, "side");
+    const backPal = shadePaletteForAngle(basePal, "back");
+    assert.notEqual(sidePal.A, basePal.A, `${role.id} side palette shades accent tone`);
+    assert.notEqual(backPal.A, basePal.A, `${role.id} back palette shades accent tone`);
+    assert.notEqual(backPal.A, sidePal.A, `${role.id} back palette is deeper than side palette`);
 
     // 2. Verify idle keyframe covers all 7 parts and composes cleanly to 64×64
     assert(sprite.idleKeyframe, `${role.id} has idleKeyframe`);
@@ -123,24 +152,37 @@ test("64x64 rigged pixel citizens expose 7 skeletal parts with joint-arc poses, 
     const idleRendered = renderPixelFrame(role.id, "#3878fb", 0, "idle");
     assert(idleRendered.layers.length >= 6, `${role.id} idle frame has rich shaded pixel layers`);
 
-    // 3. Verify all 5 occupation keyframe clips (12–20 frames each) & smooth local articulation
+    // 3. Verify all 5 occupation keyframe clips (20–30 frames / 3–6s rich multi-beat stories) & smooth local articulation
     const roleClipSignatures = new Set<string>();
     for (const clipObj of sprite.animations) {
       totalClips++;
       assert(Array.isArray(clipObj.keyframes), `${role.id}:${clipObj.id} stores keyframes table`);
-      assert(clipObj.keyframes.length >= 12 && clipObj.keyframes.length <= 20, `${role.id}:${clipObj.id} has 12-20 keyframes (got ${clipObj.keyframes.length})`);
+      assert(clipObj.beatCount >= 6, `${role.id}:${clipObj.id} has >= 6 rich authored story beats (got ${clipObj.beatCount})`);
+      assert(clipObj.keyframes.length >= 20 && clipObj.keyframes.length <= 30, `${role.id}:${clipObj.id} has 20-30 keyframes (got ${clipObj.keyframes.length})`);
       assert.equal(clipObj.durations.length, clipObj.keyframes.length, `${role.id}:${clipObj.id} has per-frame timing`);
-      for (const ms of clipObj.durations) assert(ms >= 50 && ms <= 300, `${role.id}:${clipObj.id} duration ${ms}ms in range`);
+      let totalMs = 0;
+      for (const ms of clipObj.durations) {
+        assert(ms >= 85 && ms <= 320, `${role.id}:${clipObj.id} natural frame duration ${ms}ms in range`);
+        totalMs += ms;
+      }
+      assert(totalMs >= 3000 && totalMs <= 6000, `${role.id}:${clipObj.id} cycle duration ${totalMs}ms within 3-6s target`);
+      assert(Math.max(...clipObj.durations) > Math.min(...clipObj.durations), `${role.id}:${clipObj.id} varies beat holds vs crisp transitions`);
 
       const frameHashes = new Set<string>();
+      const clipAngles = new Set<string>();
+      const clipFacings = new Set<string>();
       const partMotionSignatures = new Map<string, Set<string>>(RIG_PARTS.map((p) => [p, new Set<string>()]));
 
       for (let f = 0; f < clipObj.keyframes.length; f++) {
         const keyframe = clipObj.keyframes[f];
+        assert((RIG_ANGLES as readonly string[]).includes(keyframe.angle), `${role.id}:${clipObj.id}[${f}] valid angle "${keyframe.angle}"`);
+        assert(keyframe.facing === "left" || keyframe.facing === "right", `${role.id}:${clipObj.id}[${f}] valid facing "${keyframe.facing}"`);
+        clipAngles.add(keyframe.angle);
+        clipFacings.add(keyframe.facing);
         for (const part of RIG_PARTS) {
           const tf = (keyframe as any)[part];
           assert(tf && typeof tf.dx === "number" && typeof tf.dy === "number" && typeof tf.variant === "string" && typeof tf.flip === "boolean" && typeof tf.visible === "boolean", `${role.id}:${clipObj.id}[${f}].${part}`);
-          if (tf.visible) assert((sprite.rig as any)[part]?.[tf.variant], `${role.id}:${clipObj.id}[${f}].${part} variant "${tf.variant}" exists in rig`);
+          if (tf.visible) assert((sprite.rig.angles as any)[keyframe.angle]?.[part]?.[tf.variant], `${role.id}:${clipObj.id}[${f}].${part} variant "${tf.variant}" exists in angle "${keyframe.angle}"`);
           partMotionSignatures.get(part)!.add(`${tf.dx},${tf.dy},${tf.variant},${tf.flip},${tf.visible}`);
         }
         const matrix = composeKeyframe(sprite.rig, keyframe);
@@ -158,6 +200,10 @@ test("64x64 rigged pixel citizens expose 7 skeletal parts with joint-arc poses, 
       assert(frameHashes.size >= 6, `${role.id}:${clipObj.id} has smooth multi-frame progression`);
       const movingParts = [...partMotionSignatures.values()].filter((s) => s.size > 1).length;
       assert(movingParts >= 2, `${role.id}:${clipObj.id} articulates multiple skeletal parts independently`);
+      if (clipAngles.has("side")) clipsUsingSide++;
+      if (clipAngles.has("back")) clipsUsingBack++;
+      if (clipAngles.size >= 2 || clipFacings.size >= 2) clipsSwitchingAngles++;
+      if (clipFacings.has("left")) clipsUsingLeftFacing++;
 
       const sig = [...frameHashes].join("|");
       roleClipSignatures.add(sig);
@@ -186,6 +232,33 @@ test("64x64 rigged pixel citizens expose 7 skeletal parts with joint-arc poses, 
   }
   assert.equal(totalClips, 100, "20 professions × 5 occupation animations = 100 total clips");
   assert.equal(allClipSignatures.size, totalClips, "every single occupation animation clip across all 20 roles is unique");
+  assert(clipsUsingSide >= 60, `expected broad side-view coverage across 100 clips (got ${clipsUsingSide})`);
+  assert(clipsUsingBack >= 15, `expected rich back-view coverage across 100 clips (got ${clipsUsingBack})`);
+  assert(clipsSwitchingAngles >= 25, `expected many clips switching angles dynamically mid-clip (got ${clipsSwitchingAngles})`);
+  assert(clipsUsingLeftFacing >= 5, `expected left-facing side flips across clips (got ${clipsUsingLeftFacing})`);
+
+  // Verify flagship mid-clip multi-angle storytelling transitions & expanded story beats
+  const ninjaStep = getPixelSprite("ninja").animations.find((c: any) => c.id === "shadowstep")!;
+  const ninjaAngles = new Set(ninjaStep.keyframes.map((k: any) => `${k.angle}:${k.facing}`));
+  assert(ninjaAngles.has("front:right") && ninjaAngles.has("side:left") && ninjaAngles.has("side:right") && ninjaAngles.has("back:right"), "ninja:shadowstep cycles front → side(left/right) → back");
+  assert(ninjaStep.keyframes.length >= 28, "ninja:shadowstep expanded to rich 30-frame sequence");
+  const coderTyping = getPixelSprite("coder").animations.find((c: any) => c.id === "typing")!;
+  const coderTypingAngles = new Set(coderTyping.keyframes.map((k: any) => k.angle));
+  assert(coderTypingAngles.has("front") && coderTypingAngles.has("side"), "coder:typing cuts between front and over-the-shoulder side view");
+  assert(coderTyping.keyframes.some((k: any) => k.prop.visible && k.prop.variant === "extinguisher"), "coder:typing includes fire-extinguisher aftermath beat");
+  const chefWok = getPixelSprite("chef").animations.find((c: any) => c.id === "wok")!;
+  assert(chefWok.keyframes.some((k: any) => k.angle === "side") && chefWok.keyframes.some((k: any) => k.angle === "front"), "chef:wok showcases side wok toss + front finish");
+  assert(chefWok.keyframes.some((k: any) => k.prop.visible && k.prop.variant === "plate"), "chef:wok finishes with golden plating beat");
+  const astroFloat = getPixelSprite("astronaut").animations.find((c: any) => c.id === "float")!;
+  const astroAngles = new Set(astroFloat.keyframes.map((k: any) => `${k.angle}:${k.facing}`));
+  assert(astroAngles.has("front:right") && astroAngles.has("side:right") && astroAngles.has("back:right") && astroAngles.has("side:left"), "astronaut:float rotates 360° across all 4 headings");
+
+  // Verify local/assistant_page.html embedded PixelAvatar engine is synced with 64×64 multi-angle rig
+  const assistantHtml = readFileSync("local/assistant_page.html", "utf8");
+  assert(assistantHtml.includes("const PIXEL_GRID_SIZE = 64;"), "assistant_page.html synced to 64×64 grid");
+  assert(assistantHtml.includes('const RIG_ANGLES = Object.freeze(["front", "side", "back"]);'), "assistant_page.html includes RIG_ANGLES");
+  assert(assistantHtml.includes("shadePaletteForAngle"), "assistant_page.html includes angle-aware 3D shading");
+  assert(assistantHtml.includes("RIG_PARTS, RIG_ANGLES"), "assistant_page.html exposes RIG_PARTS & RIG_ANGLES on window.PixelAvatar");
 
   // 5. Verify (role, clip, frame, hex) cache behavior & backward-compatible 3-arg API
   clearPixelFrameCache();

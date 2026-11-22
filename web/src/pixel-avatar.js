@@ -1,12 +1,12 @@
-// Pixel citizen avatars: 20 rigged 64×64 pixel-art characters spanning diverse genders and professions.
-// Each character is composed of 7 independent skeletal parts (head, torso, armL, armR, legL, legR, prop)
+// Pixel citizen avatars: 20 rigged 64×64 multi-angle ("Pixel 3D" / 2.5D) pixel-art characters.
+// Each character has 7 independent skeletal parts (head, torso, armL, armR, legL, legR, prop) across 3 views (front/side/back)
 // and 5 smooth occupation keyframe animation clips (100 clips total, 12–20 frames each), cached per (role, clip, frame, hex).
 
-import { PIXEL_GRID_SIZE, RIG_PARTS, compileGrid, composeKeyframe, shade } from "./pixel-rig.js";
+import { PIXEL_GRID_SIZE, RIG_ANGLES, RIG_PARTS, compileGrid, composeKeyframe, shade, shadePaletteForAngle } from "./pixel-rig.js";
 import { ROLES_A } from "./pixel-roles-a.js";
 import { ROLES_B } from "./pixel-roles-b.js";
 
-export { PIXEL_GRID_SIZE, RIG_PARTS, compileGrid, composeKeyframe, shade };
+export { PIXEL_GRID_SIZE, RIG_ANGLES, RIG_PARTS, compileGrid, composeKeyframe, shade, shadePaletteForAngle };
 
 export const PIXEL_SPRITES = { ...ROLES_A, ...ROLES_B };
 export const PIXEL_ROLE_IDS = Object.keys(PIXEL_SPRITES);
@@ -55,7 +55,7 @@ export function renderPixelFrame(roleId, hex = "#3878fb", frameIndex = 0, clipId
   if (cached) return cached;
 
   const matrix = composeKeyframe(sprite.rig, keyframe);
-  const paletteMap = sprite.palette(color);
+  const paletteMap = shadePaletteForAngle(sprite.palette(color), keyframe.angle);
   const rendered = {
     bg: shade(color, 0.87),
     border: shade(color, 0.72),

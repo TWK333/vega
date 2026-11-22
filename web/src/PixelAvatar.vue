@@ -43,11 +43,11 @@ function chooseClip() {
 function startClip(clipObj, stagger = false) {
   activeClipId.value = clipObj.id;
   frameIndex.value = 0;
-  // Each 12–20 frame occupation story runs ~1.4–2.6s; play 1 full leisurely cycle (or 2 if fast) before rotating.
+  // Each 20–30 frame multi-angle story runs 3–6s; play 1 full rich cycle before switching clips.
   const totalMs = clipObj.durations.reduce((sum, ms) => sum + ms, 0);
-  loopsLeft = props.clip ? Number.POSITIVE_INFINITY : (totalMs < 1300 ? 2 : 1);
+  loopsLeft = props.clip ? Number.POSITIVE_INFINITY : (totalMs < 2400 ? 2 : 1);
   emit("clip", { id: clipObj.id, name: clipObj.name });
-  const baseDelay = clipObj.durations[0] ?? 110;
+  const baseDelay = clipObj.durations[0] ?? 150;
   const firstDelay = stagger ? Math.round(baseDelay * (0.4 + Math.random() * 0.6)) : baseDelay;
   schedule(firstDelay);
 }
@@ -76,7 +76,7 @@ function schedule(delay) {
     timer = setTimeout(() => {
       if (!playing.value) return;
       startClip(chooseClip(), false);
-    }, 240 + Math.round(Math.random() * 200));
+    }, 320 + Math.round(Math.random() * 200));
   }, delay);
 }
 

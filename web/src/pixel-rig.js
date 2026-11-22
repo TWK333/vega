@@ -1,11 +1,27 @@
-// 64×64 Skeletal Pixel Rig & Smooth Keyframe Arc-Interpolation Engine.
-// Each character consists of 7 independent 64×64 skeletal parts:
-//   head (hair/hat/expression), torso, armL, armR, legL, legR, prop.
-// Each animation clip stores 12–20 per-part keyframes { dx, dy, variant, flip, visible }
-// generated with anatomical joint-arc transitions and smooth eased trajectories.
+// 64×64 Multi-Angle ("Pixel 3D" / 2.5D) Skeletal Pixel Rig & Keyframe Arc-Interpolation Engine.
+// Each character consists of 7 independent 64×64 skeletal parts (head, torso, armL, armR, legL, legR, prop)
+// across 3 viewing perspectives: front, side (profile with facing flip), and back (rear).
+// Each animation clip stores 12–20 per-part keyframes { dx, dy, variant, flip, visible } + { angle, facing }
+// generated with anatomical joint-arc transitions, smooth eased trajectories, and 3D turntable angle transitions.
+
+import {
+  buildAngleProps,
+  buildBackArmParts,
+  buildBackHeadParts,
+  buildBackLegParts,
+  buildBackTorsoParts,
+  buildSideArmParts,
+  buildSideHeadParts,
+  buildSideLegParts,
+  buildSideTorsoParts,
+  shadePaletteForAngle,
+} from "./pixel-rig-angles.js";
+
+export { shadePaletteForAngle };
 
 export const PIXEL_GRID_SIZE = 64;
 export const RIG_PARTS = Object.freeze(["head", "torso", "armL", "armR", "legL", "legR", "prop"]);
+export const RIG_ANGLES = Object.freeze(["front", "side", "back"]);
 
 /** Mix a #rrggbb color toward white (amount > 0) or black (amount < 0). */
 export function shade(hex, amount) {
@@ -605,7 +621,7 @@ export function buildLegParts({ legs = "pants", boots = "dark", pants = "N", pan
   return { legL, legR };
 }
 
-/** Build a complete 7-part native 64×64 skeletal rig for a citizen. */
+/** Build a complete 7-part native 64×64 multi-angle (front / side / back) skeletal rig for a citizen. */
 export function buildCharacterRig(spec) {
   const sleeveMap = {
     hoodie: ["A", "d"], labcoat: ["W", "w"], chef: ["W", "w"], apron: ["W", "w"],
@@ -616,16 +632,41 @@ export function buildCharacterRig(spec) {
   const [sleeveL, sleeveR] = spec.sleeves || sleeveMap[spec.coat || "hoodie"] || ["A", "d"];
   const cuff = spec.coat === "fire" || spec.coat === "pilot" ? "Y" : null;
   const hand = spec.coat === "spacesuit" ? "W" : "S";
-  const head = buildHeadParts(spec);
-  const torso = buildTorsoParts(spec.coat, spec.extraTorso);
-  const { armL, armR } = buildArmParts({ sleeveL, sleeveR, hand, cuff });
-  const { legL, legR } = buildLegParts({
+  const armOpts = { sleeveL, sleeveR, hand, cuff };
+  const legOpts = {
     legs: spec.legs || "pants",
     boots: spec.boots || (spec.coat === "spacesuit" ? "space" : "dark"),
     pants: spec.coat === "spacesuit" ? "W" : "N",
     pantsHi: spec.coat === "spacesuit" ? "W" : "n",
-  });
-  return { head, torso, armL, armR, legL, legR, prop: spec.props || {} };
+  };
+
+  // Front-facing 7 parts
+  const head = buildHeadParts(spec);
+  const torso = buildTorsoParts(spec.coat, spec.extraTorso);
+  const { armL, armR } = buildArmParts(armOpts);
+  const { legL, legR } = buildLegParts(legOpts);
+  const angleProps = buildAngleProps(spec.props || {}, spec.sideProps || {}, spec.backProps || {});
+  const prop = angleProps.front;
+
+  // Side-profile & Rear-view 7 parts (guaranteeing full variant parity with front)
+  const sideHead = buildSideHeadParts(spec);
+  const backHead = buildBackHeadParts(spec);
+  for (const key of Object.keys(head)) {
+    if (!sideHead[key]) sideHead[key] = clone(sideHead.normal);
+    if (!backHead[key]) backHead[key] = clone(backHead.normal);
+  }
+  const sideTorso = buildSideTorsoParts(spec.coat, spec.torsoDetail);
+  const backTorso = buildBackTorsoParts(spec.coat, spec.torsoDetail);
+  const { armL: sideArmL, armR: sideArmR } = buildSideArmParts(armOpts);
+  const { armL: backArmL, armR: backArmR } = buildBackArmParts(armOpts);
+  const { legL: sideLegL, legR: sideLegR } = buildSideLegParts(legOpts);
+  const { legL: backLegL, legR: backLegR } = buildBackLegParts(legOpts);
+
+  const front = { head, torso, armL, armR, legL, legR, prop };
+  const side = { head: sideHead, torso: sideTorso, armL: sideArmL, armR: sideArmR, legL: sideLegL, legR: sideLegR, prop: angleProps.side };
+  const back = { head: backHead, torso: backTorso, armL: backArmL, armR: backArmR, legL: backLegL, legR: backLegR, prop: angleProps.back };
+
+  return { head, torso, armL, armR, legL, legR, prop, angles: { front, side, back } };
 }
 
 // ============================================================================
@@ -653,8 +694,12 @@ function normPart(partName, input, defaultVisible = true) {
   };
 }
 
+const VALID_ANGLES = new Set(RIG_ANGLES);
+const EXPLICIT_ANGLE = new WeakSet();
+const EXPLICIT_FACING = new WeakSet();
+
 /**
- * Create one normalized 64×64 skeletal keyframe covering all 7 parts.
+ * Create one normalized 64×64 skeletal keyframe covering all 7 parts + perspective (`angle`, `facing`).
  * Note: `dx`/`dy` in `kf(...)` are accepted in 32-unit convenience coordinates (auto-scaled ×2 to 64×64)
  * unless `extras.native64 === true`, so hand-authored beats & interpolated sub-steps align cleanly!
  */
@@ -664,6 +709,8 @@ export function kf(parts = {}, extras = {}) {
     const p = normPart(name, val);
     return { dx: Math.round(p.dx * s), dy: Math.round(p.dy * s), variant: p.variant, flip: p.flip, visible: p.visible };
   };
+  const angle = VALID_ANGLES.has(extras.angle) ? extras.angle : "front";
+  const facing = extras.facing === "left" ? "left" : "right";
   const frame = {
     head: scalePart("head", parts.head),
     torso: scalePart("torso", parts.torso),
@@ -672,9 +719,13 @@ export function kf(parts = {}, extras = {}) {
     legL: scalePart("legL", parts.legL),
     legR: scalePart("legR", parts.legR),
     prop: scalePart("prop", parts.prop),
+    angle,
+    facing,
     shadow: extras.shadow ?? "keep",
     propZ: extras.propZ ?? "front",
   };
+  if (extras.angle !== undefined) EXPLICIT_ANGLE.add(frame);
+  if (extras.facing !== undefined) EXPLICIT_FACING.add(frame);
   if (extras.fx) {
     frame.fx = extras.native64 ? extras.fx : extras.fx.map(([ox, oy, lines]) => [ox * 2, oy * 2, lines, true]);
   }
@@ -755,20 +806,45 @@ function easeInOut(t) {
   return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 }
 
+/** Interpolate viewing perspective smoothly: 180° turns (front↔back) pass through side; left↔right side flips pass through front! */
+function pickTurnAngle(a, b, t) {
+  const aa = a.angle || "front", ba = b.angle || "front";
+  const af = a.facing || "right", bf = b.facing || "right";
+  if (aa === ba) {
+    if (aa === "side" && af !== bf) {
+      if (t >= 0.30 && t < 0.72) return { angle: "front", facing: "right" };
+      return { angle: "side", facing: t < 0.5 ? af : bf };
+    }
+    return { angle: aa, facing: t < 0.5 ? af : bf };
+  }
+  if ((aa === "front" && ba === "back") || (aa === "back" && ba === "front")) {
+    if (t < 0.30) return { angle: aa, facing: af };
+    if (t < 0.72) return { angle: "side", facing: bf };
+    return { angle: ba, facing: bf };
+  }
+  return { angle: t < 0.5 ? aa : ba, facing: t < 0.5 ? af : bf };
+}
+
 /** Create one interpolated intermediate 64×64 keyframe between keyframe `a` and keyframe `b` at progress `t ∈ (0, 1)`. */
 function tweenKeyframe(a, b, t) {
   const e = easeInOut(t);
+  const turn = pickTurnAngle(a, b, t);
   const out = {
+    angle: turn.angle,
+    facing: turn.facing,
     shadow: t < 0.5 ? a.shadow : b.shadow,
     propZ: t < 0.5 ? a.propZ : b.propZ,
   };
   for (const part of RIG_PARTS) {
     const pa = a[part], pb = b[part];
     const visible = pa.visible && pb.visible ? true : (t < 0.5 ? pa.visible : pb.visible);
+    const variant = !visible
+      ? (t < 0.5 ? pa.variant : pb.variant)
+      : (!pa.visible ? pb.variant : !pb.visible ? pa.variant : pickArcVariant(part, pa.variant, pb.variant, t));
     out[part] = {
       dx: Math.round(pa.dx + (pb.dx - pa.dx) * e),
       dy: Math.round(pa.dy + (pb.dy - pa.dy) * e),
-      variant: visible ? pickArcVariant(part, pa.variant, pb.variant, t) : (t < 0.5 ? pa.variant : pb.variant),
+      variant,
       flip: t < 0.5 ? pa.flip : pb.flip,
       visible,
     };
@@ -786,60 +862,100 @@ function tweenKeyframe(a, b, t) {
     const scaleA = a.afterimage && b.afterimage ? 1 : (t < 0.5 ? 0.7 : 0.85);
     out.afterimage = src.map((g) => ({ dx: Math.round(g.dx * scaleA), dy: Math.round(g.dy * scaleA), tint: g.tint }));
   }
-  // Carry luminous FX with subtle upward drift on transition frames so sparks/flames/steam feel alive!
+  // Carry luminous FX with gentle sinusoidal shimmer across multi-frame transitions!
   const fxSrc = t < 0.5 ? a.fx : b.fx;
   if (fxSrc) {
-    const driftY = t < 0.5 ? -1 : 1;
+    const driftY = Math.round(Math.sin(t * Math.PI * 2) * -1.4);
     out.fx = fxSrc.map(([ox, oy, lines, is2x]) => [ox, oy + driftY, lines, is2x]);
   }
   return out;
 }
 
 /**
- * Expand a story of major keyframe beats into a fluid **12–20 frame** skeletal animation clip!
+ * Expand a rich multi-beat story (6–8 story beats) into a crisp, natural-speed **20–30 frame / 3–6s** clip!
  * Automatically inserts:
  *   - Smooth anatomical joint-arc transitions (`lowOut`/`highOut`, `halfStep`/`halfWide`, `leanL1`/`leanR1`)
- *   - Sub-beat 64×64 integer coordinate interpolation with cubic easing
- *   - Rhythmic pacing: slower anticipation & follow-through beats, crisp fast climax transitions, plus smooth settle-to-loop!
+ *   - Extra transition frames on multi-angle 3D turns (`front ↔ side ↔ back`, `left ↔ right`)
+ *   - Natural pixel-art pacing (crisp ~100–145ms transitions, expressive ~140–270ms story beats — never slow-motion!)
  */
 export function clip(id, name, beatDurations, beats, options = {}) {
   if (beats.length < 4) throw Error(`Clip ${id} needs at least 4 story beats`);
   if (beatDurations.length !== beats.length) throw Error(`Clip ${id} durations length mismatch`);
 
-  // Target 14–18 smooth keyframes (strictly within 12–20 frames)
-  const desired = options.targetFrames ?? (beats.length === 4 ? 14 : 16);
-  const segments = beats.length; // including smooth wrap-around transition from last beat back to beat 0!
-  const totalInBetweens = Math.max(12 - beats.length, Math.min(20 - beats.length, desired - beats.length));
+  // Apply clip-level default angle / facing to any beats that didn't explicitly override them
+  const defaultAngle = VALID_ANGLES.has(options.angle) ? options.angle : null;
+  const defaultFacing = options.facing === "left" || options.facing === "right" ? options.facing : null;
+  const resolvedBeats = (defaultAngle || defaultFacing)
+    ? beats.map((b) => ({
+      ...b,
+      angle: EXPLICIT_ANGLE.has(b) ? b.angle : (defaultAngle ?? b.angle),
+      facing: EXPLICIT_FACING.has(b) ? b.facing : (defaultFacing ?? b.facing),
+    }))
+    : beats;
 
+  // Target 22–30 smooth keyframes naturally proportional to the number of story beats (6→24f, 7→27f, 8→30f)
+  const segments = resolvedBeats.length;
+  const defaultFrames = segments <= 5 ? 22 : segments === 6 ? 24 : segments === 7 ? 27 : 30;
+  const desired = options.targetFrames ?? defaultFrames;
+  const totalInBetweens = Math.max(20 - segments, Math.min(30 - segments, desired - segments));
+
+  // Allocate extra transition frames to segments that rotate camera perspective (`angle`/`facing` turns)
+  const segWeights = [];
+  for (let i = 0; i < segments; i++) {
+    const curr = resolvedBeats[i], next = resolvedBeats[(i + 1) % segments];
+    const hasTurn = curr.angle !== next.angle || curr.facing !== next.facing;
+    segWeights.push(1 + (hasTurn ? 0.45 : 0) + (i === segments - 1 ? 0.1 : 0));
+  }
+  const weightSum = segWeights.reduce((a, b) => a + b, 0);
+  const segTweens = segWeights.map((w) => Math.max(2, Math.floor((w / weightSum) * totalInBetweens)));
+  let diff = totalInBetweens - segTweens.reduce((a, b) => a + b, 0);
+  for (let pass = 0; diff > 0; pass++) {
+    const order = segWeights.map((w, idx) => ({ w, idx })).sort((a, b) => b.w - a.w);
+    const pick = order[pass % order.length].idx;
+    segTweens[pick]++;
+    diff--;
+  }
+  while (diff < 0) {
+    const idx = segTweens.findIndex((c) => c > 2);
+    if (idx < 0) break;
+    segTweens[idx]--;
+    diff++;
+  }
+
+  // Natural crisp pixel-animation timing: anticipation & climax hold slightly longer, action hits stay snappy!
+  const climaxIdx = segments >= 6 ? Math.floor(segments * 0.55) : Math.max(2, segments - 2);
   const keyframes = [];
-  const durations = [];
-  let remaining = totalInBetweens;
+  const rawDurations = [];
 
   for (let i = 0; i < segments; i++) {
-    const curr = beats[i];
-    const next = beats[(i + 1) % beats.length];
-    const segLeft = segments - i;
-    const tweens = Math.round(remaining / segLeft);
-    remaining -= tweens;
+    const curr = resolvedBeats[i];
+    const next = resolvedBeats[(i + 1) % segments];
+    const tweens = segTweens[i];
+    const hasTurn = curr.angle !== next.angle || curr.facing !== next.facing;
 
-    // Preserve dramatic hold pacing on beats (anticipation / peak hold longer, fast hits shorter)
-    const beatMs = Math.max(70, Math.min(240, Math.round(beatDurations[i] * 0.72)));
+    const phaseMul = i === 0 ? 1.24 : i === climaxIdx ? 1.32 : i === segments - 1 ? 1.20 : 1.04;
+    const beatMs = Math.max(130, Math.min(275, Math.round(beatDurations[i] * phaseMul)));
     keyframes.push(curr);
-    durations.push(beatMs);
+    rawDurations.push(beatMs);
 
-    // Insert smooth intermediate arc frames between `curr` and `next`
-    const tweenMs = Math.max(60, Math.min(150, Math.round(beatDurations[i] * 0.45)));
+    // Crisp ~8–10 fps motion frames (never sluggish; slightly steadier on 3D perspective turns)
+    const baseTweenMs = Math.max(95, Math.min(148, Math.round(beatDurations[i] * (hasTurn ? 0.78 : 0.70))));
     for (let step = 1; step <= tweens; step++) {
       const t = step / (tweens + 1);
       keyframes.push(tweenKeyframe(curr, next, t));
-      durations.push(tweenMs);
+      rawDurations.push(baseTweenMs);
     }
   }
 
-  if (keyframes.length < 12 || keyframes.length > 20) {
-    throw Error(`Clip ${id} expanded to ${keyframes.length} frames, expected 12–20`);
+  // Soft bounds into 3.0–6.0s (3050–5850ms) preserving natural speed & per-clip tempo personality!
+  const rawTotal = rawDurations.reduce((a, b) => a + b, 0);
+  const scale = rawTotal < 3060 ? 3120 / rawTotal : rawTotal > 5850 ? 5800 / rawTotal : 1;
+  const durations = rawDurations.map((ms) => Math.max(90, Math.min(300, Math.round(ms * scale))));
+
+  if (keyframes.length < 20 || keyframes.length > 30) {
+    throw Error(`Clip ${id} expanded to ${keyframes.length} frames, expected 20–30`);
   }
-  return { id, name, durations, keyframes };
+  return { id, name, durations, keyframes, beatCount: resolvedBeats.length };
 }
 
 // ============================================================================
@@ -849,31 +965,59 @@ export function clip(id, name, beatDurations, beats, options = {}) {
 const FORWARD_ARMS = new Set(["forward", "forwardLow", "forwardHigh"]);
 
 /**
- * Compose a 64×64 pixel matrix from a character's 7-part skeletal rig and one keyframe.
- * Preserves anatomical Z-order, delicate 1px 64×64 outlining, articulated afterimages, and crisp un-outlined FX.
+ * Compose a 64×64 pixel matrix from a character's 7-part multi-angle skeletal rig and one keyframe.
+ * Supports front, side (with facing left/right flip), and back perspectives with angle-accurate Z-order,
+ * delicate 1px 64×64 outlining, articulated afterimages, and crisp un-outlined FX.
  */
 export function composeKeyframe(rig, keyframe) {
+  const angle = VALID_ANGLES.has(keyframe.angle) ? keyframe.angle : "front";
+  const facingLeft = keyframe.facing === "left";
+  const angleRig = (rig.angles && rig.angles[angle]) || rig;
   const body = blank();
   const draw = (partName) => {
     const t = keyframe[partName];
     if (!t || !t.visible) return;
-    const dict = rig[partName];
+    const dict = angleRig[partName] || rig[partName];
     if (!dict) return;
     const mat = dict[t.variant] || (partName !== "prop" ? dict[DEFAULT_PART_VARIANTS[partName]] : null);
-    if (mat) blitPart(body, mat, t.dx, t.dy, t.flip);
+    if (mat) blitPart(body, mat, t.dx, t.dy, !!t.flip !== facingLeft);
   };
 
-  // Z-order: back-prop → legs → torso → side/up/back arms → head → forward arms → front-prop
-  if (keyframe.propZ === "back") draw("prop");
-  draw("legL");
-  draw("legR");
-  draw("torso");
-  if (!FORWARD_ARMS.has(keyframe.armL.variant)) draw("armL");
-  if (!FORWARD_ARMS.has(keyframe.armR.variant)) draw("armR");
-  draw("head");
-  if (FORWARD_ARMS.has(keyframe.armL.variant)) draw("armL");
-  if (FORWARD_ARMS.has(keyframe.armR.variant)) draw("armR");
-  if (keyframe.propZ !== "back") draw("prop");
+  if (angle === "side") {
+    // Side-profile 2.5D depth Z-order: back-prop → far armL → far legL → near legR → torso → head → near armR → front-prop
+    if (keyframe.propZ === "back") draw("prop");
+    draw("armL");
+    draw("legL");
+    draw("legR");
+    draw("torso");
+    draw("head");
+    draw("armR");
+    if (keyframe.propZ !== "back") draw("prop");
+  } else if (angle === "back") {
+    // Back-view Z-order: back-prop → forward arms (tucked behind chest!) → legs → torso → side/up arms → head (hair over shoulders!) → front-prop
+    if (keyframe.propZ === "back") draw("prop");
+    if (FORWARD_ARMS.has(keyframe.armL.variant)) draw("armL");
+    if (FORWARD_ARMS.has(keyframe.armR.variant)) draw("armR");
+    draw("legL");
+    draw("legR");
+    draw("torso");
+    if (!FORWARD_ARMS.has(keyframe.armL.variant)) draw("armL");
+    if (!FORWARD_ARMS.has(keyframe.armR.variant)) draw("armR");
+    draw("head");
+    if (keyframe.propZ !== "back") draw("prop");
+  } else {
+    // Front-view Z-order: back-prop → legs → torso → side/up/back arms → head → forward arms → front-prop
+    if (keyframe.propZ === "back") draw("prop");
+    draw("legL");
+    draw("legR");
+    draw("torso");
+    if (!FORWARD_ARMS.has(keyframe.armL.variant)) draw("armL");
+    if (!FORWARD_ARMS.has(keyframe.armR.variant)) draw("armR");
+    draw("head");
+    if (FORWARD_ARMS.has(keyframe.armL.variant)) draw("armL");
+    if (FORWARD_ARMS.has(keyframe.armR.variant)) draw("armR");
+    if (keyframe.propZ !== "back") draw("prop");
+  }
 
   let processed = body;
   if (keyframe.petrify) processed = petrifyMatrix(processed);
@@ -888,13 +1032,13 @@ export function composeKeyframe(rig, keyframe) {
     }
   }
 
-  // Tapered 64×64 pixel ground shadow across y=58..59
+  // Tapered 64×64 pixel ground shadow across y=58..59 (slightly sleeker in side profile!)
   const sh = keyframe.shadow ?? "keep";
   const drawShadow = (x0, x1) => {
     for (let x = x0; x < x1; x++) if (composed[58][x] === ".") composed[58][x] = "Z";
     for (let x = x0 + 2; x < x1 - 2; x++) if (composed[59][x] === ".") composed[59][x] = "Z";
   };
-  if (sh === "keep") drawShadow(18, 46);
+  if (sh === "keep") drawShadow(angle === "side" ? 20 : 18, angle === "side" ? 44 : 46);
   else if (sh === "shrink") drawShadow(22, 42);
   else if (sh === "tiny") drawShadow(26, 38);
 
