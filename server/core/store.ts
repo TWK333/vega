@@ -64,6 +64,10 @@ export type Message = {
   stepOutput?: boolean | { step: number; label: string; text?: string; files?: FileRef[] };
   /** Host-recorded scene of an assistant tool batch, never inferred from model or call arguments. */
   toolScene?: string;
+  /** Host-owned link to the delegating assistant message in this session (survives task suspension). */
+  agentPhase?: AgentPhase;
+  phaseReturned?: boolean;
+  cliActivity?: { steps: { action: string; detail: string; exitCode?: number }[]; omitted: number };
   thinking?: string;
   signature?: string;
   opaque?: any[];
@@ -126,7 +130,8 @@ export type Session = {
   agentChild?: boolean;
   createdAt: number;
 };
-export type SceneFrame = { scene?: string; model?: string; resume?: string; agent?: "code_agent" | "browser_agent" };
+export type AgentPhase = { seq: number; name: "code_agent" | "browser_agent" };
+export type SceneFrame = { scene?: string; model?: string; resume?: string; agent?: AgentPhase["name"]; phase?: AgentPhase };
 /** Schema version kept in settings; a database of another version is refused (no migrations). */
 const SCHEMA = 6;
 /**

@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { phaseIndex } from '../web/src/agent-phases.js';
 import vm from "node:vm";
 import { computed, ref } from "vue";
 
@@ -12,7 +13,7 @@ function mount(api: (path: string) => Promise<any>, debug = true, failure = "") 
     source.slice(source.indexOf("const props ="), source.indexOf("</script>")) +
       "\n({ refresh, loadOlder, exportSession, record, messages, hasMore, raw, busy, error })",
     {
-      ref, computed, Blob,
+      ref, computed, Blob, phaseIndex,
       CHAT_PAGE_SIZE: 60,
       mergeMessages: (a: any[], b: any[]) => [...a, ...b],
       nextTick: async () => {},
@@ -76,7 +77,7 @@ test("debug export fetches the entire session, including unloaded and newly adde
   const json = await state.blobs[0].text(), exported = JSON.parse(json);
   assert(Number.isFinite(Date.parse(exported.exportedAt)));
   delete exported.exportedAt;
-  assert.deepEqual(exported, payload, "preserve all messages, tool arguments/results, thinking, folds, context and blob references");
+  assert.deepEqual(exported, { ...payload, agentPhases: [] }, "preserve all messages, tool arguments/results, thinking, folds, context and blob references");
   assert(json.includes('\n  "session": {') && json.endsWith("\n"));
   assert.equal(state.links[0].download, "vega-session-session-fixture.json");
   assert.equal(state.links[0].href, "blob:debug-export");
@@ -85,6 +86,19 @@ test("debug export fetches the entire session, including unloaded and newly adde
   assert.deepEqual(state.revoked, [], "allow the browser to start the download before revoking the URL");
   state.cleanup();
   assert.deepEqual(state.revoked, ["blob:debug-export"]);
+});
+
+test('export links stage details to original messages outside the displayed page', async () => {
+  const payload = fixture();
+  const phase = { seq: 2, name: 'code_agent' };
+  Object.assign(payload.messages[1], { calls: [{ id: 'delegate', name: phase.name, arguments: { task: 'run tests' } }] });
+  Object.assign(payload.messages[2], { role: 'tool', agentPhase: phase, name: phase.name, callId: 'delegate', cliActivity: { steps: [{ action: '命令', detail: 'npm test', exitCode: 0 }], omitted: 0 }, text: JSON.stringify({ executor: 'codex', result: 'tests passed' }) });
+  const state = mount(async path => path.includes('?limit=') ? { ...payload, messages: payload.messages.slice(-60), hasMore: true } : payload);
+  await state.refresh(); await state.exportSession();
+  const data = JSON.parse(await state.blobs[0].text());
+  assert.deepEqual(data.agentPhases[0].messageSeqs, [2, 3]);
+  assert.equal(data.agentPhases[0].status, 'returned');
+  assert.equal(data.messages[2].cliActivity.steps[0].detail, 'npm test');
 });
 
 test("exporting the same session before and after loading older pages returns the same messages", async () => {

@@ -2,17 +2,18 @@ export function groupTurns(messages) {
   const turns = [];
   let current;
   for (const message of messages) {
-    if (message.role === "user" || !current) {
+    if ((message.role === "user" && !message.phaseReturned) || !current) {
       current = { user: null, body: [] };
       turns.push(current);
     }
+    if (message.phaseReturned) continue;
     if (message.role === "user") current.user = message;
     else current.body.push(message);
   }
   return turns.map((turn) => {
     let conclusion = -1;
     for (let i = turn.body.length - 1; i >= 0; i--) {
-      if (turn.body[i].role !== "assistant" || turn.body[i].calls?.length || !(turn.body[i].text?.trim() || turn.body[i].images?.length)) break;
+      if (turn.body[i].agentPhase || turn.body[i].role !== "assistant" || turn.body[i].calls?.length || !(turn.body[i].text?.trim() || turn.body[i].images?.length)) break;
       conclusion = i;
     }
     return {

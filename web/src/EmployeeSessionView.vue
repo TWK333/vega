@@ -1,5 +1,6 @@
 <script setup vapor>
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { phaseIndex } from './agent-phases.js';
 import ConversationTimeline from "./ConversationTimeline.vue";
 import PageHeader from "./PageHeader.vue";
 import Icon from "./Icon.vue";
@@ -140,6 +141,7 @@ async function exportSession() {
     const json = JSON.stringify({
       exportedAt: new Date().toISOString(),
       session: full.session,
+      agentPhases: phaseIndex(full.messages),
       messages: full.messages,
       folds: full.folds,
       fire: full.fire,
@@ -217,7 +219,7 @@ onBeforeUnmount(() => { version++; });
         @click="emit('open', item.id)"
       >{{ item.kind === 'main' ? item.title : item.title }}<span v-if="item.status === 'running' || item.status === 'working'" class="dot info pulse"></span></button>
     </nav>
-    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；如需补充、审批或续做，请返回这位热心市民的工作区。这里不能输入或重放操作。<template v-if="debug">导出该会话截至导出时的全部原始消息、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
+    <p class="callout info session-note"><Icon name="lock" :size="14" /><span>只读执行记录；如需补充、审批或续做，请返回这位热心市民的工作区。这里不能输入或重放操作。<template v-if="debug">导出该会话截至导出时的全部原始消息、阶段索引、工具参数与本地路径，分享前请脱敏；图片仅保留引用。</template></span></p>
     <dl v-if="debug && session" class="debug-metadata"><dt>Session ID</dt><dd>{{ session.id }}</dd><dt>热心市民 / 任务</dt><dd>{{ session.employeeId }} / {{ session.taskId || '沟通会话' }}</dd><dt>会话场景</dt><dd>{{ session.scene || 'lightweight' }}</dd><dt>执行位置</dt><dd>{{ session.localAgent ? (session.clientName || session.clientId) : '服务端' }} · {{ session.cwd }}</dd></dl>
     <p v-if="error" class="banner error" role="alert">{{ error }}</p>
     <p v-if="busy && !messages.length" class="context-note" role="status"><span class="spinner"></span>正在加载记录…</p>

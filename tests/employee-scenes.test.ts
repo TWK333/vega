@@ -10,6 +10,7 @@ import { ProviderError } from "../server/core/provider";
 import type { Task } from "../server/core/employee";
 import { EMPLOYEE_DECISION_RULES } from "../server/core/prompt";
 import { CHROME_TOOL_DEFINITIONS } from "../server/core/public-tools";
+import { phaseIndex } from '../web/src/agent-phases.js';
 import { chromeCall, employeeCall } from "./public-call";
 
 async function fixture() {
@@ -44,7 +45,7 @@ test("employee chat receives low-risk defaults without losing explicit device co
     assert(system.includes(EMPLOYEE_DECISION_RULES));
     assert.match(system, /派单和交接保留用户原话与明确约束/);
     assert.match(system, /历史记忆、旧计划、参考命令与验证方法不是本次必须照搬的硬条件/);
-    assert.match(system, /当前可用的是服务端浏览器，就直接 switch_scene\(scene=computer\) 打开并核实/);
+    assert.match(system, /当前可用的是服务端浏览器，就由轻量主控调用 browser_agent 打开并核实/);
     assert.match(system, /不先问是否接受服务端，也不冒称已在用户电脑打开/);
     assert.match(system, /用户明确要求“在我的电脑上”.*不能用另一端结果代替/);
     assert.match(system, /不得擅自切换任务绑定、迁移文件或凭据/);
@@ -86,7 +87,7 @@ test("CLI coding handoff needs no coding model and returns to the coordinator", 
   } finally { Tools.prototype.runCodingCLI = original; await engine.close(); await store.close(); }
 });
 
-for (const cli of [false, true]) test(`coding hands off directly to browser (${cli ? "CLI" : "model"})`, async () => {
+for (const cli of [false, true]) test(`coding returns to lightweight before browser verification (${cli ? "CLI" : "model"})`, async () => {
   const { store, engine, add, segment } = await fixture();
   const { Tools } = await import("../server/core/tools");
   const original = Tools.prototype.runCodingCLI;
@@ -98,9 +99,21 @@ for (const cli of [false, true]) test(`coding hands off directly to browser (${c
     }
     engine.providers.chat = async (model, _sys, rows, defs) => {
       requests.push(model.selection);
-      if (requests.length === 1) return call("code", "code_agent", { task: "fix hover", browserTask: "verify hover" });
+      if (requests.length === 1) {
+        assert(!Object.hasOwn(defs.find(d => d.name === "code_agent")!.parameters.properties, "browserTask"));
+        return call("old", "code_agent", { task: "fix hover", browserTask: "verify hover" });
+      }
+      if (requests.length === 2) {
+        assert.equal(model.selection, "p/light");
+        assert(rows.some(r => r.callId === "old" && r.error));
+        return call("code", "code_agent", { task: "fix hover" });
+      }
       if (model.selection === "p/code") {
-        assert(defs.some(d => d.name === "browser_agent"));
+        assert(!defs.some(d => ["browser_agent", "switch_scene"].includes(d.name)));
+        return { role: "assistant", text: "edit tested" };
+      }
+      if (model.selection === "p/light" && requests.length === (cli ? 3 : 4)) {
+        assert(rows.some(r => r.text?.includes("edit tested")));
         return call("browser", "browser_agent", { task: "verify hover on updated build" });
       }
       if (model.selection === "p/vision") {
@@ -110,11 +123,11 @@ for (const cli of [false, true]) test(`coding hands off directly to browser (${c
       return requests.at(-2) === "p/vision" ? verified() : completed();
     };
     assert.equal((await segment(await add("fix and verify"))).status, "done");
-    assert.deepEqual(requests, ["p/light", ...cli ? [] : ["p/code"], "p/vision", "p/light", "p/light"]);
+    assert.deepEqual(requests, ["p/light", "p/light", ...cli ? [] : ["p/code"], "p/light", "p/vision", "p/light", "p/light"]);
   } finally { Tools.prototype.runCodingCLI = original; await engine.close(); await store.close(); }
 });
 
-for (const cli of [false, true]) test(`browser sends an authorized fix directly to coding then rechecks (${cli ? 'CLI' : 'model'})`, async () => {
+for (const cli of [false, true]) test(`lightweight coordinates browser findings, authorized fixes and rechecks (${cli ? 'CLI' : 'model'})`, async () => {
   const { store, engine, add, segment } = await fixture();
   const { Tools } = await import('../server/core/tools');
   const original = Tools.prototype.runCodingCLI;
@@ -128,10 +141,16 @@ for (const cli of [false, true]) test(`browser sends an authorized fix directly 
       route.push(model.selection);
       if (route.length === 1) return call('inspect', 'browser_agent', { task: 'verify hover and repair if missing' });
       if (route.length === 2) {
-        assert(defs.some(d => d.name === 'code_agent'));
-        return call('fix', 'code_agent', { task: 'fix missing hover', browserTask: 'recheck hover' });
+        assert(!defs.some(d => d.name === 'code_agent'));
+        return call('forbidden', 'code_agent', { task: 'fix missing hover' });
       }
-      if (model.selection === 'p/code') return call('recheck', 'browser_agent', { task: 'recheck hover' });
+      if (route.length === 3) {
+        assert(rows.some(r => r.callId === 'forbidden' && r.error));
+        return { role: 'assistant', text: 'missing hover confirmed' };
+      }
+      if (route.length === 4) return call('fix', 'code_agent', { task: 'fix missing hover' });
+      if (model.selection === 'p/code') return { role: 'assistant', text: 'fixed' };
+      if (route.length === 6) return call('recheck', 'browser_agent', { task: 'recheck hover' });
       if (model.selection === 'p/vision') {
         assert(rows.some(r => r.role === 'tool' && !r.error && r.text?.includes('recheck hover')));
         return { role: 'assistant', text: 'hover verified' };
@@ -139,7 +158,7 @@ for (const cli of [false, true]) test(`browser sends an authorized fix directly 
       return route.at(-2) === 'p/vision' ? verified() : completed();
     };
     assert.equal((await segment(await add('verify and repair hover'))).status, 'done');
-    assert.deepEqual(route, ['p/light', 'p/vision', cli ? 'cli' : 'p/code', 'p/vision', 'p/light', 'p/light']);
+    assert.deepEqual(route, ['p/light', 'p/vision', 'p/vision', 'p/light', cli ? 'cli' : 'p/code', 'p/light', 'p/vision', 'p/light', 'p/light']);
   } finally { Tools.prototype.runCodingCLI = original; await engine.close(); await store.close(); }
 });
 
@@ -152,8 +171,7 @@ test("browser and code tools return the result to the caller without model-autho
         case 1: return call("browser", "browser_agent", { task: "inspect existing evidence" });
         case 2:
           assert.equal(model.selection, "p/vision");
-          assert(defs.some(d => d.name === "code_agent"));
-          assert(!defs.some(d => ["browser_agent", "switch_scene", "task_complete"].includes(d.name)));
+          assert(!defs.some(d => ["code_agent", "browser_agent", "switch_scene", "task_complete"].includes(d.name)));
           return { role: "assistant", text: "browser finding" };
         case 3:
           assert.equal(model.selection, "p/light");
@@ -169,12 +187,41 @@ test("browser and code tools return the result to the caller without model-autho
         default: return completed();
       }
     };
-    assert.equal((await segment(await add("inspect then verify"))).status, "done");
+    const result = await segment(await add("inspect then verify"));
+    assert.equal(result.status, "done");
+    const rows = await store.messages(result.workSession);
+    const phases = phaseIndex(rows);
+    assert.deepEqual(phases.map(p => [p.name, p.status]), [["browser_agent", "returned"], ["code_agent", "returned"]]);
+    for (const p of phases) {
+      const linked = rows.filter(r => r.agentPhase?.seq === p.seq);
+      assert.deepEqual(p.messageSeqs, [p.seq, ...linked.map(r => r.seq)]);
+      assert(linked.some(r => r.role === 'assistant' && r.text?.endsWith('finding')));
+      assert(linked.at(-1)?.phaseReturned);
+    }
     assert.equal(phase, 6);
   } finally { await engine.close(); await store.close(); }
 });
 
-test("even a coding-profile task starts lightweight, upgrades then switches to computer in the same work session", async () => {
+test('a specialist cannot take over coordinator work when its return model disappears', async () => {
+  const { store, engine, add, segment } = await fixture();
+  try {
+    let requests = 0;
+    engine.providers.chat = async model => {
+      if (++requests === 1) return call('inspect', 'browser_agent', { task: 'inspect only' });
+      assert.equal(requests, 2);
+      assert.equal(model.selection, 'p/vision');
+      const cfg = await engine.config(); cfg.scenes!.lightweight = []; await store.put('config', cfg);
+      return { role: 'assistant', text: 'saved browser finding' };
+    };
+    const result = await segment(await add('inspect then coordinate'));
+    assert.equal(requests, 2);
+    assert.match(result.result, /无法返回轻量主控/);
+    assert.equal((await store.session(result.workSession)).scene, 'lightweight');
+    assert((await store.messages(result.workSession)).some(r => r.agentPhase?.name === 'browser_agent' && r.text === 'saved browser finding'));
+  } finally { await engine.close(); await store.close(); }
+});
+
+test("even a coding-profile task starts lightweight, must return to lightweight before switching from coding to computer", async () => {
   const { store, engine, employee, add, segment } = await fixture();
   const selected: string[] = [];
   let phase = 0;
@@ -196,25 +243,30 @@ test("even a coding-profile task starts lightweight, upgrades then switches to c
       return call("browser", "switch_scene", { scene: "computer", message: "只在浏览器验证已实现的功能" });
     }
     if (phase === 3) {
+      assert.equal(model.selection, "p/code");
+      assert(messages.some(r => r.callId === "browser" && r.error));
+      return call("back", "switch_scene", { scene: "lightweight", message: "编码完成，待浏览器验收" });
+    }
+    if (phase === 4) return call("inspect", "browser_agent", { task: "只在浏览器验证已实现的功能" });
+    if (phase === 5) {
       assert.equal(model.selection, "p/vision");
       assert(definitions.some(tool => tool.name === "bash"));
       assert(!definitions.some(tool => ["write", "edit"].includes(tool.name)));
-      assert(definitions.find(tool => tool.name === "switch_scene")?.parameters.properties.scene.enum.includes("coding"), "main task computer keeps switch_scene to return");
-      return call("back", "switch_scene", { scene: "coding", message: "浏览器已验证，回到编码收尾" });
+      return { role: "assistant", text: "浏览器已验证" };
     }
-    assert.equal(model.selection, "p/code", "returning from computer must not reset an upgraded task to lightweight");
-    return phase === 4 ? verified() : completed();
+    assert.equal(model.selection, "p/light");
+    return phase === 6 ? verified() : completed();
   };
   try {
     let job = await add("实现功能并在浏览器验证", "coding");
     job = await segment(job);
     const work = job.workSession;
-    assert.equal((await store.session(work)).scene, "coding");
+    assert.equal((await store.session(work)).scene, "lightweight");
     assert.notEqual(job.side, "computer", "same-session computer does not flip task.side to computer");
     assert.equal(job.status, "done");
     assert.equal(job.workSession, work);
     assert.equal((await store.sessions()).length, 1, "no isolated computer session");
-    assert.deepEqual(selected, ["p/light", "p/code", "p/vision", "p/code", "p/code"]);
+    assert.deepEqual(selected, ["p/light", "p/code", "p/code", "p/light", "p/vision", "p/light", "p/light"]);
     assert.deepEqual((await employee.state()).runs.map(run => run.scene), ["lightweight"], "one continuous work session run");
 
     let requests = 0;
@@ -453,17 +505,15 @@ test("attached log scenario: lightweight task whose model is shared with compute
   const config = await engine.config(); config.scenes!.lightweight = ["p/vision"]; config.scenes!.computer = ["p/vision"]; await store.put("config", config);
   let driver = 0;
   (engine as any).chromeFor = async () => { driver++; return { execute: async () => ({ connected: true }) }; };
-  const selected: string[] = []; let phase = 0, work = "", chromeDefs = "";
+  const selected: string[] = []; let phase = 0, work = "";
   engine.providers.chat = async (model, system, messages, definitions) => {
     selected.push(model.selection);
     assert.equal(model.selection, "p/vision");
     assert(phase <= 4, "task_complete must succeed from the computer scene instead of looping");
     const names = definitions.map(tool => tool.name);
     assert(!names.includes("task_relay_computer"), "relay is never exposed");
-    const chrome = JSON.stringify(definitions.filter(tool => tool.name.startsWith("chrome_")));
     if (phase++ === 0) {
-      chromeDefs = chrome;
-      assert(chromeNames(definitions).includes("chrome_navigate"), "chrome definitions are listed from the start");
+      assert.deepEqual(chromeNames(definitions), []);
       assert(JSON.stringify(messages).includes("[Chrome 场景]") && !JSON.stringify(messages).includes("[Chrome 规则]") && !system.includes("[Chrome 规则]") && !system.includes("[Chrome 场景]"), "only the short gate rule outside computer, in the dynamic segment");
       assert(sceneEnum(definitions).includes("computer"), "shared model must not hide switch_scene(computer)");
       assert(names.includes("task_progress") && names.includes("task_complete"));
@@ -475,7 +525,7 @@ test("attached log scenario: lightweight task whose model is shared with compute
     if (phase === 2) {
       for (const id of ["early-nav", "early-status"]) {
         const rejected = messages.find(message => message.role === "tool" && message.callId === id)!;
-        assert(rejected.error && /只能在 computer 场景执行.*switch_scene\(scene=computer\)/s.test(rejected.text!), "out-of-scene batch call is rejected with guidance");
+        assert(rejected.error && /当前会话未授权工具：chrome_/.test(rejected.text!), "out-of-scene batch call is rejected with guidance");
       }
       assert.equal(driver, 0, "rejected calls never reach the browser driver");
       return call("browser", "switch_scene", { scene: "computer", message: "在服务端浏览器打开百度并核实" });
@@ -486,7 +536,7 @@ test("attached log scenario: lightweight task whose model is shared with compute
       assert(!outcome.text!.includes("continue without switching"));
       assert(JSON.parse(outcome.text!).scene === "computer");
       assert(messages.some(message => message.role === "user" && message.text?.includes("在服务端浏览器打开百度首页")), "task text stays in history");
-      assert.equal(chrome, chromeDefs, "chrome schemas, descriptions and order unchanged by the scene switch");
+      assert.deepEqual(chromeNames(definitions), CHROME_TOOL_DEFINITIONS.map(tool => tool.name));
       assert(JSON.stringify(messages).includes("[Chrome 规则]") && !JSON.stringify(messages).includes("[Chrome 场景]") && !system.includes("[Chrome 规则]") && !system.includes("[Chrome 场景]"), "full Chrome rules only in computer, in the dynamic segment");
       assert(names.includes("task_progress") && names.includes("task_complete"), "main task progress/complete stay usable");
       assert(!names.includes("write") && !names.includes("edit"), "computer scene keeps its restricted file tools");
@@ -526,7 +576,7 @@ test("lightweight and computer on different models: switch changes model and exp
   engine.providers.chat = async (model, _system, _messages, definitions) => {
     if (phase++ === 0) {
       assert.equal(model.selection, "p/light");
-      assert(chromeNames(definitions).includes("chrome_navigate"), "listed before the switch, gated at execution");
+      assert.deepEqual(chromeNames(definitions), []);
       return call("browser", "switch_scene", { scene: "computer", message: "打开网页核实" });
     }
     assert(phase <= 3, "task_complete must succeed from the computer scene instead of looping");
@@ -551,7 +601,7 @@ test("computer scene without a model: not offered, accurate setup diagnosis inst
   engine.providers.chat = async (model, system, messages, definitions) => {
     assert.equal(model.selection, "p/light");
     assert(!sceneEnum(definitions).includes("computer"));
-    assert(chromeNames(definitions).includes("chrome_navigate"), "definitions stay stable even without a computer model");
+    assert.deepEqual(chromeNames(definitions), []);
     assert.match(JSON.stringify(messages), /\[电脑场景未配置\].*computer 场景未配置模型.*不是浏览器扩展连接问题/s, "unconfigured-computer diagnosis is in the dynamic segment");
     if (phase++ === 0) return call("browser", "switch_scene", { scene: "computer", message: "强行切换" });
     const outcome = messages.findLast(message => message.role === "tool" && message.name === "switch_scene")!;
@@ -579,11 +629,12 @@ test("one model for every scene: lightweight to coding to computer all execute i
       return call("code", "switch_scene", { scene: "coding", message: "改代码" });
     }
     if (phase === 2) {
-      assert(names.includes("write") && chromeNames(definitions).length === CHROME_TOOL_DEFINITIONS.length);
+      assert(names.includes("write") && chromeNames(definitions).length === 0);
       assert.deepEqual(sceneEnum(definitions).sort(), ["coding", "computer", "lightweight"], "switch_scene.enum is frozen for the session");
-      return call("browser", "switch_scene", { scene: "computer", message: "浏览器验证" });
+      return call("back", "switch_scene", { scene: "lightweight", message: "代码完成，待验收" });
     }
-    if (phase === 3) {
+    if (phase === 3) return call("browser", "switch_scene", { scene: "computer", message: "浏览器验证" });
+    if (phase === 4) {
       assert(!names.includes("write") && chromeNames(definitions).length > 0);
       return verified();
     }
@@ -593,6 +644,6 @@ test("one model for every scene: lightweight to coding to computer all execute i
     const job = await segment(await add("改代码并在浏览器验证", "coding"));
     assert.equal(job.status, "done");
     assert.equal((await store.sessions()).length, 1);
-    assert.equal((await store.session(job.workSession)).scene, "coding", "delivery returns to the scene computer was entered from, not the task's first scene");
+    assert.equal((await store.session(job.workSession)).scene, "lightweight", "delivery returns to the lightweight coordinator");
   } finally { await engine.close(); await store.close(); }
 });

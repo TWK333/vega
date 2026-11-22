@@ -189,7 +189,7 @@ test("visible tools and branches follow session, scene and permission like the o
   for (const name of ["task_request_approval", "task_ask_user", "task_wait", "task_relay_computer", "task_complete"]) assert(STANDALONE_TOOLS.has(name));
 });
 
-test("chrome definitions are one stable leading block in every scene for eligible sessions; ineligible sessions get none", async (t) => {
+test("chrome definitions are a leading block only in eligible computer scenes; ineligible sessions get none", async (t) => {
   const store = await Store.open(":memory:");
   t.after(async () => await store.close());
   const engine = { store, vault: new Vault(store), mcpFor: () => ({}), employeeFor: async () => { throw new Error("no employee"); } } as any;
@@ -202,7 +202,8 @@ test("chrome definitions are one stable leading block in every scene for eligibl
   for (const extra of [{}, { employeeId: "e", taskId: "task" }])
     for (const scene of ["lightweight", "coding", "computer"]) {
       const list = await defs(await store.newSession({ scene, ...extra }));
-      assert.equal(JSON.stringify(chrome(list)), expected, `identical chrome schemas/descriptions/order in ${scene} ${JSON.stringify(extra)}`);
+      if (scene !== "computer") { assert.deepEqual(chrome(list), []); continue; }
+      assert.equal(JSON.stringify(chrome(list)), expected);
       assert.equal(JSON.stringify(list.slice(0, CHROME_TOOL_DEFINITIONS.length)), expected, "chrome block leads the list");
     }
   assert.equal(chrome(await defs(await store.newSession({ scene: "computer", readOnly: true }))).length, 0, "read-only sessions stay without chrome");
@@ -219,7 +220,7 @@ test("chrome invocations outside the computer scene are rejected before any brow
   for (const scene of ["lightweight", "coding"]) {
     const outside = await tools(scene);
     for (const { name } of CHROME_TOOL_DEFINITIONS)
-      await assert.rejects(outside.execute({ id: name, name, arguments: {} } as any, {} as any), /只能在 computer 场景执行.*switch_scene\(scene=computer\).*不是浏览器扩展故障/s, `${name} in ${scene}`);
+      await assert.rejects(outside.execute({ id: name, name, arguments: {} } as any, {} as any), /只能在 computer 场景执行.*browser_agent.*不是浏览器扩展故障/s, `${name} in ${scene}`);
     await assert.rejects((outside as any).chrome({ operation: "status" }), /只能在 computer 场景执行/, "internal driver entry is gated too");
   }
   assert.equal(driver, 0, "no browser was started, connected or driven");

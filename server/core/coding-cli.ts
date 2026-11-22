@@ -20,6 +20,27 @@ export function codingCommand(cli: CodingCLI, handoff: string, windows: boolean)
   return cli === "codex" ? `printf '%s' ${quoted} | ${codex}` : `agy ${agy} ${quoted} </dev/null`;
 }
 
+// Display only the CLI's public action records, never raw stdout/stderr or reasoning events.
+export function codexActivity(output: string) {
+  const steps: { action: string; detail: string; exitCode?: number }[] = [];
+  let omitted = 0;
+  function add(action: string, detail: unknown, exitCode?: unknown) {
+    if (typeof detail !== "string" || !detail) return;
+    if (steps.length >= 80) { omitted++; return; }
+    steps.push({ action, detail: detail.length > 500 ? detail.slice(0, 499) + "…" : detail, ...(typeof exitCode === "number" ? { exitCode } : {}) });
+  }
+  for (const line of output.split(/\r?\n/)) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event?.type !== "item.completed") continue;
+    const item = event.item;
+    if (item?.type === "command_execution") add("命令", item.command, item.exit_code);
+    if (item?.type === "file_change" && Array.isArray(item.changes))
+      for (const change of item.changes) add("文件变更", change?.path);
+  }
+  return { steps, omitted };
+}
+
 export function codingResult(cli: CodingCLI, output: string) {
   if (cli === "antigravity") {
     assert(output.trim(), "agy 未返回阶段结果");
